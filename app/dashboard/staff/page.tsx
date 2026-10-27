@@ -6,7 +6,7 @@ import { ROLE_GROUPS } from "@/lib/permissions";
 export const dynamic = "force-dynamic";
 
 export default async function StaffPage() {
-  const context = await requirePageRole(ROLE_GROUPS.STAFF_VIEW);
+  const context = await requirePageRole(ROLE_GROUPS.STAFF_VIEW, "RESERVATIONS");
 
   const memberships = await prisma.hotelMembership.findMany({
     where: { hotelId: context.hotelId },
@@ -17,7 +17,6 @@ export default async function StaffPage() {
           name: true,
           email: true,
           phone: true,
-          department: true,
           isActive: true,
           lastLoginAt: true,
           createdAt: true,
@@ -34,7 +33,7 @@ export default async function StaffPage() {
     email: m.user.email,
     phone: m.user.phone,
     role: m.role,
-    department: m.user.department,
+    department: m.department,
     status: m.status,
     isActive: m.user.isActive && m.status === "ACTIVE",
     lastLoginAt: m.user.lastLoginAt?.toISOString() ?? null,

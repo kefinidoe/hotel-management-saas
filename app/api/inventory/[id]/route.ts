@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 
 export async function GET(
   _req: Request,
@@ -12,6 +12,9 @@ export async function GET(
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "INVENTORY");
+  if (blocked) return blocked;
 
   const item = await prisma.inventoryItem.findUnique({
     where: { id_hotelId: { id, hotelId: tenant.hotelId } },
@@ -73,6 +76,9 @@ export async function PATCH(
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "INVENTORY");
+  if (blocked) return blocked;
 
   const body = await req.json();
 
@@ -148,6 +154,9 @@ export async function DELETE(
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "INVENTORY");
+  if (blocked) return blocked;
 
   const item = await prisma.inventoryItem.findUnique({
     where: { id_hotelId: { id, hotelId: tenant.hotelId } },

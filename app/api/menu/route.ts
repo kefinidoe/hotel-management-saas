@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { computeAvailablePortions } from "@/lib/inventory";
 import { sortMenuCategories } from "@/lib/menu-categories";
 
@@ -11,14 +11,8 @@ export async function GET() {
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.RESTAURANT_POS);
   if (forbidden) return forbidden;
 
-  const { checkModuleEntitlement } = await import("@/lib/entitlements");
-  const moduleCheck = await checkModuleEntitlement(tenant.hotelId, "RESTAURANT_POS");
-  if (!moduleCheck.allowed) {
-    return NextResponse.json(
-      { error: moduleCheck.code || "MODULE_NOT_ENTITLED", message: moduleCheck.reason },
-      { status: 403 }
-    );
-  }
+  const blocked = await requireModule(tenant.hotelId, "RESTAURANT_POS");
+  if (blocked) return blocked;
 
   const categories = await prisma.menuCategory.findMany({
     where: { hotelId: tenant.hotelId },
@@ -61,14 +55,8 @@ export async function POST(req: Request) {
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
   if (forbidden) return forbidden;
 
-  const { checkModuleEntitlement } = await import("@/lib/entitlements");
-  const moduleCheck = await checkModuleEntitlement(tenant.hotelId, "RESTAURANT_POS");
-  if (!moduleCheck.allowed) {
-    return NextResponse.json(
-      { error: moduleCheck.code || "MODULE_NOT_ENTITLED", message: moduleCheck.reason },
-      { status: 403 }
-    );
-  }
+  const blocked = await requireModule(tenant.hotelId, "RESTAURANT_POS");
+  if (blocked) return blocked;
 
   const body = await req.json();
   const name = typeof body.name === "string" ? body.name.trim() : "";

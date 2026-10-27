@@ -1,15 +1,29 @@
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import ExpensesClient from "@/components/expenses/ExpensesClient";
+import { requirePageRole } from "@/lib/page-auth";
+import { ROLE_GROUPS } from "@/lib/permissions";
 
 export const dynamic = "force-dynamic";
 
 export default async function ExpensesPage() {
-  const session = await getServerSession(authOptions);
+  // Expense listing is available to hotel staff, but always in a validated
+  // tenant context before any Prisma query is made.
+  const tenant = await requirePageRole(ROLE_GROUPS.ALL_STAFF, "EXPENSES");
 
   const expenses = await prisma.expense.findMany({
-    include: { requestedBy: true },
+    where: { hotelId: tenant.hotelId },
+    include: {
+      requestedBy: {
+        select: {
+          name: true,
+          memberships: {
+            where: { hotelId: tenant.hotelId },
+            select: { id: true },
+            take: 1,
+          },
+        },
+      },
+    },
     orderBy: { createdAt: "desc" },
     take: 200,
   });
@@ -23,7 +37,9 @@ export default async function ExpensesPage() {
     supplier: e.supplier,
     reference: e.reference,
     status: e.status,
-    requestedByName: e.requestedBy.name,
+    // User is global identity data. Do not disclose its name unless it has a
+    // membership in the active hotel.
+    requestedByName: e.requestedBy.memberships.length > 0 ? e.requestedBy.name : "Former staff",
     createdAt: e.createdAt.toISOString(),
   }));
 
@@ -41,7 +57,7 @@ export default async function ExpensesPage() {
       initialExpenses={initialExpenses}
       approvedThisMonth={approvedThisMonth}
       pendingCount={pendingCount}
-      currentUserRole={(session?.user as any)?.role ?? null}
+      currentUserRole={tenant.role}
     />
   );
 }

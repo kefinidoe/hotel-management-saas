@@ -43,7 +43,7 @@ export default function ExpensesClient({
   const [addOpen, setAddOpen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  const canApprove = currentUserRole === "ADMIN" || currentUserRole === "MANAGER";
+  const canApprove = ["HOTEL_OWNER", "HOTEL_ADMIN", "MANAGER"].includes(currentUserRole ?? "");
 
   async function review(id: string, status: "APPROVED" | "REJECTED") {
     setBusyId(id);

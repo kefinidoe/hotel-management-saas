@@ -1,12 +1,10 @@
 import { prisma } from "@/lib/prisma";
 import {
-  getPlan,
   getBandForRoomCount,
   calculateBandPricing,
   BandPricingCalculation,
   RoomBand,
   SaaSModule,
-  DEFAULT_PLAN_ID,
   SUBSCRIPTION_PLANS,
   SubscriptionStatus,
   BillingInterval,
@@ -27,6 +25,18 @@ export type EvaluatedSubscriptionState =
   | "PAST_DUE"
   | "SUSPENDED"
   | "CANCELLED";
+
+export const PAST_DUE_GRACE_PERIOD_DAYS = 7;
+
+export class SubscriptionStatusUnavailableError extends Error {
+  readonly code = "SUBSCRIPTION_STATUS_UNAVAILABLE";
+  readonly statusCode = 503;
+
+  constructor(message = "Subscription status is temporarily unavailable.") {
+    super(message);
+    this.name = "SubscriptionStatusUnavailableError";
+  }
+}
 
 export interface HotelSubscriptionContext {
   id: string;
@@ -90,148 +100,146 @@ export interface BillableRoomBreakdown {
 }
 
 /**
- * Evaluates the authoritative subscription state for a hotel, factoring in
- * real-time timestamp expirations for trials and billing periods.
+ * Evaluates server-authoritative subscription dates. Past-due accounts retain
+ * operational access only until the configured grace deadline; missing or
+ * malformed state is an infrastructure/data error, never an implicit ACTIVE.
  */
-export function evaluateSubscriptionStatus(sub: {
-  status: SubscriptionStatus;
-  trialEndsAt?: Date | null;
-  currentPeriodEndsAt?: Date | null;
-}): {
+export function evaluateSubscriptionStatus(
+  sub: {
+    status: SubscriptionStatus;
+    trialEndsAt?: Date | null;
+    currentPeriodEndsAt?: Date | null;
+  },
+  now = new Date()
+): {
   effectiveStatus: EvaluatedSubscriptionState;
   isOperational: boolean;
   isOverdue: boolean;
   daysRemaining: number | null;
 } {
-  const now = new Date();
+  const graceMilliseconds = PAST_DUE_GRACE_PERIOD_DAYS * 24 * 60 * 60 * 1000;
+  const validDate = (value: Date | null | undefined) =>
+    value == null || Number.isFinite(new Date(value).getTime());
+  if (!validDate(sub.trialEndsAt) || !validDate(sub.currentPeriodEndsAt)) {
+    throw new SubscriptionStatusUnavailableError("Subscription dates are invalid.");
+  }
 
   if (sub.status === SubscriptionStatus.SUSPENDED) {
-    return {
-      effectiveStatus: "SUSPENDED",
-      isOperational: false,
-      isOverdue: false,
-      daysRemaining: null,
-    };
+    return { effectiveStatus: "SUSPENDED", isOperational: false, isOverdue: false, daysRemaining: null };
   }
-
   if (sub.status === SubscriptionStatus.CANCELLED) {
-    return {
-      effectiveStatus: "CANCELLED",
-      isOperational: false,
-      isOverdue: false,
-      daysRemaining: null,
-    };
+    return { effectiveStatus: "CANCELLED", isOperational: false, isOverdue: false, daysRemaining: null };
   }
-
-  if (sub.status === SubscriptionStatus.PAST_DUE) {
-    return {
-      effectiveStatus: "PAST_DUE",
-      isOperational: false,
-      isOverdue: true,
-      daysRemaining: 0,
-    };
-  }
-
   if (sub.status === SubscriptionStatus.TRIALING) {
-    if (sub.trialEndsAt && now > new Date(sub.trialEndsAt)) {
-      return {
-        effectiveStatus: "TRIAL_EXPIRED",
-        isOperational: false,
-        isOverdue: true,
-        daysRemaining: 0,
-      };
+    if (!sub.trialEndsAt) {
+      throw new SubscriptionStatusUnavailableError("Trial expiry is missing.");
     }
-    const days = sub.trialEndsAt
-      ? Math.max(0, Math.ceil((new Date(sub.trialEndsAt).getTime() - now.getTime()) / (1000 * 60 * 60 * 24)))
-      : null;
+    const end = new Date(sub.trialEndsAt);
+    if (now > end) {
+      return { effectiveStatus: "TRIAL_EXPIRED", isOperational: false, isOverdue: true, daysRemaining: 0 };
+    }
     return {
       effectiveStatus: "TRIALING",
       isOperational: true,
       isOverdue: false,
-      daysRemaining: days,
+      daysRemaining: Math.max(0, Math.ceil((end.getTime() - now.getTime()) / 86_400_000)),
     };
   }
-
+  if (sub.status === SubscriptionStatus.PAST_DUE) {
+    if (!sub.currentPeriodEndsAt) {
+      throw new SubscriptionStatusUnavailableError("Past-due subscription period end is missing.");
+    }
+    const end = new Date(sub.currentPeriodEndsAt);
+    const graceEnd = new Date(end.getTime() + graceMilliseconds);
+    const inGrace = now <= graceEnd;
+    return {
+      effectiveStatus: "PAST_DUE",
+      isOperational: inGrace,
+      isOverdue: true,
+      daysRemaining: inGrace ? Math.max(0, Math.ceil((graceEnd!.getTime() - now.getTime()) / 86_400_000)) : 0,
+    };
+  }
   if (sub.status === SubscriptionStatus.ACTIVE) {
-    if (sub.currentPeriodEndsAt && now > new Date(sub.currentPeriodEndsAt)) {
+    if (!sub.currentPeriodEndsAt) {
+      throw new SubscriptionStatusUnavailableError("Active subscription period end is missing.");
+    }
+    const end = new Date(sub.currentPeriodEndsAt);
+    if (now > end) {
+      const graceEnd = new Date(end.getTime() + graceMilliseconds);
+      const inGrace = now <= graceEnd;
       return {
         effectiveStatus: "PAST_DUE",
-        isOperational: false,
+        isOperational: inGrace,
         isOverdue: true,
-        daysRemaining: 0,
+        daysRemaining: inGrace ? Math.max(0, Math.ceil((graceEnd.getTime() - now.getTime()) / 86_400_000)) : 0,
       };
     }
-    const days = sub.currentPeriodEndsAt
-      ? Math.max(0, Math.ceil((new Date(sub.currentPeriodEndsAt).getTime() - now.getTime()) / (1000 * 60 * 60 * 24)))
-      : null;
     return {
       effectiveStatus: "ACTIVE",
       isOperational: true,
       isOverdue: false,
-      daysRemaining: days,
+      daysRemaining: Math.max(0, Math.ceil((end.getTime() - now.getTime()) / 86_400_000)),
     };
   }
 
-  return {
-    effectiveStatus: "ACTIVE",
-    isOperational: true,
-    isOverdue: false,
-    daysRemaining: null,
-  };
+  throw new SubscriptionStatusUnavailableError("Subscription status is unrecognized.");
 }
 
 /**
- * Loads or bootstraps the subscription for a given hotel.
- * If no subscription record exists yet (e.g. seed data or legacy hotel),
- * an authoritative room-band trial is lazily bootstrapped based on the property's
- * current active room count.
+ * Loads an existing subscription or initializes a missing row only after a
+ * successful subscription lookup, hotel lookup, and room-count query. Upsert
+ * is the sole creation path so concurrent initializers converge on one row.
  */
 export async function getOrBootstrapSubscription(hotelId: string): Promise<HotelSubscriptionContext> {
-  let sub: any = null;
-
-  if (typeof (prisma as any).subscription?.findUnique === "function") {
-    try {
-      sub = await (prisma as any).subscription.findUnique({
-        where: { hotelId },
-      });
-    } catch {
-      sub = null;
-    }
+  const subscriptionModel = (prisma as any).subscription;
+  if (typeof subscriptionModel?.findUnique !== "function") {
+    throw new SubscriptionStatusUnavailableError("Subscription storage is unavailable.");
   }
 
-  if (!sub && typeof (prisma as any).subscription?.create === "function") {
-    let hotel: any = null;
-    let activeRoomsCount = 0;
+  let sub: any;
+  try {
+    sub = await subscriptionModel.findUnique({ where: { hotelId } });
+  } catch {
+    throw new SubscriptionStatusUnavailableError();
+  }
+
+  if (!sub) {
+    let hotel: any;
+    let activeRoomsCount: number;
     try {
-      if (typeof (prisma as any).hotel?.findUnique === "function") {
-        hotel = await (prisma as any).hotel.findUnique({
-          where: { id: hotelId },
-          select: { id: true, status: true, createdAt: true, currency: true },
-        });
+      if (typeof (prisma as any).hotel?.findUnique !== "function") {
+        throw new Error("Hotel storage unavailable");
       }
-      if (typeof (prisma as any).room?.count === "function") {
-        activeRoomsCount = await (prisma as any).room.count({
-          where: { hotelId, isActive: true },
-        });
+      hotel = await (prisma as any).hotel.findUnique({
+        where: { id: hotelId },
+        select: { id: true, status: true, createdAt: true, currency: true },
+      });
+      if (!hotel) throw new SubscriptionStatusUnavailableError("Hotel was not found while initializing its subscription.");
+      if (typeof (prisma as any).room?.count !== "function") {
+        throw new Error("Room count unavailable");
       }
-    } catch {
-      hotel = null;
+      activeRoomsCount = await (prisma as any).room.count({ where: { hotelId, isActive: true } });
+      if (!Number.isInteger(activeRoomsCount) || activeRoomsCount < 0) throw new Error("Invalid room count");
+    } catch (error) {
+      if (error instanceof SubscriptionStatusUnavailableError) throw error;
+      throw new SubscriptionStatusUnavailableError("Hotel subscription could not be initialized safely.");
     }
 
-    // Automatically assign the band matching the hotel's billable room count
+    if (typeof subscriptionModel.upsert !== "function") {
+      throw new SubscriptionStatusUnavailableError("Atomic subscription initialization is unavailable.");
+    }
     const targetBand = getBandForRoomCount(activeRoomsCount);
-    const trialStartsAt = hotel?.createdAt ? new Date(hotel.createdAt) : new Date();
-    const trialEndsAt = new Date(trialStartsAt.getTime() + targetBand.trialDurationDays * 24 * 60 * 60 * 1000);
+    const trialStartsAt = hotel.createdAt ? new Date(hotel.createdAt) : new Date();
+    if (!Number.isFinite(trialStartsAt.getTime())) {
+      throw new SubscriptionStatusUnavailableError("Hotel creation date is invalid.");
+    }
+    const trialEndsAt = new Date(trialStartsAt.getTime() + targetBand.trialDurationDays * 86_400_000);
     const initialStatus =
-      hotel?.status === HotelStatus.SUSPENDED
-        ? SubscriptionStatus.SUSPENDED
-        : hotel?.status === HotelStatus.CANCELLED
-        ? SubscriptionStatus.CANCELLED
-        : SubscriptionStatus.TRIALING;
-
-    const currency = hotel?.currency || "KES";
+      hotel.status === HotelStatus.SUSPENDED ? SubscriptionStatus.SUSPENDED :
+      hotel.status === HotelStatus.CANCELLED ? SubscriptionStatus.CANCELLED :
+      SubscriptionStatus.TRIALING;
+    const currency = hotel.currency || "KES";
     const amount = currency === "USD" ? targetBand.monthlyPriceUSD : targetBand.monthlyPriceKES;
-
     const createPayload = {
       hotelId,
       planId: targetBand.id,
@@ -251,75 +259,51 @@ export async function getOrBootstrapSubscription(hotelId: string): Promise<Hotel
     };
 
     try {
-      if (typeof (prisma as any).subscription?.upsert === "function") {
-        sub = await (prisma as any).subscription.upsert({
-          where: { hotelId },
-          update: {},
-          create: createPayload,
-        });
-      } else {
-        sub = await (prisma as any).subscription.create({
-          data: createPayload,
-        });
-      }
+      sub = await subscriptionModel.upsert({ where: { hotelId }, update: {}, create: createPayload });
     } catch {
+      // A competing upsert may have won. Re-read once; never infer a trial from
+      // an unsuccessful write or an unavailable database.
       try {
-        sub = await (prisma as any).subscription.findUnique({ where: { hotelId } });
+        sub = await subscriptionModel.findUnique({ where: { hotelId } });
       } catch {
-        sub = null;
+        throw new SubscriptionStatusUnavailableError();
       }
+      if (!sub) throw new SubscriptionStatusUnavailableError("Subscription initialization failed.");
     }
   }
 
-  // Resilient fallback virtual trial context if subscription table is not populated in mock test suites
-  if (!sub) {
-    const fallbackBand = SUBSCRIPTION_PLANS[DEFAULT_PLAN_ID];
-    return {
-      id: `virtual-sub-${hotelId}`,
-      hotelId,
-      planId: fallbackBand.id,
-      plan: fallbackBand,
-      storedStatus: SubscriptionStatus.TRIALING,
-      effectiveStatus: "TRIALING",
-      isOperational: true,
-      trialStartsAt: new Date(),
-      trialEndsAt: new Date(Date.now() + fallbackBand.trialDurationDays * 24 * 60 * 60 * 1000),
-      currentPeriodStartsAt: new Date(),
-      currentPeriodEndsAt: new Date(Date.now() + fallbackBand.trialDurationDays * 24 * 60 * 60 * 1000),
-      daysRemaining: fallbackBand.trialDurationDays,
-      isOverdue: false,
-      cancelAtPeriodEnd: false,
-      suspensionReason: null,
-      billingInterval: BillingInterval.MONTHLY,
-      amount: fallbackBand.monthlyPriceKES,
-      currency: "KES",
-    };
+  const knownPlan = typeof sub?.planId === "string" ? SUBSCRIPTION_PLANS[sub.planId.toUpperCase()] : undefined;
+  if (!sub || sub.hotelId !== hotelId || !knownPlan || !sub.id) {
+    throw new SubscriptionStatusUnavailableError("Subscription record is incomplete or invalid.");
   }
-
-  const plan = getPlan(sub.planId);
   const evaluation = evaluateSubscriptionStatus({
     status: sub.status,
     trialEndsAt: sub.trialEndsAt,
     currentPeriodEndsAt: sub.currentPeriodEndsAt,
   });
+  const trialStartsAt = sub.trialStartsAt ? new Date(sub.trialStartsAt) : null;
+  const currentPeriodStartsAt = sub.currentPeriodStartsAt ? new Date(sub.currentPeriodStartsAt) : null;
+  if (!trialStartsAt || !currentPeriodStartsAt || !Number.isFinite(trialStartsAt.getTime()) || !Number.isFinite(currentPeriodStartsAt.getTime())) {
+    throw new SubscriptionStatusUnavailableError("Subscription dates are incomplete.");
+  }
 
   return {
     id: sub.id,
     hotelId: sub.hotelId,
     planId: sub.planId,
-    plan,
+    plan: knownPlan,
     storedStatus: sub.status,
     effectiveStatus: evaluation.effectiveStatus,
     isOperational: evaluation.isOperational,
-    trialStartsAt: sub.trialStartsAt,
-    trialEndsAt: sub.trialEndsAt,
-    currentPeriodStartsAt: sub.currentPeriodStartsAt,
-    currentPeriodEndsAt: sub.currentPeriodEndsAt,
+    trialStartsAt,
+    trialEndsAt: sub.trialEndsAt ? new Date(sub.trialEndsAt) : null,
+    currentPeriodStartsAt,
+    currentPeriodEndsAt: sub.currentPeriodEndsAt ? new Date(sub.currentPeriodEndsAt) : null,
     daysRemaining: evaluation.daysRemaining,
     isOverdue: evaluation.isOverdue,
-    cancelAtPeriodEnd: sub.cancelAtPeriodEnd,
-    suspensionReason: sub.suspensionReason,
-    billingInterval: (sub.billingInterval as BillingInterval) || BillingInterval.MONTHLY,
+    cancelAtPeriodEnd: Boolean(sub.cancelAtPeriodEnd),
+    suspensionReason: sub.suspensionReason ?? null,
+    billingInterval: sub.billingInterval || BillingInterval.MONTHLY,
     amount: typeof sub.amount === "number" ? sub.amount : Number(sub.amount) || 0,
     currency: sub.currency || "KES",
   };
@@ -422,6 +406,23 @@ export async function checkUsageLimit(
   const plan = sub.plan;
   const maxLimit = plan.limits[limitType];
 
+  if (!sub.isOperational) {
+    const code = sub.effectiveStatus === "TRIAL_EXPIRED" ? "TRIAL_EXPIRED" :
+      sub.effectiveStatus === "SUSPENDED" ? "SUBSCRIPTION_SUSPENDED" :
+      sub.effectiveStatus === "CANCELLED" ? "SUBSCRIPTION_CANCELLED" :
+      "SUBSCRIPTION_PAST_DUE";
+    return {
+      allowed: false,
+      limitType,
+      currentCount: 0,
+      maxLimit,
+      planId: plan.id,
+      planName: plan.name,
+      code,
+      reason: `Subscription is not operational (${sub.effectiveStatus}); ${limitType === "maxRooms" ? "room" : "staff"} changes are blocked.`,
+    };
+  }
+
   let currentCount = 0;
   if (limitType === "maxRooms") {
     currentCount = await prisma.room.count({
@@ -464,6 +465,81 @@ export async function checkUsageLimit(
   };
 }
 
+export type LockedUsageLimitResult<T> =
+  | { allowed: true; value: T }
+  | { allowed: false; limit: UsageLimitCheckResult };
+
+export class UsageLimitUnavailableError extends Error {
+  readonly code = "USAGE_LIMIT_UNAVAILABLE";
+  readonly statusCode = 503;
+
+  constructor() {
+    super("Resource quota could not be verified safely.");
+    this.name = "UsageLimitUnavailableError";
+  }
+}
+
+/**
+ * Serializes quota-sensitive room/staff creation and reactivation with a
+ * PostgreSQL transaction-scoped advisory lock. The write callback executes in
+ * the same transaction as the count, so cooperating writers cannot race past
+ * the capacity check.
+ */
+export async function withUsageLimitLock<T>(
+  hotelId: string,
+  limitType: "maxRooms" | "maxStaff",
+  increment: number,
+  operation: (tx: any) => Promise<T>
+): Promise<LockedUsageLimitResult<T>> {
+  const sub = await getOrBootstrapSubscription(hotelId);
+  const plan = sub.plan;
+  const maxLimit = plan.limits[limitType];
+  if (!sub.isOperational) {
+    const code = sub.effectiveStatus === "TRIAL_EXPIRED" ? "TRIAL_EXPIRED" :
+      sub.effectiveStatus === "SUSPENDED" ? "SUBSCRIPTION_SUSPENDED" :
+      sub.effectiveStatus === "CANCELLED" ? "SUBSCRIPTION_CANCELLED" :
+      "SUBSCRIPTION_PAST_DUE";
+    return {
+      allowed: false,
+      limit: { allowed: false, limitType, currentCount: 0, maxLimit, planId: plan.id, planName: plan.name, code,
+        reason: `Subscription is not operational (${sub.effectiveStatus}); ${limitType === "maxRooms" ? "room" : "staff"} changes are blocked.` },
+    };
+  }
+
+  return prisma.$transaction(async (tx: any) => {
+    let currentCount: number;
+    try {
+      const lockKey = `hotel-${hotelId}-${limitType}-quota`;
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
+      currentCount = limitType === "maxRooms"
+        ? await tx.room.count({ where: { hotelId, isActive: true } })
+        : await tx.hotelMembership.count({ where: { hotelId, status: "ACTIVE" } });
+    } catch {
+      throw new UsageLimitUnavailableError();
+    }
+    if (!Number.isInteger(currentCount) || currentCount < 0) throw new UsageLimitUnavailableError();
+    if (Number.isFinite(maxLimit) && currentCount + increment > maxLimit) {
+      const nextBand = limitType === "maxRooms" ? getBandForRoomCount(currentCount + increment) : null;
+      const resourceLabel = limitType === "maxRooms" ? "rooms" : "active staff members";
+      return {
+        allowed: false as const,
+        limit: {
+          allowed: false,
+          limitType,
+          currentCount,
+          maxLimit,
+          planId: plan.id,
+          planName: plan.name,
+          recommendedNextBand: nextBand?.name,
+          code: "PLAN_LIMIT_EXCEEDED",
+          reason: `Plan limit reached: The ${plan.name} allows a maximum of ${maxLimit} ${resourceLabel} (current: ${currentCount}).`,
+        },
+      };
+    }
+    return { allowed: true as const, value: await operation(tx) };
+  }, { isolationLevel: "Serializable", timeout: 15_000 });
+}
+
 /**
  * Detailed billable room breakdown:
  * - Active rooms (billable)
@@ -472,15 +548,10 @@ export async function checkUsageLimit(
  * - Matching band and capacity status
  */
 export async function getBillableRoomBreakdown(hotelId: string): Promise<BillableRoomBreakdown> {
-  let rooms: any[] = [];
-  try {
-    rooms = await (prisma as any).room.findMany({
-      where: { hotelId },
-      select: { id: true, isActive: true, status: true },
-    });
-  } catch {
-    rooms = [];
-  }
+  const rooms: any[] = await (prisma as any).room.findMany({
+    where: { hotelId },
+    select: { id: true, isActive: true, status: true },
+  });
 
   const totalConfiguredRooms = rooms.length;
   let billableActiveRooms = 0;

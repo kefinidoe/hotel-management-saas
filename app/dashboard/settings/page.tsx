@@ -7,7 +7,7 @@ import { redirect } from "next/navigation";
 export const dynamic = "force-dynamic";
 
 export default async function SettingsPage() {
-  const context = await requirePageRole(ROLE_GROUPS.STAFF_ADMIN);
+  const context = await requirePageRole(ROLE_GROUPS.STAFF_ADMIN, "RESERVATIONS");
 
   const hotel = await prisma.hotel.findUnique({
     where: { id: context.hotelId },

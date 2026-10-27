@@ -1,7 +1,7 @@
 import { Prisma, RoomStatus } from "@prisma/client";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 
 const ACTIVE_RESERVATION_STATUSES = ["PENDING", "CONFIRMED", "CHECKED_IN"] as const;
 
@@ -18,6 +18,9 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.ALL_STAFF);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   const hotelId = tenant.hotelId;
 
@@ -56,6 +59,9 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   const hotelId = tenant.hotelId;
 
@@ -118,23 +124,8 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
     newStatus = body.status as RoomStatus;
   }
 
-  // Quota enforcement: Reactivating an inactive room increases active room count
-  if (body.isActive === true && existing.isActive === false) {
-    const { checkUsageLimit } = await import("@/lib/entitlements");
-    const roomLimit = await checkUsageLimit(hotelId, "maxRooms", 1);
-    if (!roomLimit.allowed) {
-      return NextResponse.json(
-        {
-          error: roomLimit.code || "PLAN_LIMIT_EXCEEDED",
-          message: roomLimit.reason,
-        },
-        { status: 403 }
-      );
-    }
-  }
-
   try {
-    const room = await prisma.room.update({
+    const updateRoom = (db: any) => db.room.update({
       where: { id_hotelId: { id, hotelId } },
       data: {
         number: roomNumber,
@@ -159,11 +150,28 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
         },
       },
     });
+    let room: any;
+    if (body.isActive === true && existing.isActive === false) {
+      const { withUsageLimitLock } = await import("@/lib/entitlements");
+      const result = await withUsageLimitLock(hotelId, "maxRooms", 1, updateRoom);
+      if (!result.allowed) {
+        return NextResponse.json(
+          { error: result.limit.code || "PLAN_LIMIT_EXCEEDED", message: result.limit.reason },
+          { status: result.limit.code === "SUBSCRIPTION_STATUS_UNAVAILABLE" || result.limit.code === "USAGE_LIMIT_UNAVAILABLE" ? 503 : 403 }
+        );
+      }
+      room = result.value;
+    } else {
+      room = await updateRoom(prisma);
+    }
     return NextResponse.json({
       ...room,
       roomType: { ...room.roomType, baseRate: Number(room.roomType.baseRate) },
     });
   } catch (error: any) {
+    if (error?.code === "SUBSCRIPTION_STATUS_UNAVAILABLE" || error?.code === "USAGE_LIMIT_UNAVAILABLE") {
+      return NextResponse.json({ error: error.code, message: error.message }, { status: 503 });
+    }
     if (error?.code === "P2002") {
       return NextResponse.json(
         { error: "A room with that number already exists in this hotel." },
@@ -181,6 +189,9 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   const hotelId = tenant.hotelId;
 

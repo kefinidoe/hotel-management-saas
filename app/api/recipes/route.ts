@@ -1,57 +1,97 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { computeAvailablePortions } from "@/lib/inventory";
 
-export async function GET() {
-  const auth = await requireAuth();
-  if (auth instanceof NextResponse) return auth;
+type IngredientInput = { inventoryItemId: string; quantity: number };
 
-  const forbidden = requireRole(auth, ROLE_GROUPS.MANAGEMENT);
+function parseIngredients(value: unknown): IngredientInput[] | null {
+  if (!Array.isArray(value)) return null;
+  const ingredients: IngredientInput[] = [];
+  for (const raw of value) {
+    const candidate = raw as { inventoryItemId?: unknown; quantity?: unknown } | null;
+    const inventoryItemId =
+      typeof candidate?.inventoryItemId === "string" ? candidate.inventoryItemId.trim() : "";
+    const quantity = Number(candidate?.quantity);
+    if (!inventoryItemId || !Number.isFinite(quantity) || quantity <= 0) return null;
+    ingredients.push({ inventoryItemId, quantity });
+  }
+  return ingredients;
+}
+
+async function allInventoryItemsBelongToHotel(hotelId: string, ingredients: IngredientInput[]) {
+  const ids = [...new Set(ingredients.map((ingredient) => ingredient.inventoryItemId))];
+  if (ids.length === 0) return true;
+  const items = await prisma.inventoryItem.findMany({
+    where: { hotelId, id: { in: ids } },
+    select: { id: true },
+  });
+  return new Set(items.map((item) => item.id)).size === ids.length;
+}
+
+export async function GET() {
+  const tenant = await getTenantFromRoute();
+  if (tenant instanceof NextResponse) return tenant;
+
+  const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
   if (forbidden) return forbidden;
 
+  const blocked = await requireModule(tenant.hotelId, "RESTAURANT_POS");
+  if (blocked) return blocked;
+
+  const hotelId = tenant.hotelId;
   const recipes = await prisma.recipe.findMany({
+    // Hide malformed legacy recipes if any linked ingredient is outside this hotel.
+    where: {
+      menuItem: { is: { hotelId } },
+      ingredients: { every: { inventoryItem: { is: { hotelId } } } },
+    },
     include: {
       menuItem: { include: { category: true } },
-      ingredients: { include: { inventoryItem: true } },
+      ingredients: {
+        where: { inventoryItem: { is: { hotelId } } },
+        include: { inventoryItem: true },
+      },
     },
     orderBy: { createdAt: "asc" },
   });
 
-  const result = recipes.map((r) => {
-    const ingredients = r.ingredients.map((ri) => ({
-      inventoryItemId: ri.inventoryItemId,
-      name: ri.inventoryItem.name,
-      unit: ri.inventoryItem.unit,
-      quantityPerBatch: Number(ri.quantity),
-      currentStock: Number(ri.inventoryItem.currentStock),
-      unitCost: Number(ri.inventoryItem.costPerUnit),
+  const result = recipes.map((recipe) => {
+    const ingredients = recipe.ingredients.map((ingredient) => ({
+      inventoryItemId: ingredient.inventoryItemId,
+      name: ingredient.inventoryItem.name,
+      unit: ingredient.inventoryItem.unit,
+      quantityPerBatch: Number(ingredient.quantity),
+      currentStock: Number(ingredient.inventoryItem.currentStock),
+      unitCost: Number(ingredient.inventoryItem.costPerUnit),
     }));
 
-    const { portions, limitingItem } = computeAvailablePortions(ingredients, r.portions);
-
-    const costPerBatch = ingredients.reduce((s, i) => s + i.quantityPerBatch * i.unitCost, 0);
-    const costPerPortion = costPerBatch / r.portions;
-    const sellingPrice = Number(r.menuItem.price);
+    const { portions, limitingItem } = computeAvailablePortions(ingredients, recipe.portions);
+    const costPerBatch = ingredients.reduce(
+      (sum, ingredient) => sum + ingredient.quantityPerBatch * ingredient.unitCost,
+      0
+    );
+    const costPerPortion = costPerBatch / recipe.portions;
+    const sellingPrice = Number(recipe.menuItem.price);
     const profit = sellingPrice - costPerPortion;
 
     return {
-      id: r.id,
-      menuItemId: r.menuItemId,
-      name: r.menuItem.name,
-      category: r.menuItem.category.name,
+      id: recipe.id,
+      menuItemId: recipe.menuItemId,
+      name: recipe.menuItem.name,
+      category: recipe.menuItem.category.name,
       sellingPrice,
-      portionsPerBatch: r.portions,
+      portionsPerBatch: recipe.portions,
       costPerPortion: Math.round(costPerPortion),
       profit: Math.round(profit),
       profitMargin: sellingPrice > 0 ? Math.round((profit / sellingPrice) * 100) : 0,
       availablePortions: portions,
       limitingItem,
-      ingredients: ingredients.map((i) => ({
-        inventoryItemId: i.inventoryItemId,
-        name: i.name,
-        unit: i.unit,
-        quantityPerBatch: i.quantityPerBatch,
+      ingredients: ingredients.map((ingredient) => ({
+        inventoryItemId: ingredient.inventoryItemId,
+        name: ingredient.name,
+        unit: ingredient.unit,
+        quantityPerBatch: ingredient.quantityPerBatch,
       })),
     };
   });
@@ -60,34 +100,32 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const auth = await requireAuth();
-  if (auth instanceof NextResponse) return auth;
+  const tenant = await getTenantFromRoute();
+  if (tenant instanceof NextResponse) return tenant;
 
-  const forbidden = requireRole(auth, ROLE_GROUPS.MANAGEMENT);
+  const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
   if (forbidden) return forbidden;
 
-  const body = await req.json();
-  const { menuItemId, portions, ingredients } = body as {
-    menuItemId: string;
-    portions: number;
-    ingredients: { inventoryItemId: string; quantity: number }[];
-  };
+  const blocked = await requireModule(tenant.hotelId, "RESTAURANT_POS");
+  if (blocked) return blocked;
 
+  let body: any;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
+  }
+
+  const menuItemId = typeof body?.menuItemId === "string" ? body.menuItemId.trim() : "";
+  const ingredients = parseIngredients(body?.ingredients);
   if (!menuItemId || !ingredients || ingredients.length === 0) {
     return NextResponse.json(
-      { error: "A menu item, portion count, and at least one ingredient are required." },
+      { error: "A menu item, portion count, and at least one valid ingredient are required." },
       { status: 400 }
     );
   }
 
-  // `RecipeIngredient.quantity` is Decimal(10,2) with no CHECK constraint, and
-  // `computeAvailablePortions()` divides each ingredient by `portions`. A zero,
-  // negative or non-numeric value therefore poisons every availability
-  // calculation that reads this recipe: the dish shows as completely
-  // unavailable and the broken line gets named to staff as the bottleneck.
-  // `lib/inventory.ts` defends against this at read time, but rejecting it here
-  // keeps the bad data out of the database in the first place.
-  const portionCount = Number(portions);
+  const portionCount = Number(body?.portions);
   if (!Number.isInteger(portionCount) || portionCount < 1) {
     return NextResponse.json(
       { error: "The portion count must be a whole number of at least 1." },
@@ -95,25 +133,25 @@ export async function POST(req: Request) {
     );
   }
 
-  for (const ingredient of ingredients) {
-    const quantity = Number(ingredient?.quantity);
-    if (!Number.isFinite(quantity) || quantity <= 0) {
-      return NextResponse.json(
-        { error: "Every ingredient needs a quantity greater than zero." },
-        { status: 400 }
-      );
-    }
+  const menuItem = await prisma.menuItem.findFirst({
+    where: { id: menuItemId, hotelId: tenant.hotelId },
+    select: { id: true },
+  });
+  if (!menuItem) return NextResponse.json({ error: "Menu item not found." }, { status: 404 });
+
+  if (!(await allInventoryItemsBelongToHotel(tenant.hotelId, ingredients))) {
+    return NextResponse.json({ error: "One or more inventory items were not found in this hotel." }, { status: 404 });
   }
 
   try {
     const recipe = await prisma.recipe.create({
       data: {
-        menuItemId,
+        menuItemId: menuItem.id,
         portions: portionCount,
         ingredients: {
-          create: ingredients.map((i) => ({
-            inventoryItemId: i.inventoryItemId,
-            quantity: i.quantity,
+          create: ingredients.map((ingredient) => ({
+            inventoryItemId: ingredient.inventoryItemId,
+            quantity: ingredient.quantity,
           })),
         },
       },

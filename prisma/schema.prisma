@@ -134,9 +134,10 @@ model HotelMembership {
   user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   hotelId   String
   hotel     Hotel            @relation(fields: [hotelId], references: [id], onDelete: Cascade)
-  role      HotelRole
-  status    MembershipStatus @default(ACTIVE)
-  createdAt DateTime         @default(now())
+  role       HotelRole
+  department String?
+  status     MembershipStatus @default(ACTIVE)
+  createdAt  DateTime         @default(now())
   updatedAt DateTime         @updatedAt
 
   @@unique([userId, hotelId])
@@ -155,7 +156,7 @@ model User {
   phone        String?
   passwordHash String
   platformRole PlatformRole? // NULL for standard hotel staff; non-null for SaaS platform operators
-  department   String?
+  department   String?       // Legacy profile field; hotel staff departments live on HotelMembership.
   isActive     Boolean       @default(true)
   lastLoginAt  DateTime?
   createdAt    DateTime      @default(now())

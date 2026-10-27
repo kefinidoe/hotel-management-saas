@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { folioTotals, roundMoney, stayNights } from "@/lib/billing";
 import { prisma } from "@/lib/prisma";
 import { formatDisplayDate } from "@/lib/dates";
@@ -21,6 +21,9 @@ export async function POST(
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.GUEST_STAYS);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   const hotelId = tenant.hotelId;
 

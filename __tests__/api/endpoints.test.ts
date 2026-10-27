@@ -1,429 +1,282 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import {
-  mockGuest,
-  mockReservation,
-  mockRoom,
-  mockFolio,
-  mockPayment,
-} from '../fixtures/mock-data';
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { NextResponse } from "next/server";
 
-/**
- * API Endpoint Tests for Hotel Management System
- * Testing all critical API routes
- */
+const mocks = vi.hoisted(() => ({
+  getTenantFromRoute: vi.fn(),
+  requireRole: vi.fn(),
+  findGuests: vi.fn(),
+  findGuest: vi.fn(),
+  updateGuest: vi.fn(),
+  findActiveStay: vi.fn(),
+}));
 
-describe('HMS API Routes', () => {
-  describe('Guests API', () => {
-    it('should fetch all guests', () => {
-      const guests = [mockGuest];
-      expect(guests).toHaveLength(1);
-      expect(guests[0].fullName).toBe('John Doe');
+vi.mock("next/server", () => {
+  class MockNextResponse extends Response {
+    static json(body: unknown, init?: ResponseInit) {
+      return new MockNextResponse(JSON.stringify(body), {
+        ...init,
+        headers: { "Content-Type": "application/json", ...init?.headers },
+      });
+    }
+  }
+  return { NextResponse: MockNextResponse };
+});
+
+vi.mock("@/lib/prisma", () => ({
+  prisma: {
+    guest: {
+      findMany: mocks.findGuests,
+      findUnique: mocks.findGuest,
+      update: mocks.updateGuest,
+    },
+    reservation: { findFirst: mocks.findActiveStay },
+  },
+}));
+
+vi.mock("@/lib/authz", () => ({
+  getTenantFromRoute: mocks.getTenantFromRoute,
+  requireModule: async () => null,
+  requireRole: mocks.requireRole,
+  ROLE_GROUPS: { GUEST_STAYS: ["HOTEL_OWNER", "RECEPTIONIST"] },
+}));
+
+import { GET as listGuests } from "@/app/api/guests/route";
+import { GET as getGuest, PATCH as updateGuest } from "@/app/api/guests/[id]/route";
+
+const tenant = { hotelId: "hotel-a", userId: "user-a", role: "RECEPTIONIST" };
+
+function guestRecord(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "guest-a1",
+    fullName: "Amina Njeri",
+    phone: "+254700000001",
+    email: "amina@example.test",
+    idNumber: null,
+    nationality: "Kenyan",
+    vehicleRegistration: null,
+    notes: null,
+    isArchived: false,
+    reservations: [],
+    folios: [],
+    ...overrides,
+  };
+}
+
+async function json(response: Response) {
+  return response.json();
+}
+
+describe("guest API route handlers", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getTenantFromRoute.mockResolvedValue(tenant);
+    mocks.requireRole.mockReturnValue(null);
+    mocks.findGuests.mockResolvedValue([]);
+    mocks.findGuest.mockResolvedValue(null);
+    mocks.updateGuest.mockResolvedValue({ id: "guest-a1", isArchived: true });
+    mocks.findActiveStay.mockResolvedValue(null);
+  });
+
+  describe("GET /api/guests", () => {
+    it("scopes the guest list and latest reservation to the active hotel", async () => {
+      const checkInDate = new Date("2026-10-24T12:00:00.000Z");
+      mocks.findGuests.mockResolvedValue([
+        guestRecord({
+          reservations: [
+            {
+              status: "CHECKED_IN",
+              checkInDate,
+              checkOutDate: new Date("2026-10-27T10:00:00.000Z"),
+              rooms: [{ room: { number: "12" } }],
+            },
+          ],
+        }),
+      ]);
+
+      const response = await listGuests(new Request("https://hotel.test/api/guests"));
+
+      expect(response.status).toBe(200);
+      expect(await json(response)).toEqual([
+        {
+          id: "guest-a1",
+          fullName: "Amina Njeri",
+          phone: "+254700000001",
+          email: "amina@example.test",
+          isArchived: false,
+          currentRoom: "12",
+          lastStatus: "CHECKED_IN",
+          checkInDate: checkInDate.toISOString(),
+          checkOutDate: "2026-10-27T10:00:00.000Z",
+        },
+      ]);
+      expect(mocks.findGuests).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { hotelId: "hotel-a", isArchived: false },
+          take: 100,
+          include: {
+            reservations: expect.objectContaining({
+              where: { hotelId: "hotel-a" },
+              take: 1,
+            }),
+          },
+        })
+      );
     });
 
-    it('should create a new guest', () => {
-      const newGuest = {
-        ...mockGuest,
-        id: 'guest-new',
-      };
+    it("applies trimmed search across name, phone, and email", async () => {
+      await listGuests(new Request("https://hotel.test/api/guests?q=%20Amina%20"));
 
-      expect(newGuest.id).toBe('guest-new');
-      expect(newGuest.email).toBe('john@example.com');
+      expect(mocks.findGuests).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            hotelId: "hotel-a",
+            isArchived: false,
+            OR: [
+              { fullName: { contains: "Amina", mode: "insensitive" } },
+              { phone: { contains: "Amina", mode: "insensitive" } },
+              { email: { contains: "Amina", mode: "insensitive" } },
+            ],
+          },
+        })
+      );
     });
 
-    it('should update guest information', () => {
-      const updated = {
-        ...mockGuest,
-        fullName: 'John Smith',
-      };
-
-      expect(updated.fullName).toBe('John Smith');
-      expect(updated.id).toBe(mockGuest.id);
+    it("includes archived guests only when explicitly requested", async () => {
+      await listGuests(new Request("https://hotel.test/api/guests?includeArchived=true"));
+      expect(mocks.findGuests).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { hotelId: "hotel-a", isArchived: undefined } })
+      );
     });
 
-    it('should delete a guest', () => {
-      const guestId = mockGuest.id;
-      expect(guestId).toBeTruthy();
+    it("rejects unauthenticated requests before querying guest data", async () => {
+      mocks.getTenantFromRoute.mockResolvedValue(
+        NextResponse.json({ error: "UNAUTHENTICATED" }, { status: 401 })
+      );
+
+      const response = await listGuests(new Request("https://hotel.test/api/guests"));
+
+      expect(response.status).toBe(401);
+      expect(mocks.findGuests).not.toHaveBeenCalled();
     });
 
-    it('should get guest by ID', () => {
-      const guest = mockGuest;
-      expect(guest.id).toBe('guest-1');
-      expect(guest.email).toBeTruthy();
+    it("rejects staff without the guest-stays permission", async () => {
+      mocks.requireRole.mockReturnValue(new Response("Forbidden", { status: 403 }));
+
+      const response = await listGuests(new Request("https://hotel.test/api/guests"));
+
+      expect(response.status).toBe(403);
+      expect(mocks.findGuests).not.toHaveBeenCalled();
     });
   });
 
-  describe('Reservations API', () => {
-    it('should fetch all reservations', () => {
-      const reservations = [mockReservation];
-      expect(reservations.length).toBeGreaterThan(0);
-      expect(reservations[0].code).toBe('RES001');
+  describe("GET /api/guests/:id", () => {
+    it("uses the compound guest and hotel key and returns completed-payment totals", async () => {
+      mocks.findGuest.mockResolvedValue(
+        guestRecord({
+          reservations: [
+            {
+              id: "reservation-a1",
+              code: "R-1001",
+              status: "CHECKED_OUT",
+              checkInDate: new Date("2026-10-20T12:00:00.000Z"),
+              checkOutDate: new Date("2026-10-22T10:00:00.000Z"),
+              rooms: [{ room: { number: "12" }, rate: "5000" }],
+            },
+          ],
+          folios: [
+            {
+              id: "folio-a1",
+              isClosed: true,
+              items: [{ total: "10000" }, { total: "500" }],
+              payments: [{ amount: "6000" }],
+            },
+          ],
+        })
+      );
+
+      const response = await getGuest(new Request("https://hotel.test/api/guests/guest-a1"), {
+        params: Promise.resolve({ id: "guest-a1" }),
+      });
+
+      expect(mocks.findGuest).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id_hotelId: { id: "guest-a1", hotelId: "hotel-a" } } })
+      );
+      expect(await json(response)).toMatchObject({
+        id: "guest-a1",
+        reservations: [{ rooms: [{ roomNumber: "12", rate: 5000 }] }],
+        folios: [{ id: "folio-a1", total: 10500, paid: 6000, balance: 4500 }],
+      });
     });
 
-    it('should create a new reservation', () => {
-      const newRes = {
-        ...mockReservation,
-        id: 'res-2',
-        code: 'RES002',
-      };
+    it("returns not found for a guest outside the active hotel", async () => {
+      const response = await getGuest(new Request("https://hotel.test/api/guests/foreign"), {
+        params: Promise.resolve({ id: "guest-from-hotel-b" }),
+      });
 
-      expect(newRes.code).not.toBe(mockReservation.code);
-      expect(newRes.status).toBe('CONFIRMED');
-    });
-
-    it('should get reservation by ID', () => {
-      const res = mockReservation;
-      expect(res.id).toBe('res-1');
-      expect(res.guestId).toBeTruthy();
-    });
-
-    it('should update reservation', () => {
-      const updated = {
-        ...mockReservation,
-        numberOfGuests: 3,
-      };
-
-      expect(updated.numberOfGuests).toBe(3);
-      expect(updated.status).toBe(mockReservation.status);
-    });
-
-    it('should get reservations by date range', () => {
-      const startDate = new Date('2024-01-01');
-      const endDate = new Date('2024-01-31');
-      const reservation = mockReservation;
-
-      const isInRange =
-        reservation.checkInDate >= startDate &&
-        reservation.checkInDate <= endDate;
-
-      expect(isInRange).toBe(true);
-    });
-
-    it('should get reservations by status', () => {
-      const reservations = [mockReservation];
-      const status = 'CONFIRMED';
-
-      const filtered = reservations.filter((r) => r.status === status);
-      expect(filtered.length).toBeGreaterThan(0);
+      expect(response.status).toBe(404);
+      expect(await json(response)).toEqual({ error: "Guest not found." });
+      expect(mocks.findGuest).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id_hotelId: { id: "guest-from-hotel-b", hotelId: "hotel-a" } } })
+      );
     });
   });
 
-  describe('Rooms API', () => {
-    it('should fetch all rooms', () => {
-      const rooms = [mockRoom];
-      expect(rooms.length).toBeGreaterThan(0);
+  describe("PATCH /api/guests/:id", () => {
+    it("blocks archiving a guest with an active stay", async () => {
+      mocks.findActiveStay.mockResolvedValue({ id: "active-reservation" });
+
+      const response = await updateGuest(
+        new Request("https://hotel.test/api/guests/guest-a1", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isArchived: true }),
+        }),
+        { params: Promise.resolve({ id: "guest-a1" }) }
+      );
+
+      expect(response.status).toBe(400);
+      expect(await json(response)).toEqual({
+        error: "This guest is currently checked in and can't be archived.",
+      });
+      expect(mocks.findActiveStay).toHaveBeenCalledWith({
+        where: { hotelId: "hotel-a", guestId: "guest-a1", status: "CHECKED_IN" },
+      });
+      expect(mocks.updateGuest).not.toHaveBeenCalled();
     });
 
-    it('should get room by ID', () => {
-      const room = mockRoom;
-      expect(room.id).toBe('room-1');
-      expect(room.roomType).toBeTruthy();
+    it("archives only the guest record in the active hotel", async () => {
+      mocks.findGuest.mockResolvedValue(guestRecord());
+
+      const response = await updateGuest(
+        new Request("https://hotel.test/api/guests/guest-a1", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isArchived: true }),
+        }),
+        { params: Promise.resolve({ id: "guest-a1" }) }
+      );
+
+      expect(response.status).toBe(200);
+      expect(await json(response)).toEqual({ id: "guest-a1", isArchived: true });
+      expect(mocks.updateGuest).toHaveBeenCalledWith({
+        where: { id_hotelId: { id: "guest-a1", hotelId: "hotel-a" } },
+        data: { isArchived: true },
+      });
     });
 
-    it('should get available rooms', () => {
-      const rooms = [mockRoom];
-      const available = rooms.filter((r) => r.status === 'AVAILABLE');
+    it("rejects a non-boolean archive value", async () => {
+      const response = await updateGuest(
+        new Request("https://hotel.test/api/guests/guest-a1", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isArchived: "yes" }),
+        }),
+        { params: Promise.resolve({ id: "guest-a1" }) }
+      );
 
-      expect(available.length).toBeGreaterThan(0);
-    });
-
-    it('should update room status', () => {
-      const updated = {
-        ...mockRoom,
-        status: 'OCCUPIED',
-      };
-
-      expect(updated.status).toBe('OCCUPIED');
-      expect(updated.status).not.toBe(mockRoom.status);
-    });
-
-    it('should get rooms by floor', () => {
-      const rooms = [mockRoom];
-      const floor = 1;
-
-      const filtered = rooms.filter((r) => r.floor === floor);
-      expect(filtered.length).toBeGreaterThan(0);
-    });
-
-    it('should get rooms by type', () => {
-      const rooms = [mockRoom];
-      const typeId = 'rt-1';
-
-      const filtered = rooms.filter((r) => r.roomTypeId === typeId);
-      expect(filtered.length).toBeGreaterThan(0);
-    });
-  });
-
-  describe('Folios API', () => {
-    it('should create folio for reservation', () => {
-      const newFolioData = {
-        id: 'folio-new',
-        reservationId: 'res-1',
-        guestId: 'guest-1',
-        status: 'OPEN',
-      };
-
-      expect(newFolioData.reservationId).toBeTruthy();
-      expect(newFolioData.status).toBe('OPEN');
-    });
-
-    it('should get folio by ID', () => {
-      const folio = mockFolio;
-      expect(folio.id).toBe('folio-1');
-    });
-
-    it('should add charges to folio', () => {
-      const folio = {
-        ...mockFolio,
-        lineItems: [
-          { id: 'item-1', description: 'Room Charge', amount: 150 },
-          { id: 'item-2', description: 'Restaurant', amount: 50 },
-        ],
-      };
-
-      const total = folio.lineItems.reduce((sum, item) => sum + item.amount, 0);
-      expect(total).toBe(200);
-    });
-
-    it('should calculate folio balance', () => {
-      const folio = {
-        ...mockFolio,
-        total: 500,
-        paidAmount: 200,
-      };
-
-      const balance = folio.total - folio.paidAmount;
-      expect(balance).toBe(300);
-    });
-
-    it('should close folio', () => {
-      const closed = {
-        ...mockFolio,
-        isClosed: true,
-      };
-
-      expect(closed.isClosed).toBe(true);
-    });
-  });
-
-  describe('Payments API', () => {
-    it('should process payment', () => {
-      const payment = mockPayment;
-      expect(payment.status).toBe('COMPLETED');
-      expect(payment.amount).toBeGreaterThan(0);
-    });
-
-    it('should get payments for folio', () => {
-      const payments = [mockPayment];
-      expect(payments[0].folioId).toBe('folio-1');
-    });
-
-    it('should refund payment', () => {
-      const refund = {
-        ...mockPayment,
-        id: 'refund-1',
-        amount: -100,
-        status: 'REFUNDED',
-      };
-
-      expect(refund.status).toBe('REFUNDED');
-      expect(refund.amount).toBeLessThan(0);
-    });
-
-    it('should fail invalid payment amounts', () => {
-      const invalidAmount = -50;
-      expect(invalidAmount).toBeLessThan(0);
-      // Should be rejected by validation
-    });
-  });
-
-  describe('Check-in API', () => {
-    it('should check in guest', () => {
-      const checkIn = {
-        reservationId: 'res-1',
-        checkInTime: new Date(),
-      };
-
-      expect(checkIn.reservationId).toBeTruthy();
-      expect(checkIn.checkInTime).toBeInstanceOf(Date);
-    });
-
-    it('should mark room as occupied', () => {
-      const room = {
-        id: 'room-1',
-        status: 'OCCUPIED',
-      };
-
-      expect(room.status).toBe('OCCUPIED');
-    });
-
-    it('should create folio on check-in', () => {
-      const folio = {
-        status: 'OPEN',
-        reservationId: 'res-1',
-      };
-
-      expect(folio.status).toBe('OPEN');
-    });
-  });
-
-  describe('Check-out API', () => {
-    it('should check out guest', () => {
-      const checkOut = {
-        reservationId: 'res-1',
-        checkOutTime: new Date(),
-      };
-
-      expect(checkOut.reservationId).toBeTruthy();
-      expect(checkOut.checkOutTime).toBeInstanceOf(Date);
-    });
-
-    it('should close folio on checkout', () => {
-      const folio = {
-        id: 'folio-1',
-        isClosed: true,
-      };
-
-      expect(folio.isClosed).toBe(true);
-    });
-
-    it('should mark room as available', () => {
-      const room = {
-        id: 'room-1',
-        status: 'AVAILABLE',
-      };
-
-      expect(room.status).toBe('AVAILABLE');
-    });
-
-    it('should create housekeeping task', () => {
-      const task = {
-        roomId: 'room-1',
-        status: 'PENDING',
-        description: 'Clean room',
-      };
-
-      expect(task.roomId).toBeTruthy();
-      expect(task.status).toBe('PENDING');
-    });
-  });
-
-  describe('Housekeeping API', () => {
-    it('should create housekeeping task', () => {
-      const task = {
-        roomId: 'room-1',
-        status: 'PENDING',
-        priority: 'NORMAL',
-      };
-
-      expect(task.status).toBe('PENDING');
-      expect(['LOW', 'NORMAL', 'HIGH']).toContain(task.priority);
-    });
-
-    it('should assign task to staff', () => {
-      const task = {
-        id: 'task-1',
-        assigneeId: 'user-1',
-        status: 'IN_PROGRESS',
-      };
-
-      expect(task.assigneeId).toBeTruthy();
-      expect(task.status).toBe('IN_PROGRESS');
-    });
-
-    it('should complete housekeeping task', () => {
-      const task = {
-        id: 'task-1',
-        status: 'COMPLETED',
-      };
-
-      expect(task.status).toBe('COMPLETED');
-    });
-
-    it('should get pending housekeeping tasks', () => {
-      const tasks = [
-        { status: 'PENDING', roomId: 'room-1' },
-        { status: 'COMPLETED', roomId: 'room-2' },
-      ];
-
-      const pending = tasks.filter((t) => t.status === 'PENDING');
-      expect(pending.length).toBe(1);
-    });
-  });
-
-  describe('Maintenance API', () => {
-    it('should create maintenance ticket', () => {
-      const ticket = {
-        roomId: 'room-1',
-        title: 'Fix AC',
-        status: 'OPEN',
-        priority: 'HIGH',
-      };
-
-      expect(ticket.status).toBe('OPEN');
-      expect(['LOW', 'NORMAL', 'HIGH', 'URGENT']).toContain(ticket.priority);
-    });
-
-    it('should assign ticket to technician', () => {
-      const ticket = {
-        id: 'ticket-1',
-        assigneeId: 'user-1',
-        status: 'IN_PROGRESS',
-      };
-
-      expect(ticket.assigneeId).toBeTruthy();
-    });
-
-    it('should close maintenance ticket', () => {
-      const ticket = {
-        id: 'ticket-1',
-        status: 'CLOSED',
-        cost: 150,
-      };
-
-      expect(ticket.status).toBe('CLOSED');
-      expect(ticket.cost).toBeGreaterThan(0);
-    });
-  });
-
-  describe('Staff API', () => {
-    it('should get all staff members', () => {
-      const staff = [
-        { id: 'user-1', name: 'John', role: 'STAFF' },
-      ];
-
-      expect(staff.length).toBeGreaterThan(0);
-    });
-
-    it('should get staff by role', () => {
-      const staff = [
-        { id: 'user-1', name: 'John', role: 'STAFF' },
-        { id: 'user-2', name: 'Jane', role: 'MANAGER' },
-      ];
-
-      const managers = staff.filter((s) => s.role === 'MANAGER');
-      expect(managers.length).toBe(1);
-    });
-  });
-
-  describe('Error Responses', () => {
-    it('should return 404 for non-existent resource', () => {
-      const statusCode = 404;
-      expect(statusCode).toBe(404);
-    });
-
-    it('should return 400 for invalid input', () => {
-      const statusCode = 400;
-      expect(statusCode).toBe(400);
-    });
-
-    it('should return 401 for unauthorized access', () => {
-      const statusCode = 401;
-      expect(statusCode).toBe(401);
-    });
-
-    it('should return 500 for server errors', () => {
-      const statusCode = 500;
-      expect(statusCode).toBe(500);
+      expect(response.status).toBe(400);
+      expect(mocks.findGuest).not.toHaveBeenCalled();
+      expect(mocks.updateGuest).not.toHaveBeenCalled();
     });
   });
 });

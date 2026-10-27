@@ -1,15 +1,16 @@
 import { HotelRole, PlatformRole } from "@prisma/client";
 import { redirect } from "next/navigation";
-import { getTenantContext, requirePlatformRole, TenantAuthError, TenantContext } from "@/lib/tenant-context";
+import { getBillingTenantContext, getTenantContext, requirePlatformRole, TenantAuthError, TenantContext } from "@/lib/tenant-context";
 import { hasRole } from "@/lib/permissions";
+import type { SaaSModule } from "@/lib/plans";
+import { checkModuleEntitlement } from "@/lib/entitlements";
 import { prisma } from "@/lib/prisma";
 
-// Authorization helper for server-rendered dashboard pages. API guards alone
-// are not enough because these pages query Prisma directly before rendering.
-export async function requirePageRole(allowed: readonly HotelRole[]): Promise<TenantContext> {
-  let context!: TenantContext;
+// Resolve a tenant for server-rendered pages. Billing recovery deliberately
+// uses the read-only context that remains available when a hotel is suspended.
+async function resolvePageTenantContext(billingRecovery = false): Promise<TenantContext> {
   try {
-    context = await getTenantContext();
+    return billingRecovery ? await getBillingTenantContext() : await getTenantContext();
   } catch (error) {
     if (error instanceof TenantAuthError) {
       if (error.code === "UNAUTHENTICATED") redirect("/login");
@@ -18,15 +19,45 @@ export async function requirePageRole(allowed: readonly HotelRole[]): Promise<Te
         redirect("/select-hotel");
       }
       if (error.code === "MEMBERSHIP_SUSPENDED") redirect("/login?error=MembershipSuspended");
-      if (error.code === "HOTEL_SUSPENDED") redirect("/login?error=HotelSuspended");
+      if (error.code === "HOTEL_SUSPENDED") {
+        if (billingRecovery) return getBillingTenantContext();
+        redirect("/dashboard/subscription?error=HOTEL_SUSPENDED");
+      }
     }
     redirect("/login");
   }
+}
 
-  if (!hasRole(context.role, allowed)) {
-    redirect("/dashboard");
+// Authorization helper for server-rendered dashboard pages. API guards alone
+// are not enough because these pages query Prisma directly before rendering.
+export async function requirePageRole(
+  allowed: readonly HotelRole[],
+  module?: SaaSModule
+): Promise<TenantContext> {
+  const context = await resolvePageTenantContext();
+  if (!hasRole(context.role, allowed)) redirect("/dashboard");
+
+  if (module) {
+    let entitlement;
+    try {
+      entitlement = await checkModuleEntitlement(context.hotelId, module);
+    } catch {
+      redirect("/dashboard/subscription?error=SUBSCRIPTION_STATUS_UNAVAILABLE");
+    }
+    if (!entitlement!.allowed) {
+      const code = entitlement!.code || "MODULE_NOT_ENTITLED";
+      redirect(`/dashboard/subscription?error=${encodeURIComponent(code)}`);
+    }
   }
 
+  return context;
+}
+
+// The subscription page is the recovery surface for expired/suspended tenants;
+// it must not require the operational hotel context or an active plan.
+export async function requireBillingPageRole(allowed: readonly HotelRole[]): Promise<TenantContext> {
+  const context = await resolvePageTenantContext(true);
+  if (!hasRole(context.role, allowed)) redirect("/dashboard");
   return context;
 }
 

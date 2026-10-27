@@ -56,7 +56,6 @@ export async function seedMultiTenantData(db: PrismaClient) {
       name: "Alice Owner",
       email: "alpha-owner@example.com",
       passwordHash: defaultPasswordHash,
-      department: "Management",
     },
   });
 
@@ -67,27 +66,28 @@ export async function seedMultiTenantData(db: PrismaClient) {
       name: "Alex FrontDesk",
       email: "alpha-receptionist@example.com",
       passwordHash: defaultPasswordHash,
-      department: "Front Desk",
     },
   });
 
   await db.hotelMembership.upsert({
     where: { userId_hotelId: { userId: alphaOwner.id, hotelId: hotelAlpha.id } },
-    update: {},
+    update: { department: "Management" },
     create: {
       userId: alphaOwner.id,
       hotelId: hotelAlpha.id,
       role: HotelRole.HOTEL_OWNER,
+      department: "Management",
     },
   });
 
   await db.hotelMembership.upsert({
     where: { userId_hotelId: { userId: alphaReceptionist.id, hotelId: hotelAlpha.id } },
-    update: {},
+    update: { department: "Front Desk" },
     create: {
       userId: alphaReceptionist.id,
       hotelId: hotelAlpha.id,
       role: HotelRole.RECEPTIONIST,
+      department: "Front Desk",
     },
   });
 
@@ -230,7 +230,6 @@ export async function seedMultiTenantData(db: PrismaClient) {
       name: "Bernard Owner",
       email: "beta-owner@example.com",
       passwordHash: defaultPasswordHash,
-      department: "Executive",
     },
   });
 
@@ -241,27 +240,28 @@ export async function seedMultiTenantData(db: PrismaClient) {
       name: "Brigitte Desk",
       email: "beta-receptionist@example.com",
       passwordHash: defaultPasswordHash,
-      department: "Reception",
     },
   });
 
   await db.hotelMembership.upsert({
     where: { userId_hotelId: { userId: betaOwner.id, hotelId: hotelBeta.id } },
-    update: {},
+    update: { department: "Executive" },
     create: {
       userId: betaOwner.id,
       hotelId: hotelBeta.id,
       role: HotelRole.HOTEL_OWNER,
+      department: "Executive",
     },
   });
 
   await db.hotelMembership.upsert({
     where: { userId_hotelId: { userId: betaReceptionist.id, hotelId: hotelBeta.id } },
-    update: {},
+    update: { department: "Reception" },
     create: {
       userId: betaReceptionist.id,
       hotelId: hotelBeta.id,
       role: HotelRole.RECEPTIONIST,
+      department: "Reception",
     },
   });
 

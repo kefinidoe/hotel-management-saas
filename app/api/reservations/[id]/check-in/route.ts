@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
-import { getTenantFromRoute } from "@/lib/authz";
+import { getTenantFromRoute, requireModule } from "@/lib/authz";
 import { CheckInError, executeCheckIn } from "@/lib/stay-service";
 
 export async function POST(
@@ -12,17 +12,8 @@ export async function POST(
   if (tenant instanceof NextResponse) return tenant;
 
   // Enforce SaaS Subscription Plan Module Entitlement
-  const { checkModuleEntitlement } = await import("@/lib/entitlements");
-  const moduleCheck = await checkModuleEntitlement(tenant.hotelId, "RESERVATIONS");
-  if (!moduleCheck.allowed) {
-    return NextResponse.json(
-      {
-        error: moduleCheck.code || "MODULE_NOT_ENTITLED",
-        message: moduleCheck.reason,
-      },
-      { status: 403 }
-    );
-  }
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   let body: any = {};
   try {

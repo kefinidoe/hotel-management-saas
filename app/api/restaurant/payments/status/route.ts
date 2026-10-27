@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -10,6 +10,9 @@ export async function GET(req: Request) {
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.RESTAURANT_POS);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "RESTAURANT_POS");
+  if (blocked) return blocked;
 
   const { searchParams } = new URL(req.url);
   const idempotencyKey = searchParams.get("key")?.trim();

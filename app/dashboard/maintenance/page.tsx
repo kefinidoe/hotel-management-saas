@@ -7,7 +7,7 @@ import { ROLE_GROUPS } from "@/lib/permissions";
 export const dynamic = "force-dynamic";
 
 export default async function MaintenancePage() {
-  const tenant = await requirePageRole(ROLE_GROUPS.MAINTENANCE);
+  const tenant = await requirePageRole(ROLE_GROUPS.MAINTENANCE, "MAINTENANCE");
 
   const [tickets, rooms, memberships] = await Promise.all([
     prisma.maintenanceTicket.findMany({
@@ -16,7 +16,6 @@ export default async function MaintenancePage() {
       },
       include: {
         room: true,
-        assignee: true,
       },
       orderBy: { updatedAt: "desc" },
     }),
@@ -48,6 +47,8 @@ export default async function MaintenancePage() {
     }),
   ]);
 
+  const staffNamesByUserId = new Map(memberships.map((membership) => [membership.userId, membership.user.name]));
+
   const initialTickets = tickets.map((t) => ({
     id: t.id,
     title: t.title,
@@ -57,8 +58,8 @@ export default async function MaintenancePage() {
     cost: t.cost ? Number(t.cost) : null,
     roomId: t.roomId,
     roomNumber: t.room?.number ?? null,
-    assigneeId: t.assigneeId,
-    assigneeName: t.assignee?.name ?? null,
+    assigneeId: t.assigneeId && staffNamesByUserId.has(t.assigneeId) ? t.assigneeId : null,
+    assigneeName: t.assigneeId ? staffNamesByUserId.get(t.assigneeId) ?? null : null,
   }));
 
   const staff = memberships.map((membership) => ({

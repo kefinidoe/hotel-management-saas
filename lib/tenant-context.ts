@@ -54,7 +54,9 @@ export interface TenantContext {
  * Wrapped in React cache() strictly for deduplication within a single Server Component render pass.
  * Never relies on caching for authorization correctness.
  */
-export async function getTenantContext(): Promise<TenantContext> {
+export async function getTenantContext(
+  { allowNonOperationalHotel = false }: { allowNonOperationalHotel?: boolean } = {}
+): Promise<TenantContext> {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) {
     throw new TenantAuthError("UNAUTHENTICATED", "Authentication required", 401);
@@ -101,7 +103,11 @@ export async function getTenantContext(): Promise<TenantContext> {
       );
     }
 
-    if (membership.hotel.status !== HotelStatus.ACTIVE && membership.hotel.status !== HotelStatus.TRIALING) {
+    if (
+      !allowNonOperationalHotel &&
+      membership.hotel.status !== HotelStatus.ACTIVE &&
+      membership.hotel.status !== HotelStatus.TRIALING
+    ) {
       throw new TenantAuthError(
         "HOTEL_SUSPENDED",
         "Requested hotel workspace is currently suspended",
@@ -136,9 +142,11 @@ export async function getTenantContext(): Promise<TenantContext> {
     where: {
       userId,
       status: MembershipStatus.ACTIVE,
-      hotel: {
-        status: { in: [HotelStatus.ACTIVE, HotelStatus.TRIALING] },
-      },
+      ...(!allowNonOperationalHotel && {
+        hotel: {
+          status: { in: [HotelStatus.ACTIVE, HotelStatus.TRIALING] },
+        },
+      }),
     },
     include: { hotel: true },
     orderBy: { createdAt: "asc" },
@@ -184,6 +192,15 @@ export async function getTenantContext(): Promise<TenantContext> {
     403,
     false
   );
+}
+
+/**
+ * Resolves a member's tenant for read-only subscription/billing recovery views.
+ * Membership and account checks remain mandatory, but hotel operational status
+ * does not hide the information needed to resolve a billing suspension.
+ */
+export async function getBillingTenantContext(): Promise<TenantContext> {
+  return getTenantContext({ allowNonOperationalHotel: true });
 }
 
 /**

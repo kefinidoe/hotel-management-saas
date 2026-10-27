@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 
 export async function GET() {
   const tenant = await getTenantFromRoute();
@@ -9,20 +9,21 @@ export async function GET() {
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.HOUSEKEEPING);
   if (forbidden) return forbidden;
 
-  const { checkModuleEntitlement } = await import("@/lib/entitlements");
-  const moduleCheck = await checkModuleEntitlement(tenant.hotelId, "HOUSEKEEPING");
-  if (!moduleCheck.allowed) {
-    return NextResponse.json(
-      { error: moduleCheck.code || "MODULE_NOT_ENTITLED", message: moduleCheck.reason },
-      { status: 403 }
-    );
-  }
+  const blocked = await requireModule(tenant.hotelId, "HOUSEKEEPING");
+  if (blocked) return blocked;
 
-  const tasks = await prisma.housekeepingTask.findMany({
-    where: { hotelId: tenant.hotelId, room: { isActive: true } },
-    include: { room: { include: { roomType: true } }, assignee: true },
-    orderBy: { updatedAt: "desc" },
-  });
+  const [tasks, memberships] = await Promise.all([
+    prisma.housekeepingTask.findMany({
+      where: { hotelId: tenant.hotelId, room: { isActive: true } },
+      include: { room: { include: { roomType: true } } },
+      orderBy: { updatedAt: "desc" },
+    }),
+    prisma.hotelMembership.findMany({
+      where: { hotelId: tenant.hotelId, status: "ACTIVE", user: { isActive: true } },
+      select: { userId: true, user: { select: { name: true } } },
+    }),
+  ]);
+  const staffNamesByUserId = new Map(memberships.map((membership) => [membership.userId, membership.user.name]));
 
   return NextResponse.json(
     tasks.map((t) => ({
@@ -32,8 +33,8 @@ export async function GET() {
       roomId: t.roomId,
       roomNumber: t.room.number,
       roomTypeName: t.room.roomType.name,
-      assigneeId: t.assigneeId,
-      assigneeName: t.assignee?.name ?? null,
+      assigneeId: t.assigneeId && staffNamesByUserId.has(t.assigneeId) ? t.assigneeId : null,
+      assigneeName: t.assigneeId ? staffNamesByUserId.get(t.assigneeId) ?? null : null,
       updatedAt: t.updatedAt.toISOString(),
     }))
   );

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 
 export async function GET() {
   const tenant = await getTenantFromRoute();
@@ -8,6 +8,9 @@ export async function GET() {
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "INVENTORY");
+  if (blocked) return blocked;
 
   const purchases = await prisma.purchase.findMany({
     where: { hotelId: tenant.hotelId },
@@ -39,6 +42,9 @@ export async function POST(req: Request) {
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "INVENTORY");
+  if (blocked) return blocked;
 
   const body = await req.json();
   const { inventoryItemId, supplier, invoiceNumber, quantity, unitCost, purchaseDate } = body as {

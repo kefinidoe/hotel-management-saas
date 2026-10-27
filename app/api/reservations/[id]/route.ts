@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { rangesOverlap } from "@/lib/dates";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { stayNights } from "@/lib/billing";
 import {
   canTransitionReservation,
@@ -39,6 +39,9 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.GUEST_STAYS);
   if (forbidden) return forbidden;
 
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
+
   const hotelId = tenant.hotelId;
 
   const reservation = await prisma.reservation.findUnique({
@@ -70,6 +73,9 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.GUEST_STAYS);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   const hotelId = tenant.hotelId;
 
@@ -258,6 +264,9 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   const hotelId = tenant.hotelId;
 

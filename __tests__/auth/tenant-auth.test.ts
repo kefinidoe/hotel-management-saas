@@ -1,4 +1,26 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+vi.mock("@prisma/client", () => ({
+  HotelRole: {
+    HOTEL_OWNER: "HOTEL_OWNER",
+    HOTEL_ADMIN: "HOTEL_ADMIN",
+    MANAGER: "MANAGER",
+    RECEPTIONIST: "RECEPTIONIST",
+    ACCOUNTANT: "ACCOUNTANT",
+    HOUSEKEEPER: "HOUSEKEEPER",
+    WAITER: "WAITER",
+    CASHIER: "CASHIER",
+    TECHNICIAN: "TECHNICIAN",
+  },
+  HotelStatus: { ACTIVE: "ACTIVE", TRIALING: "TRIALING", SUSPENDED: "SUSPENDED", CANCELLED: "CANCELLED" },
+  MembershipStatus: { ACTIVE: "ACTIVE", SUSPENDED: "SUSPENDED", INVITED: "INVITED" },
+  PlatformRole: {
+    PLATFORM_SUPER_ADMIN: "PLATFORM_SUPER_ADMIN",
+    PLATFORM_SUPPORT: "PLATFORM_SUPPORT",
+    PLATFORM_BILLING: "PLATFORM_BILLING",
+  },
+}));
+
 import { HotelRole, HotelStatus, MembershipStatus, PlatformRole } from "@prisma/client";
 
 // Hoisted mocks
