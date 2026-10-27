@@ -46,8 +46,8 @@ export default function CreateReservationModal({
   onCreated: (reservationId: string) => void;
   onError: (e: string | null) => void;
 }) {
-  // Matches Axis Hotel's paper registration card: guest identity,
-  // stay dates, and room/tariff. Actual payment is recorded at check-in.
+  // Captures the common hotel check-in details: guest identity, stay dates,
+  // and room/tariff. Actual payment is recorded at check-in.
   const [guestName, setGuestName] = useState("");
   const [guestPhone, setGuestPhone] = useState("");
   const [idNumber, setIdNumber] = useState("");

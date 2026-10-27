@@ -32,7 +32,7 @@ function statusBarClasses(status: string) {
     case "CONFIRMED":
       return "bg-primary-100 text-primary-700 border border-primary-300";
     case "PENDING":
-      return "bg-champagne-200 text-text-primary";
+      return "bg-accent-200 text-text-primary";
     default:
       return "bg-bg text-text-secondary border border-border";
   }

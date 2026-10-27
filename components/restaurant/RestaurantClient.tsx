@@ -937,7 +937,7 @@ export default function RestaurantClient({
                   </div>
                   <div className="text-right shrink-0">
                     <p className="font-medium">{money(a.total)}</p>
-                    <p className={clsx("text-xs", a.settled ? "text-success" : "text-champagne-500")}>
+                    <p className={clsx("text-xs", a.settled ? "text-success" : "text-accent-500")}>
                       {a.settled ? "Paid" : "On folio"}
                     </p>
                   </div>

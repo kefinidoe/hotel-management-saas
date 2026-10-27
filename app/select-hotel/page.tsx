@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Image from "next/image";
 import Link from "next/link";
+import HotelFlowBrand from "@/components/HotelFlowBrand";
 import { useRouter } from "next/navigation";
 import { signOut } from "next-auth/react";
 import { Building2, Plus, LogOut, ArrowRight, ShieldCheck } from "lucide-react";
@@ -72,13 +72,7 @@ export default function SelectHotelPage() {
       <div className="card w-full max-w-lg shadow-lg border border-border">
         <div className="flex items-center justify-between pb-4 mb-4 border-b border-border">
           <div className="flex items-center gap-3">
-            <Image
-              src="/axis-hotel-mark.png"
-              alt="Hotel Management"
-              width={40}
-              height={40}
-              className="w-10 h-10 object-contain rounded-lg"
-            />
+            <HotelFlowBrand iconOnly iconClassName="h-10 w-10 rounded-lg" />
             <div>
               <h1 className="text-xl font-bold text-text-primary">Select Hotel Workspace</h1>
               <p className="text-text-secondary text-xs">

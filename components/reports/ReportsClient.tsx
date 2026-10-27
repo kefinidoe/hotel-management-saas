@@ -9,6 +9,7 @@ import {
   type StockStatus,
 } from "@/lib/inventory";
 import { HOTEL_TIMEZONE } from "@/lib/dates";
+import { BRAND_COLORS } from "@/lib/brand";
 
 type BookingRow = {
   id: string;
@@ -150,7 +151,7 @@ const STATUS_CLASS: Record<string, string> = {
   NO_SHOW: "bg-danger/10 text-danger",
 };
 
-const COLORS = ["#2563eb", "#16a34a", "#f59e0b", "#dc2626", "#7c3aed", "#0891b2"];
+const COLORS = [BRAND_COLORS.primary, BRAND_COLORS.accent, "#16a34a", "#dc2626", "#7c3aed", "#0891b2"];
 
 function toInputDate(date: Date) {
   const year = date.getFullYear();
@@ -298,7 +299,7 @@ function DonutGraph({
         <text x="90" y="84" textAnchor="middle" fontSize="10" fill="#6B7268">
           Total
         </text>
-        <text x="90" y="103" textAnchor="middle" fontSize="11" fontWeight="600" fill="#0B0244">
+        <text x="90" y="103" textAnchor="middle" fontSize="11" fontWeight="600" fill={BRAND_COLORS.primary}>
           {valueFormatter(total).slice(0, 18)}
         </text>
       </svg>
@@ -323,7 +324,7 @@ function DonutGraph({
 function HorizontalBarGraph({
   data,
   valueFormatter,
-  color = "#0B0244",
+  color = BRAND_COLORS.primary,
   maxItems = 8,
 }: {
   data: { name: string; value: number }[];

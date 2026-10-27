@@ -1,8 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import Image from "next/image";
 import { useRouter } from "next/navigation";
+import HotelFlowBrand from "@/components/HotelFlowBrand";
 import { Building2, Globe, MapPin, Phone, Mail, DollarSign, Clock, ArrowRight } from "lucide-react";
 
 const CURRENCIES = [
@@ -108,13 +108,7 @@ export default function OnboardingPage() {
     <main className="min-h-screen bg-bg flex items-center justify-center p-4 py-8">
       <div className="card w-full max-w-xl shadow-lg border border-border">
         <div className="flex items-center gap-3 mb-6 pb-4 border-b border-border">
-          <Image
-            src="/axis-hotel-mark.png"
-            alt="Hotel SaaS"
-            width={48}
-            height={48}
-            className="w-10 h-10 object-contain rounded-lg"
-          />
+          <HotelFlowBrand iconOnly iconClassName="h-10 w-10 rounded-lg" />
           <div>
             <h1 className="text-xl font-bold text-text-primary">Set Up Your Hotel Workspace</h1>
             <p className="text-text-secondary text-xs mt-0.5">

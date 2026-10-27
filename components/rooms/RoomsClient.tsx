@@ -84,7 +84,7 @@ export default function RoomsClient({
             onClick={() => setSelectedRoom(room)}
             className="group relative overflow-hidden rounded-2xl border border-border bg-surface text-left shadow-sm transition-all duration-300 hover:-translate-y-1 hover:border-primary-300 hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-primary-500/30"
           >
-            <div className="relative h-2 bg-gradient-to-r from-primary-500 via-primary-400 to-champagne-400" />
+            <div className="relative h-2 bg-gradient-to-r from-primary-500 via-primary-400 to-accent-400" />
 
             <div className="p-4">
               <div className="flex items-start justify-between gap-3">

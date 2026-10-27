@@ -116,8 +116,8 @@ export function cartSubtotal(lines: CartLine[]): number {
 }
 
 export function cartTotal(lines: CartLine[]): number {
-  // Axis Hotel selected no restaurant VAT for the current phase. When tax
-  // configuration is added, the approved rate must come from server data.
+  // Restaurant orders currently have no tax component. If tax configuration
+  // is introduced, the approved rate must come from server-controlled settings.
   return cartSubtotal(lines);
 }
 

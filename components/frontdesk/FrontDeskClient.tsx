@@ -241,7 +241,7 @@ export default function FrontDeskClient({
               <h2 className="text-base font-bold">Departures</h2>
               <p className="text-xs text-text-secondary mt-0.5">Guests checking out today</p>
             </div>
-            <span className="min-w-8 h-8 px-2 rounded-full bg-champagne-50 text-champagne-500 flex items-center justify-center text-xs font-bold">
+            <span className="min-w-8 h-8 px-2 rounded-full bg-accent-50 text-accent-500 flex items-center justify-center text-xs font-bold">
               {departures.length}
             </span>
           </div>
@@ -259,7 +259,7 @@ export default function FrontDeskClient({
                       Room {r.roomNumbers} <span className="mx-1">·</span> {r.code}
                     </p>
                   </div>
-                  <span className="shrink-0 rounded-full bg-champagne-50 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-champagne-500">
+                  <span className="shrink-0 rounded-full bg-accent-50 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-accent-500">
                     Departure
                   </span>
                 </div>

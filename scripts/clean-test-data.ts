@@ -3,7 +3,7 @@ import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log("🧹 Starting Axis Hotel Test Data Cleanup...\n");
+  console.log("🧹 Starting hotel test data cleanup...\n");
 
   // 1. Transactional Billing & Reservations
   const deletedPayments = await prisma.payment.deleteMany({});

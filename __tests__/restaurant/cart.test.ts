@@ -229,8 +229,8 @@ describe("cart totals", () => {
   });
 
   it("charges no VAT today, but keeps subtotal and total as separate concepts", () => {
-    // Axis has no restaurant VAT configured. cartTotal is deliberately a
-    // distinct function so adding tax later doesn't mean rewriting callers.
+    // No restaurant VAT is configured. cartTotal remains distinct so adding
+    // tax later doesn't mean rewriting callers.
     const lines = [line(500, 2)];
     expect(cartTotal(lines)).toBe(cartSubtotal(lines));
     expect(cartSubtotal(lines)).toBe(1000);
