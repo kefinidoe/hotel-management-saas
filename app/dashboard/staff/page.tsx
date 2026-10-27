@@ -1,0 +1,51 @@
+import { prisma } from "@/lib/prisma";
+import StaffClient from "@/components/staff/StaffClient";
+import { requirePageRole } from "@/lib/page-auth";
+import { ROLE_GROUPS } from "@/lib/permissions";
+
+export const dynamic = "force-dynamic";
+
+export default async function StaffPage() {
+  const context = await requirePageRole(ROLE_GROUPS.STAFF_VIEW);
+
+  const memberships = await prisma.hotelMembership.findMany({
+    where: { hotelId: context.hotelId },
+    include: {
+      user: {
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          phone: true,
+          department: true,
+          isActive: true,
+          lastLoginAt: true,
+          createdAt: true,
+        },
+      },
+    },
+    orderBy: { user: { name: "asc" } },
+  });
+
+  const initialStaff = memberships.map((m) => ({
+    id: m.id,
+    userId: m.user.id,
+    name: m.user.name,
+    email: m.user.email,
+    phone: m.user.phone,
+    role: m.role,
+    department: m.user.department,
+    status: m.status,
+    isActive: m.user.isActive && m.status === "ACTIVE",
+    lastLoginAt: m.user.lastLoginAt?.toISOString() ?? null,
+    createdAt: m.createdAt.toISOString(),
+  }));
+
+  return (
+    <StaffClient
+      initialStaff={initialStaff}
+      currentUserId={context.userId}
+      currentUserRole={context.role}
+    />
+  );
+}

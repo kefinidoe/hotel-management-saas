@@ -1,0 +1,58 @@
+import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { isMealPlan } from "@/lib/tariffs";
+
+export async function GET() {
+  const tenant = await getTenantFromRoute();
+  if (tenant instanceof NextResponse) return tenant;
+
+  const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
+  if (forbidden) return forbidden;
+
+  const roomTypes = await prisma.roomType.findMany({
+    where: { hotelId: tenant.hotelId },
+    orderBy: { name: "asc" },
+  });
+  return NextResponse.json(roomTypes.map((rt) => ({ ...rt, baseRate: Number(rt.baseRate) })));
+}
+
+export async function POST(req: Request) {
+  const tenant = await getTenantFromRoute();
+  if (tenant instanceof NextResponse) return tenant;
+
+  const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
+  if (forbidden) return forbidden;
+
+  const hotelId = tenant.hotelId;
+
+  let body: any;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
+  }
+
+  const name = typeof body?.name === "string" ? body.name.trim() : "";
+  const baseRate = Number(body?.baseRate);
+
+  if (!name || isNaN(baseRate) || baseRate < 0) {
+    return NextResponse.json({ error: "Valid name and positive base rate are required." }, { status: 400 });
+  }
+
+  // The meal plan is what lets the reservation screens match this rate to a
+  // booking, so it is validated rather than stored blindly.
+  const mealPlan = isMealPlan(body.mealPlan) ? body.mealPlan : null;
+
+  const roomType = await prisma.roomType.create({
+    data: {
+      hotelId,
+      name,
+      description: body.description ? String(body.description).trim() : null,
+      baseRate,
+      capacity: typeof body.capacity === "number" && body.capacity > 0 ? body.capacity : 2,
+      mealPlan,
+    },
+  });
+  return NextResponse.json({ ...roomType, baseRate: Number(roomType.baseRate) }, { status: 201 });
+}

@@ -1,0 +1,722 @@
+# Hotel Management System — Architecture & Current State
+
+Written from a full read of the repo at commit `1fb45bf` ("Update hotel management system").
+Every claim below was checked against the files named next to it.
+
+---
+
+## 1. What this actually is
+
+A **single Next.js 14 (App Router) application** for Axis Hotel Nakuru. There is no separate
+backend service. The "backend" is:
+
+- **PostgreSQL** (hosted on Supabase) holding the data
+- **Prisma ORM** as the only thing that talks to that database
+- **Next.js Route Handlers** in `app/api/**/route.ts` — these are the API
+
+### About Supabase
+
+Supabase is being used **only as a Postgres server**. Verified:
+
+- `package.json` has no `@supabase/*` dependency (deps: prisma, next-auth, bcryptjs, next,
+  react, recharts, zod, clsx, date-fns, lucide-react)
+- `grep -ril supabase` across the repo returns only `.gitignore` and `README.md`
+- `prisma/schema.prisma:8-12` points at Postgres via `DATABASE_URL` / `DIRECT_URL`
+
+So Supabase Auth, Supabase Storage, Edge Functions, Row-Level Security and the
+`@supabase/supabase-js` client are **all unused**. Auth is NextAuth with your own `User`
+table and bcrypt hashes. If you ever want to swap Supabase for Neon or a local Postgres,
+nothing in the app code changes — only the connection string.
+
+---
+
+## 2. The three layers and how they connect
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ 1. SERVER COMPONENTS  (app/dashboard/**/page.tsx)                   │
+│    - run on the server, import `prisma` DIRECTLY                    │
+│    - read data with no HTTP hop, serialise Decimals/Dates to        │
+│      plain numbers/ISO strings                                      │
+│    - hand the result to a client component as props                 │
+│    - all marked `export const dynamic = 'force-dynamic'`            │
+└──────────────────────────┬──────────────────────────────────────────┘
+                           │ props (already-serialised JSON-safe data)
+                           ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ 2. CLIENT COMPONENTS  (components/**/*Client.tsx)                   │
+│    - "use client", hold useState, render the UI                     │
+│    - on user action → fetch('/api/...')                             │
+│    - on success → router.refresh()  (re-runs step 1, new props)     │
+└──────────────────────────┬──────────────────────────────────────────┘
+                           │ fetch() → HTTP
+                           ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ 3. ROUTE HANDLERS  (app/api/**/route.ts)                            │
+│    - authenticate via getServerSession / requireAuth                │
+│    - authorise via requireRole(session, [...])                      │
+│    - write through prisma, often inside prisma.$transaction         │
+└──────────────────────────┬──────────────────────────────────────────┘
+                           │ Prisma
+                           ▼
+                    PostgreSQL (Supabase)
+```
+
+**The key pattern to internalise:** reads happen in server components (no API call), writes
+happen through `/api/*` route handlers. The API is not a general-purpose data layer — it is
+a *mutation* layer with a handful of read endpoints the client needs after mount.
+
+That is why, e.g., `app/dashboard/guests/page.tsx` queries `prisma.guest.findMany` itself
+even though `app/api/guests/route.ts` does almost the same query.
+
+### The refresh loop
+
+`components/frontdesk/FrontDeskClient.tsx:39-41` is the canonical example:
+
+```ts
+function refresh() { router.refresh(); }   // after every mutation
+```
+
+Mutation → `fetch` → `router.refresh()` → server component re-queries Prisma → new props →
+UI updates. No client-side cache, no React Query, no optimistic updates. Simple, always
+correct, and the reason nothing in `components/` holds a stale copy of the data.
+
+---
+
+## 3. Data model (`prisma/schema.prisma`)
+
+25 models and 13 enums. The spine of the system:
+
+```
+User (staff, 8 RoleName values, bcrypt passwordHash)
+
+RoomType  (tariff: occupancy × meal plan, baseRate, capacity, mealPlan)
+   └── Room (number, floor, status: 8 RoomStatus values, isTwin)
+
+Guest (fullName, phone, email, idNumber, nationality, vehicleRegistration, isArchived)
+   ├── Reservation (code "RES-2026-00125", checkInDate/checkOutDate, status, source,
+   │                adults, children, paymentMode, discount, createdById)
+   │      └── ReservationRoom (join table, per-room agreed `rate`)   ← multi-room ready
+   └── Folio (isClosed)
+          ├── FolioItem (type: ROOM_CHARGE|RESTAURANT|LAUNDRY|OTHER_SERVICE|DISCOUNT|TAX)
+          └── Payment (paymentMethodId, amount, reference, cashierId)
+
+HousekeepingTask (roomId, status, assigneeId)   MaintenanceTicket (roomId, title, status, cost)
+
+MenuCategory → MenuItem (price) → Recipe (portions) → RecipeIngredient → InventoryItem
+InventoryItem (base unit g|ml|pcs, currentStock, reorderLevel, costPerUnit)
+   ├── StockMovement (every change, signed qty + beforeQty/afterQty)
+   ├── Purchase        └── Wastage
+
+Expense (status: PENDING_APPROVAL → APPROVED|REJECTED)
+Notification    AuditLog
+```
+
+Design decisions worth knowing about:
+
+- **Money is `Decimal(10,2)`.** Prisma returns these as JS `Decimal` objects, so every route
+  does `Number(x)` before JSON-serialising. That's the `Number(rr.rate)` you see everywhere.
+- **Inventory is stored in ONE base unit** (`g`, `ml`, `pcs`) and formatted for display in
+  `lib/inventory.ts:formatQty` (`2000 g` → `"2.0 kg"`). No unit conversions anywhere in the
+  recipe engine — deliberate, see the comment at `schema.prisma:337`.
+- **`isArchived` / `isActive` instead of deletes.** Guests and inventory items are soft-hidden
+  so historical folios and stock movements stay meaningful.
+- **`AuditLog` and `Notification` exist in the schema but nothing writes to them** — verified:
+  `grep -rn "auditLog\|prisma.notification" app components lib` returns 0 matches.
+- **`Order` / `OrderItem` exist but nothing writes to them either** — the restaurant POS
+  writes to `Folio`/`FolioItem` instead. These two models are dead weight today.
+
+5 migrations, latest `20260929182000_add_room_is_twin`. Schema and migrations are in sync.
+
+---
+
+## 4. Authentication & authorisation
+
+- **`lib/auth.ts`** — NextAuth Credentials provider. Looks up `User` by email,
+  `bcrypt.compare` against `passwordHash`, rejects `isActive: false`, updates `lastLoginAt`.
+  JWT session strategy; `id` and `role` are copied into the token in the `jwt` callback and
+  into the session in the `session` callback.
+- **`types/next-auth.d.ts`** — extends `Session` and `JWT` with `id` and `role`.
+- **`middleware.ts`** — `next-auth/middleware`, matcher `["/dashboard/:path*"]`. This is what
+  bounces an anonymous browser to `/login`.
+- **`app/dashboard/layout.tsx`** — second check: `getServerSession` + `redirect("/login")`.
+- **`lib/authz.ts`** — `requireAuth()` (401 if no session) and
+  `requireRole(session, [...])` (403 if role not allowed).
+
+**Important:** the middleware does **not** cover `/api/*`. Every route handler is responsible
+for its own auth, and the audit in §6 shows several aren't.
+
+Two auth styles coexist (worth unifying):
+
+```ts
+// style A — older routes
+const session = await getServerSession(authOptions);
+if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+const forbidden = requireRole(session, ["ADMIN", "MANAGER", "RECEPTIONIST"]);
+if (forbidden) return forbidden;
+
+// style B — newer routes
+const auth = await requireAuth();
+if (auth instanceof NextResponse) return auth;
+const forbidden = requireRole(auth, ["ADMIN", "MANAGER"]);
+if (forbidden) return forbidden;
+```
+
+Roles in use: `ADMIN`, `MANAGER`, `RECEPTIONIST`, `HOUSEKEEPER`, `TECHNICIAN`, `ACCOUNTANT`.
+`WAITER` and `CASHIER` are declared but never appear in any `requireRole` list — a waiter or
+cashier can currently read everything a receptionist can, and can't do the restaurant writes
+they'd need (those routes have no role check at all).
+
+---
+
+## 5. Module map — what's built
+
+| Module | Page | Client component | API routes |
+|---|---|---|---|
+| Dashboard | `app/dashboard/page.tsx` (server, 6 KPIs computed inline) | — | — |
+| Front Desk | `front-desk/page.tsx` | `FrontDeskClient`, `FolioModal` | `check-in`, `check-out`, `payments`, `payment-methods`, `folios/[id]` |
+| Reservations | `reservations/page.tsx` | `ReservationsClient`, `CreateReservationModal` | `reservations`, `reservations/[id]` |
+| Rooms | `rooms/page.tsx` | `RoomsClient` | `rooms`, `rooms/[id]`, `room-types`, `room-types/[id]` |
+| Guests | `guests/page.tsx` | `GuestsClient` | `guests`, `guests/[id]` |
+| Housekeeping | `housekeeping/page.tsx` | `HousekeepingClient` | `housekeeping`, `housekeeping/[id]` |
+| Maintenance | `maintenance/page.tsx` | `MaintenanceClient` | `maintenance`, `maintenance/[id]` |
+| Restaurant POS | `restaurant/page.tsx` | `RestaurantClient` | `menu`, `menu/items/[id]`, `menu/categories`, `restaurant/pay-now`, `restaurant/charge-to-room`, `restaurant/open-folios`, `restaurant/activity` |
+| Inventory | `inventory/page.tsx` | `InventoryClient` + 6 sub-tabs/modals | `inventory`, `inventory/[id]`, `purchases`, `wastage`, `recipes`, `recipes/[id]`, `stock-movements` |
+| Expenses | `expenses/page.tsx` | `ExpensesClient` | `expenses`, `expenses/[id]` |
+| Reports | `reports/page.tsx` | `ReportsClient` | `reports` |
+| Staff | `staff/page.tsx` | `StaffClient` | `staff`, `staff/[id]` |
+| Global search | `SearchBar` in the topbar | — | `search` |
+
+### The business rules that actually drive the app
+
+**Check-in** (`app/api/check-in/route.ts`, one transaction):
+1. reject if already `CHECKED_IN`
+2. create a `Folio` for the guest + reservation
+3. one `ROOM_CHARGE` FolioItem per room, `quantity = nights` (min 1), `total = rate × nights`
+4. flip every room to `OCCUPIED`
+5. if `reservation.discount > 0`, post a `DISCOUNT` item with a **negative** total
+6. reservation → `CHECKED_IN`
+
+**Check-out** (`app/api/check-out/route.ts`, one transaction):
+close the open folio → reservation → `CHECKED_OUT` → every room → `DIRTY` → create a
+`NEEDS_CLEANING` HousekeepingTask per room.
+
+**Housekeeping → room status** (`app/api/housekeeping/[id]/route.ts`): a lookup table maps
+task status to room status — `NEEDS_CLEANING→DIRTY`, `IN_PROGRESS→CLEANING`,
+`READY_FOR_INSPECTION→CLEANING`, `READY→AVAILABLE`.
+
+**Maintenance → room status**: creating a ticket with `takeOutOfService` sets the room
+`MAINTENANCE`; marking it `COMPLETED` sets the room back to `AVAILABLE`.
+
+**Double-booking prevention** (`lib/dates.ts:rangesOverlap` +
+`app/api/reservations/route.ts:79-97`): loads every `ReservationRoom` on that room whose
+reservation is not `CANCELLED`/`NO_SHOW`, and rejects with **409** on any
+`[checkIn, checkOut)` overlap. The PUT route repeats the check excluding itself.
+
+**Recipe stock engine** (`lib/inventory.ts`):
+- `computeAvailablePortions(ingredients, portions)` → how many whole portions can be made
+  right now, plus the bottleneck ingredient. Surfaced on the POS as `availablePortions`.
+- `deductRecipeStock(tx, lines, reference, userId)` — aggregates everything needed across the
+  whole cart, **checks all of it before writing anything**, throws if short, and runs inside
+  the caller's transaction. Menu items with no recipe are skipped (treated as always
+  available). A short ingredient rolls back the entire paid order — never a sale with no
+  deduction.
+
+**Expense approval** (`app/api/expenses/route.ts:31-33` + `[id]/route.ts`): every expense is
+forced to `PENDING_APPROVAL` regardless of input; only `ADMIN`/`MANAGER` can move it, and a
+reviewed expense can't be reviewed twice.
+
+**Staff safety guards** (`app/api/staff/[id]/route.ts`): an admin can't demote/deactivate
+themselves, and can't remove the last remaining active admin.
+
+**Tariff matching** (`components/reservations/CreateReservationModal.tsx:66-71`): room 27/28
+are `isTwin` → "Twin" tariff; otherwise Single/Double is chosen. That plus the meal plan picks
+one of 6 seeded room types, and its `baseRate` becomes the reservation rate.
+
+---
+
+## 6. Verified problems
+
+These are checked, not guessed.
+
+### 6.1 ~~`npm run seed` fails on a fresh database~~ — **FIXED**
+
+> Fixed in `prisma/seed.ts`: the tariff room-type upsert loop (and the Twin rename) now runs
+> *before* anything references those ids, and the placeholder `seed-single`/`seed-double`
+> room types and rooms 101/102 are gone. Guarded by `__tests__/seed/seed.test.ts`, which runs
+> the real seed file against a fake Prisma client that enforces foreign keys and P2025.
+> Running that harness against `1fb45bf:prisma/seed.ts` reproduces
+> `P2025 ... (model: roomType, where: {"id":"tariff-triple-bo"})` → `process.exit(1)`.
+
+*What it was:* the old file updated `tariff-triple-bo` at line 104 while the loop that creates
+it was at line 163, so an empty database threw `P2025: Record to update does not exist`. The
+room-creation loop referenced `tariff-single-bo`/`tariff-triple-bo` before they existed too.
+It only ever worked on a database where a previous seed run had already created those rows.
+It also upserted placeholder rooms 101/102 on `seed-single`/`seed-double` and then immediately
+found and deleted every room on those two room types — pure churn on every run.
+
+### 6.2 ~~Six API endpoints have no authentication at all~~ — **FIXED**
+
+> `middleware.ts` now guards every `/api/*` route except `/api/auth/*`, returning a real
+> **401 JSON** for API calls (a redirect would be followed silently by `fetch()` and the
+> caller would try to parse the login page as JSON) and a redirect to `/login?callbackUrl=…`
+> for `/dashboard/*`. Matcher verified with Next's own `getPathMatch`:
+> `/api/auth/signin`, `/api/auth/session`, `/api/auth/callback/*` stay public; `/api/rooms`,
+> `/api/reservations`, `/api/restaurant/activity` etc. are guarded.
+> The six handlers below also got explicit `requireAuth()` calls, so they are safe even if the
+> middleware matcher is ever changed. A re-run of the audit script reports **0** unauthenticated
+> handlers.
+>
+> Still open below this table: the authenticated-but-unrole-checked routes.
+
+Per-handler audit of all 38 route files (55 REST handlers, plus the NextAuth catch-all). These return real data to an unauthenticated caller:
+
+| Route | Method | Exposes |
+|---|---|---|
+| `app/api/reservations/route.ts` | GET | every reservation: guest name, phone, dates, room, rate |
+| `app/api/restaurant/activity/route.ts` | GET | today's restaurant revenue + last 12 sales with guest names and room numbers |
+| `app/api/rooms/route.ts` | GET | full room list with status |
+| `app/api/room-types/route.ts` | GET | full tariff card |
+| `app/api/menu/route.ts` | GET | full menu with prices and stock-derived availability |
+| `app/api/maintenance/route.ts` | GET | every maintenance ticket with room, assignee and cost |
+
+`middleware.ts` only matches `/dashboard/:path*`, so none of these are protected by it.
+The dashboard pages happen to work because they query Prisma directly — but the endpoints
+are open to anyone who knows the URL.
+
+Separately, several authenticated routes have **no role check** where one probably belongs:
+`restaurant/charge-to-room` POST, `restaurant/pay-now` POST, `menu/items/[id]` PUT/DELETE,
+`recipes` POST/PATCH/DELETE, `purchases` POST, `wastage` POST, `rooms/[id]` PUT/DELETE,
+`expenses` POST.
+
+### 6.3 The 119 tests pass but test none of your code
+
+`npm run test:run` → **119 passed**, matching `TESTING.md`. But:
+
+```
+grep -Ec "from ['\"](@/|\.\./\.\./(app|lib|components))" __tests__/**/*.test.ts
+__tests__/workflows/guest-lifecycle.test.ts:0
+__tests__/api/endpoints.test.ts:0
+__tests__/utilities/helpers.test.ts:0
+```
+
+None of the three imports anything from `app/`, `lib/` or `components/` — `helpers.test.ts`
+and `guest-lifecycle.test.ts` import only `vitest`; `endpoints.test.ts` adds
+`__tests__/fixtures/mock-data.ts`. They assert against object literals written inside the
+test, e.g. `__tests__/api/endpoints.test.ts:17-21`:
+
+```ts
+it('should fetch all guests', () => {
+  const guests = [mockGuest];
+  expect(guests).toHaveLength(1);
+```
+
+No route handler, no `lib/` function, no component is executed. Changing
+`app/api/check-in/route.ts` to something broken would keep all 119 green. `TESTING.md`
+describes this suite as covering "all API endpoints" and "the complete guest lifecycle" — it
+does not.
+
+### 6.4 ~~`.env.example` is not usable~~ — **FIXED**
+
+> Rewritten: the malformed password is gone, both `DATABASE_URL` (transaction pooler, port
+> 6543) and `DIRECT_URL` (session pooler / direct, port 5432) are present and documented, with
+> a note on URL-encoding the password and on `NEXTAUTH_URL` having no trailing slash.
+
+```
+DATABASE_URL="postgresql://USER:hotel management system@localhost:5432/hms?schema=public"
+```
+
+The password is literally the words "hotel management system" with unescaped spaces — looks
+like the repo name was pasted in by accident. And `prisma/schema.prisma:11` reads
+`directUrl = env("DIRECT_URL")`, but `DIRECT_URL` is not in `.env.example` at all.
+
+For Supabase you need both:
+- `DATABASE_URL` → the **transaction pooler** (port 6543) for the app
+- `DIRECT_URL` → the **session pooler / direct connection** (port 5432) for `prisma migrate`
+
+### 6.5 No lint config, and no typecheck possible without `prisma generate`
+
+**Partially fixed.** `.eslintrc.json` (`next/core-web-vitals`) now exists, `npm run lint`
+works, and it found and I fixed 8 real `react/no-unescaped-entities` errors in
+`app/dashboard/page.tsx`, `components/SearchBar.tsx`, `components/inventory/CreateRecipeModal.tsx`,
+`components/inventory/RecipesTab.tsx` and `components/staff/StaffClient.tsx`. It now reports
+`✔ No ESLint warnings or errors`.
+
+Still open: the `tsc` errors, which all trace to the un-generated Prisma client.
+- `npx tsc --noEmit` fails with ~30 errors, but **all** trace to one root cause: the Prisma
+  client isn't generated, so `@prisma/client` exports no `RoleName` and every
+  `prisma.x.findMany()` returns `any` (hence the `TS7006 implicitly has an 'any' type` on
+  every `.map()` callback). Run `npx prisma generate` and they should clear. I could not
+  verify that here — see §7.
+
+### 6.6 Dependency drift
+
+Declared in `package.json`, imported nowhere in `app/`, `components/` or `lib/`
+(verified by grep):
+
+- **`zod` 3.23.8** — all validation is hand-rolled `if (!body.x)` checks. This is why several
+  routes accept unvalidated input (`rooms/[id]` PUT passes `body.number`, `body.status`
+  straight into Prisma).
+- **`date-fns` 3.6.0** — `lib/dates.ts` reimplements the handful of helpers by hand.
+- **`recharts` 2.12.7** — `ReportsClient` renders numbers in tables, no charts.
+
+Also: `npm install` fails with `ERESOLVE` (`vite@8.3.0` needs `@types/node ^20.19 || >=22.12`,
+root pins `20.14.11`). It needs `--legacy-peer-deps`, which `TESTING.md` mentions but
+`README.md` doesn't.
+
+### 6.7 Stale docs
+
+`STEP7-README.md` lists routes that don't exist in the repo
+(`app/api/inventory/[id]/receive|issue|adjust/route.ts`, `app/api/purchase-orders/**`,
+`PurchaseOrder` model). Those were replaced by `PATCH /api/inventory/[id]` with `newQuantity`
+and by `app/api/purchases/route.ts`. `STEP6-README.md` similarly points at
+`app/api/restaurant/checkout/route.ts`, now split into `pay-now` and `charge-to-room`.
+
+### 6.8 Smaller things
+
+- **Reservation codes can collide.** `app/api/reservations/route.ts:129-130` builds
+  `RES-{year}-{count+1}` from `prisma.reservation.count()`. Delete or cancel anything and two
+  reservations can get the same code → unique-constraint 500.
+- **`paymentMode` is captured but never surfaced** on the folio or in reports.
+- **`FolioItem.taxRate` exists and is stored, but folio totals ignore it** — restaurant lines
+  bake VAT into `total` at write time (`restaurant/pay-now/route.ts:67`) and room charges use
+  `taxRate: 0`. There's no single "compute a folio total" function; the sum is recomputed
+  inline in `folios/[id]`, `guests/[id]` and `app/dashboard/page.tsx`.
+- **Notifications**: the bell in `components/Topbar.tsx:21-23` is a dead button.
+- **Reports**: `/api/reports` groups `FolioItem` by type and `Payment` by method, but there's
+  no occupancy/ADR/RevPAR report, no per-day series, and no export.
+
+### 6.9 Migrations verified against real PostgreSQL — **NO DRIFT FOUND**
+
+Not a bug: the first time these migrations have ever been executed. All 5 files apply
+cleanly to an empty database, and the result matches `prisma/schema.prisma` exactly:
+
+| | schema.prisma | migrated database |
+|---|---|---|
+| Models / tables | 25 | 25 |
+| Enums | 13 | 13 |
+| Scalar + enum columns | 193 | 193 |
+| Foreign keys | — | 30 |
+
+Enum values match member-for-member, table-for-table, column-for-column. There is no drift
+and no missing migration.
+
+Also checked: every enum literal in `app/**/*.ts{,x}` and `prisma/seed.ts` (34 of them —
+`"NEEDS_CLEANING"`, `"CHECKED_IN"`, `"MEAL_SALE"`, `"BED_AND_BREAKFAST"`, …) is a real member
+of a real enum type. The only three that aren't are `CRITICAL`, `LOW_STOCK` and
+`OUT_OF_STOCK`, which come from the `StockStatus` TypeScript union in `lib/inventory.ts` and
+are correctly not database enums.
+
+All of this is guarded by `__tests__/schema/migrations.test.ts`, which was verified to fail
+on three injected faults: a broken migration, a field added to `schema.prisma` with no
+migration, and a typo'd enum literal in `app/api/check-out/route.ts`.
+
+### 6.10 There is a second, much larger branch of work: `fix/stabilization`
+
+**This is the most important thing in this document.**
+
+On 2026-10-02 the remote gained `fix/stabilization` (HEAD `8ea59be`) — it did not exist when
+this branch was created. It is **104 files, ~9,348 insertions**, and it goes considerably
+further than this branch:
+
+| | `fix/stabilization` | this branch |
+|---|---|---|
+| Files changed | 104 | 20 |
+| Extra migrations | **4** (wastage accountability, menu-category normalisation, dashboard indexes, `Room.isActive`) | 0 |
+| New `lib/` modules | `password`, `permissions`, `page-auth`, `reservation-code`, `reporting`, `report-export`, `seed-guard`, `restaurant-dashboard` | 0 |
+| Security | session revocation on every read, 12h session cap, default admin password removed, staff delete | blanket `/api/*` guard |
+| New real tests | 2 (`auth/session-revocation`, `seed/cleanup-guard`) | 14 |
+| Lint config + fixes | no | yes (`npm run lint` clean) |
+| Docs | — | `ARCHITECTURE.md`, `SETUP.md`, corrected `TESTING.md` |
+
+Both branches independently fixed the same two bugs — the 6 unauthenticated GET endpoints and
+the seed ordering. **That is corroboration that those were real bugs, not stylistic
+preferences.**
+
+I ran the same migration/drift harness against `fix/stabilization`: **9 migrations apply
+cleanly, 25 models / 25 tables, 13 enums, 196 columns, no drift.** Its 59 REST handlers are
+all authenticated (at the handler level; its `middleware.ts` still only matches
+`/dashboard/*`, so nothing there is protected by a blanket guard). The 119 placeholder tests
+are still present and still test nothing.
+
+#### RESOLVED on 2026-10-02 — merged into this branch (`c88f25c`)
+
+`fix/stabilization` was merged into this branch and is now an **ancestor** of it. Both sets of
+fixes are in one tree: the 12 migrations, the new `lib/` modules, session revocation and the
+front-desk floor board from that branch, plus this branch's blanket `/api/*` guard,
+`.eslintrc.json`, `SETUP.md` and the real test suites. The `middleware.ts` matcher survived the
+merge with both entries (`/dashboard/:path*` and `/api/:path((?!auth/).*)`).
+
+Conflict resolution: the 6 API routes took `fix/stabilization` wholesale (this branch's only
+change to them was the auth line, which their versions already had, plus `requireRole`);
+`.gitignore` kept this branch's `*.tsbuildinfo` glob alongside their `backups/`; `.env.example`
+merged both headers after removing a duplicated `DATABASE_URL`/`DIRECT_URL` pair.
+
+**Git's auto-merge was silently wrong on `prisma/seed.ts`, and this is worth remembering.**
+It produced *zero conflict markers* yet generated two `const tariffs` declarations in the same
+scope — a `SyntaxError`. Both branches had rewritten the same region, so nothing was flagged.
+
+Worse, the same auto-merge dropped their *semantic* fix without a trace: their step renaming
+the `tariff-triple-*` rows from "Triple" to "Twin" was lost. The tariff ids are legacy, and
+`lib/tariffs.ts` resolves a booking's occupancy by prefix-matching the tariff **name** against
+`Single`/`Double`/`Twin`. Left as merged, a fresh database would have received a tariff named
+**"Triple — Bed Only"**, which no Twin booking can ever match — silently making rooms 27 and 28
+unbookable, with no error anywhere. The rename is now expressed in the tariff rows themselves
+(capacity 2, name `Twin — …`) and the upsert updates `name`, so re-running the seed also repairs
+a database that already has the bad name.
+
+The lesson generalises: **after any merge, read the auto-merged files that both sides touched.**
+A clean `git status` proves nothing about whether the merged code is correct.
+
+Verified after the merge: **199 tests pass**, `npm run lint` is clean, and all **12 migrations
+apply cleanly to an empty database with no schema drift**. A regression test now asserts every
+tariff name matches its occupancy prefix — mutation-tested by reintroducing the bad name and
+confirming the test fails.
+
+Cosmetic leftovers: `fix/stabilization` had committed four `*.patch` files
+(`rooms-final`, `seed-safety`, `session-revocation`, `stabilization-hardening`, ~3,000 lines)
+that duplicate code already in the tree. They're harmless, but they are dead weight.
+
+### 6.11 Dates were rendered in whatever timezone the machine happened to be in — **FIXED**
+
+Eight places rendered a date with a bare `toLocaleDateString()` (no locale, no timezone), so the
+day shown depended on where the code ran. The worst was an API error string quoted back to the
+front desk:
+
+> `Room 12 is booked from 10/2/2026 (RSV-…)`
+
+The three that actually bite are the recorded-at timestamps — expenses, purchases and wastage.
+A charge posted at **01:00 EAT is stored as 22:00 UTC the previous day**, so on any machine set
+to UTC those three files render it under the wrong business day. The five reservation-date sites
+happened to be safe only because `CreateReservationModal` stores them at UTC midnight, which
+lands on the same calendar day in Nairobi.
+
+All eight now use one helper, `formatDisplayDate()` in `lib/dates.ts`, which pins the timezone to
+`HOTEL_TIMEZONE` (`Africa/Nairobi`) and leaves the locale alone — so **the day is fixed without
+changing how anything looks**. The two pre-existing formatters that already pinned the zone
+(`lib/report-export.ts`, `components/reports/ReportsClient.tsx`) now share the same constant, and
+the duplicate definition in `lib/reporting.ts` was collapsed into it.
+
+Covered by 8 tests, including the exact midnight boundary, and mutation-tested: removing the
+timezone pin makes two of them fail.
+
+---
+
+### 6.12 The backup scripts — one real bug, and the part still unverified
+
+`scripts/backup-db.mjs` and `scripts/restore-db.mjs` are well written: the backup verifies
+the archive with `pg_restore --list` rather than trusting an exit code, deletes a dump that
+came out too small to be real, keeps a rolling window, and warns when the output folder is not
+cloud-synced. The restore refuses to run without an explicit target and refuses to write over
+the database the app is using. Neither script had a single test.
+
+`sanitiseForPgTools()` existed as **two separate copies**, one per script. They were
+behaviourally identical — but that is exactly how the `round2`/`roundMoney` divergence started
+(§6.9-adjacent, in `lib/restaurant.ts`): two implementations of one rule, which stay in step only
+until somebody edits one. This function decides which database gets dumped and which gets
+overwritten, so it is now one module, `scripts/pg-url.mjs`, imported by both.
+
+Writing the tests found a real bug in it:
+
+```js
+const host = url.hostname;               // "[::1]" for an IPv6 literal
+const isLocal = host === "::1";          // never true -- the brackets are still there
+```
+
+So `"::1"` was dead code, and a local IPv6 database was handed `sslmode=require`, which fails
+against a Postgres with no TLS configured. Fixed by stripping the brackets.
+
+The same work hardened a second hole: `new URL()` is permissive in ways that matter here.
+
+| Input | `new URL()` does | Consequence before the fix |
+|---|---|---|
+| `postgresql://` | parses, host `""` | accepted, then pg_dump fails confusingly |
+| `db.x.supabase.co:5432/postgres` | parses as protocol `db.x.supabase.co:`, host `""` | accepted — a URL that simply lost its scheme was treated as valid |
+
+Both now fail immediately with *"The connection string has no host."* That matters most for the
+restore script, whose entire job is refusing to write to the wrong database. The error message
+deliberately does not echo the URL, because the URL contains the password and these messages go
+to the console. There is a test for that too.
+
+**What is still NOT verified — and only you can do it.** No `pg_dump`, `pg_restore` or Postgres
+server exists in my sandbox, so nothing above exercises the actual dump. The logic around the
+tools is now tested; the tools themselves are not. A backup you have never restored is a guess.
+
+Run the restore drill on your machine, into a *throwaway* Supabase project (never the live one):
+
+```bat
+npm run backup                                  :: writes backups\hms-<stamp>.dump
+node restore-drill.mjs --file backups\hms-<stamp>.dump
+```
+
+The script refuses to target the database the app is using, which is what makes it safe to run.
+Until that has come back green at least once, treat the backup as unproven.
+
+---
+
+---
+
+## 7. What I could and couldn't run in this sandbox
+
+| Command | Result |
+|---|---|
+| `npm install` | ❌ `ERESOLVE` (vite 8 vs `@types/node` 20.14.11) |
+| `npm install --legacy-peer-deps` | ✅ 552 packages |
+| `npm run test:run` | ✅ 133 passed / 6 files (119 placeholders + 14 real — see §6.3) |
+| `npx tsc --noEmit` | ❌ as-is: 36 errors, all `TS7006` implicit-any |
+| `npx tsc --noEmit --noImplicitAny false` | ✅ **0 errors** — see below |
+| `npx tsc --noEmit middleware.ts` (isolated) | ✅ clean |
+| `npx next lint` | ✅ clean (was: blocked on the interactive ESLint setup prompt) |
+| TCP to `aws-1-eu-west-1.pooler.supabase.com:6543` and `:5432` | ✅ connect |
+| TLS/`pg` handshake to that host | ❌ `ECONNRESET` / "Connection terminated unexpectedly" — a transparent proxy accepts the TCP connection, then resets. `https://supabase.com` returns `000` |
+| `npx prisma generate` | ❌ `binaries.prisma.sh` unreachable; `--no-engine` and the wasm engine don't bypass it |
+| `npx prisma validate` / `migrate` | ❌ same engine download |
+| `npm run dev` | ❌ needs the generated client (and, for anything past `/login`, a reachable database) |
+
+### Typechecking without the Prisma engine
+
+`prisma generate` can't run here, and the stub `@prisma/client` ships when it hasn't been
+generated exports `PrismaClient: any` — so every `.map()` / `.find()` / `.reduce()` callback
+on a query result had no contextual type and raised `TS7006`. That masked everything else.
+
+I generated a local stand-in `default.d.ts` in `node_modules` (never committed — it lives in
+gitignored `node_modules`, and it is **not** a substitute for the real client) that declares
+the 13 enums from `schema.prisma` and 25 model delegates returning `any[]`. Results:
+
+| check | result |
+|---|---|
+| `tsc --noEmit` with the stub | 36 errors, **every one `TS7006`** |
+| ...of which non-`TS7006` (i.e. real type errors) | **0** |
+| `tsc --noEmit --noImplicitAny false` (neutralises the stub) | **0 errors** |
+
+All 36 are callbacks on values that came from a Prisma query — `prisma.$transaction(async (tx)`,
+`reservation.folios.find((f) => …)`, `folio.items.reduce((s, i) => …)` — exactly where the real
+generated client supplies the type. So no genuine type error surfaced, but this is **not**
+proof the code typechecks: the stub cannot check Prisma query shapes at all. Only
+`npx prisma generate && npx tsc --noEmit` on your machine settles it.
+
+**Re-run against the merged tree, and taken further.** With an improved stub (enums declared as
+`const` + union, the way the real generator does it, plus `Prisma.TransactionIsolationLevel` and
+`Prisma.TransactionClient`) the count fell from 213 errors to **16**, and I proved the remaining
+16 are artifacts rather than assuming it. The mechanism, reproduced in isolation:
+
+```
+prisma.menuItem.findMany()          -> any          (stub has no query shapes)
+new Map(items.map((i) => [i.id,i])) -> Map<unknown, unknown>
+.get(...)                           -> unknown
+if (!recipe) continue;              -> narrowed to {}
+recipe.ingredients                  -> "Property 'ingredients' does not exist on type '{}'"
+```
+
+The truthiness check narrows `unknown` to `{}`. With the real client the map is
+`Map<string, MenuItem>` and the property exists. Same for the `{ name: string }` family:
+calling `lib/menu-categories.ts`'s generic `sortMenuCategories<T extends { name: string }>` with
+an `any` argument makes TS fall back to the constraint, so `c.id` "doesn't exist" — verified by
+reproducing that exact error in a 10-line file with no Prisma involved.
+
+So: **16 residual errors, all provably from the missing client, none from the merged code.**
+The conclusion is unchanged — `npx prisma generate && npx tsc --noEmit` on your machine is the
+only thing that closes this.
+
+### What I *can* do without the Prisma engine: a real database, in-process
+
+`@electric-sql/pglite` is **PostgreSQL compiled to WebAssembly** and installed from npm — so
+it runs here, and in CI, with no server and no network. That is enough to actually execute
+the migration SQL and inspect the result, which is how §6.9 was verified.
+
+It is now a **devDependency** (`@electric-sql/pglite@0.5.8`, ~5 MB) used only by
+`__tests__/schema/migrations.test.ts`. Remove it if you'd rather not carry it — just delete
+that one test file and the dependency.
+
+Caveat: PGlite is PostgreSQL **18**; Supabase may be running 15 or 16. Everything these
+migrations use is long-stable syntax, but a feature introduced in 17/18 could pass here and
+fail there. It is not a substitute for running `prisma migrate deploy` against the real
+project once.
+
+**So: the app itself has not been executed here.** Everything in §2–§6 comes from reading
+the source, plus the greps and commands shown.
+
+---
+
+## 8. Suggested order of work
+
+**Tier 1 — before any new features** (cheap, unblocks everything else) — **done**
+1. ✅ `.env.example` rewritten with both Supabase pooler URLs (§6.4).
+2. ✅ `prisma/seed.ts` ordering fixed so a fresh clone can seed (§6.1).
+3. ✅ Auth added to the 6 open endpoints + a blanket `/api/*` middleware guard (§6.2).
+4. ✅ `.eslintrc.json` added; `npm run lint` is clean (§6.5).
+   ✅ `SETUP.md` written — Supabase + `.env` + `migrate` + `seed` + the checks to run locally.
+   ⬜ `tsc --noEmit` still needs `prisma generate`, which needs network access to
+   `binaries.prisma.sh`. Run it on your machine: `npm run prisma:generate && npx tsc --noEmit`.
+
+The consolidation in §6.10 is **done** — `main`, this branch and `fix/stabilization` are one
+tree again, so the work below can proceed on a single base.
+
+**Tier 2 — trust**
+
+> **Correction (2026-10-02, after the merge).** This section used to list items 7 and 8 as
+> open risks. They are **already handled** — `fix/stabilization` was better than the earlier
+> survey of it suggested, and re-reading the merged code showed both were fixed there. The
+> details are recorded below rather than deleting the items, because "why is this safe?"
+> is the question worth being able to answer later.
+
+5. Replace the fake tests with real ones. `scripts/pg-url.mjs` ✅ (14 tests) — see §6.12.
+   - ✅ `lib/dates.ts` (8), `lib/report-export.ts` (8)
+   - ✅ `lib/restaurant.ts` (23) — written as attacks on the cart trust boundary, plus cart
+     arithmetic. Found and fixed the `round2` divergence below.
+   - ✅ `lib/inventory.ts` (21) — availability engine, stock status, unit formatting. Found the
+     negative-quantity gap below.
+   - ⬜ Route-handler tests with a mocked Prisma client, then a real integration suite against a
+     throwaway Postgres. **This is the highest-value item left.**
+
+   **Two findings from writing those tests:**
+   - `round2` in `lib/restaurant.ts` and `roundMoney` in `lib/billing.ts` were two different
+     implementations of money rounding. They disagreed at exact half-cent boundaries (1.005 →
+     1.00 vs 1.01) while both writing `FolioItem.total`. `round2` is now an alias of
+     `roundMoney`, so there is one rounding rule.
+   - `POST /api/recipes` accepted non-positive ingredient quantities and non-integer portion
+     counts — `RecipeIngredient.quantity` is `Decimal(10,2)` with no CHECK constraint. A single
+     negative line made `computeAvailablePortions()` report the dish as completely unavailable
+     and name the broken ingredient to staff as the reason. The `<= 0` guard in
+     `lib/inventory.ts` was containing this at read time; the route now rejects it at write
+     time, and the quantity input gained the `min` it was missing.
+6. Add `zod` schemas at the route boundaries (it's installed and unused). Lower value than it
+   looks: the money and cart inputs are already validated by hand (`parseMoney`,
+   `accommodationRequired`, `resolveCartLines`), so this is mostly about consistency and
+   less bespoke code — not about closing a hole.
+7. ~~Make reservation codes collision-proof.~~ **Already safe.** `nextReservationCode()` picks
+   `max(existing) + 1` inside a transaction, which is a genuine read-then-write race — but
+   `Reservation.code` carries `@unique` in the schema, and `app/api/reservations/route.ts`
+   catches both `P2002` and `P2034` and returns a 409 *"Another reservation was saved at the
+   same time. Please try again."* So a collision is impossible in the data and the losing
+   request gets an honest error instead of a corrupt row. It does not auto-retry, which is the
+   only remaining nit.
+8. ~~Extract one `computeFolioTotals()` helper.~~ **Already done** — it is `folioTotals()` in
+   `lib/billing.ts`, used by all four money routes (`check-out`, `folios/[id]`, `payments`,
+   `guests/[id]`). All four filter `status: "COMPLETED"` before summing, so no route counts a
+   pending payment as paid. Rounding is centralised in `roundMoney()`, and check-in's
+   `accommodationRequired()` matches the folio items it writes (the `DISCOUNT` item is stored
+   as a **negative** total, which is what makes the sum agree).
+   The one thing to know: `app/api/reports/route.ts` does its **own** aggregation over folio
+   items rather than calling `folioTotals()`. It is mathematically equivalent today (same item
+   set, same `COMPLETED` filter), and it legitimately can't call the helper directly because it
+   sums across a reservation's folios grouped by type. But it is a second implementation, so a
+   future change to `folioTotals()` will not propagate there. Worth a comment or a shared
+   reducer at some point — a maintainability nit, not a bug.
+
+**Tier 3 — finish the half-built things**
+9. Wire up `AuditLog` writes (the schema and the `before`/`after`/`reason` columns are
+   already there) and an Audit Log screen.
+10. Wire up `Notification` + the dead bell icon.
+11. Decide the fate of `Order`/`OrderItem` — either use them for the POS or drop them.
+12. Role coverage for `WAITER` and `CASHIER`.
+
+**Tier 4 — features not started yet**
+13. Reservation day/month calendar views and filters (week view only today).
+14. Multi-room bookings (the `ReservationRoom` join table already supports it; the API and
+    `CreateReservationModal` assume `rooms[0]`).
+15. Night audit / end-of-day rollover.
+16. Occupancy / ADR / RevPAR reports and charts.
+17. Printing: folio invoice, check-in card, registration report.
+18. Rate calendar / seasonal pricing.
+19. Deployment (Vercel + Supabase) and CI.
