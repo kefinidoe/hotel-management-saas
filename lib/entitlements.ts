@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@prisma/client";
 import {
   getBandForRoomCount,
   calculateBandPricing,
@@ -489,7 +490,7 @@ export async function withUsageLimitLock<T>(
   hotelId: string,
   limitType: "maxRooms" | "maxStaff",
   increment: number,
-  operation: (tx: any) => Promise<T>
+  operation: (tx: Prisma.TransactionClient) => Promise<T>
 ): Promise<LockedUsageLimitResult<T>> {
   const sub = await getOrBootstrapSubscription(hotelId);
   const plan = sub.plan;
@@ -506,7 +507,7 @@ export async function withUsageLimitLock<T>(
     };
   }
 
-  return prisma.$transaction(async (tx: any) => {
+  return prisma.$transaction<LockedUsageLimitResult<T>>(async (tx) => {
     let currentCount: number;
     try {
       const lockKey = `hotel-${hotelId}-${limitType}-quota`;

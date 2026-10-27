@@ -84,7 +84,7 @@ export async function POST(req: Request) {
 
   try {
     const { withUsageLimitLock } = await import("@/lib/entitlements");
-    const result = await withUsageLimitLock(hotelId, "maxRooms", 1, (tx) => tx.room.create({
+    const result = await withUsageLimitLock(hotelId, "maxRooms", 1, async (tx) => tx.room.create({
       data: {
         hotelId,
         number: roomNumber,

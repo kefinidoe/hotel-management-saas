@@ -21,7 +21,10 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/page-auth", () => ({ requirePageRole: mocks.requirePageRole }));
-vi.mock("@/lib/permissions", () => ({ ROLE_GROUPS: mocks.roles }));
+vi.mock("@/lib/permissions", () => ({
+  ROLE_GROUPS: mocks.roles,
+  hasRole: (role: string, allowed: string[]) => allowed.includes(role),
+}));
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     room: { count: mocks.roomCount },

@@ -175,7 +175,7 @@ export async function POST(req: Request) {
 
       // Serialize the count and membership insertion under one hotel-scoped lock.
       const { withUsageLimitLock } = await import("@/lib/entitlements");
-      const quotaResult = await withUsageLimitLock(tenant.hotelId, "maxStaff", 1, (tx) => tx.hotelMembership.create({
+      const quotaResult = await withUsageLimitLock(tenant.hotelId, "maxStaff", 1, async (tx) => tx.hotelMembership.create({
         data: {
           userId: existingUser.id,
           hotelId: tenant.hotelId,

@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { requirePageRole } from "@/lib/page-auth";
-import { ROLE_GROUPS } from "@/lib/permissions";
+import { hasRole, ROLE_GROUPS } from "@/lib/permissions";
 import Link from "next/link";
 import {
   BedDouble,
@@ -27,7 +27,7 @@ function endOfToday() {
 
 export default async function DashboardPage() {
   const context = await requirePageRole(ROLE_GROUPS.ALL_STAFF, "RESERVATIONS");
-  const canViewFinancials = ROLE_GROUPS.FINANCIAL_REPORTS.includes(context.role);
+  const canViewFinancials = hasRole(context.role, ROLE_GROUPS.FINANCIAL_REPORTS);
   const hotelId = context.hotelId;
   const currencySymbol = context.hotel.currency || "KES";
 

@@ -1,12 +1,12 @@
 import { requireBillingPageRole } from "@/lib/page-auth";
-import { ROLE_GROUPS } from "@/lib/permissions";
+import { hasRole, ROLE_GROUPS } from "@/lib/permissions";
 import SubscriptionClient from "@/components/subscription/SubscriptionClient";
 
 export const dynamic = "force-dynamic";
 
 export default async function SubscriptionPage() {
   const context = await requireBillingPageRole(ROLE_GROUPS.ALL_STAFF);
-  const canViewBilling = ROLE_GROUPS.STAFF_ADMIN.includes(context.role);
+  const canViewBilling = hasRole(context.role, ROLE_GROUPS.STAFF_ADMIN);
 
   return (
     <div className="p-6">
