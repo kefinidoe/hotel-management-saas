@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { recordAudit } from "@/lib/audit";
+import { pendingInvitationIds, recordInvitationCreated } from "@/lib/invitations";
 import { HotelRole, MembershipStatus } from "@prisma/client";
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -50,6 +51,8 @@ export async function GET() {
       },
     });
 
+    const pending = await pendingInvitationIds(memberships.map((m) => m.id));
+
     const result = memberships.map((m) => ({
       id: m.id,
       userId: m.user.id,
@@ -59,6 +62,7 @@ export async function GET() {
       role: m.role,
       department: isManagement ? m.department : undefined,
       status: m.status,
+      invitationPending: pending.has(m.id),
       isActive: m.user.isActive && m.status === MembershipStatus.ACTIVE,
       lastLoginAt: isManagement && m.user.lastLoginAt ? m.user.lastLoginAt.toISOString() : null,
       createdAt: m.createdAt.toISOString(),
@@ -174,37 +178,28 @@ export async function POST(req: Request) {
         );
       }
 
-      // Serialize the count and membership insertion under one hotel-scoped lock.
-      const { withUsageLimitLock } = await import("@/lib/entitlements");
-      const quotaResult = await withUsageLimitLock(tenant.hotelId, "maxStaff", 1, async (tx) => tx.hotelMembership.create({
+      // The account belongs to somebody who already works somewhere else, so an
+      // administrator may only *invite* it. The membership is created SUSPENDED
+      // (no access) and becomes ACTIVE when the invitee accepts — see
+      // lib/invitations.ts. Seat limits are enforced at acceptance, because an
+      // invitation does not occupy a seat.
+      const newMembership = await prisma.hotelMembership.create({
         data: {
           userId: existingUser.id,
           hotelId: tenant.hotelId,
           role: requestedRole as HotelRole,
           department: department || null,
-          status: MembershipStatus.ACTIVE,
+          status: MembershipStatus.SUSPENDED,
         },
         include: { user: { select: { id: true, name: true, email: true, phone: true } } },
-      }));
-      if (!quotaResult.allowed) {
-        return NextResponse.json(
-          { error: quotaResult.limit.code || "PLAN_LIMIT_EXCEEDED", message: quotaResult.limit.reason },
-          { status: quotaResult.limit.code === "SUBSCRIPTION_STATUS_UNAVAILABLE" || quotaResult.limit.code === "USAGE_LIMIT_UNAVAILABLE" ? 503 : 403 }
-        );
-      }
-      const newMembership = quotaResult.value;
+      });
 
-      await recordAudit({
+      await recordInvitationCreated({
         hotelId: tenant.hotelId,
-        userId: tenant.userId,
-        action: "STAFF_MEMBER_ADDED",
-        entity: "HOTEL_MEMBERSHIP",
-        entityId: newMembership.id,
-        metadata: {
-          targetUserId: existingUser.id,
-          role: newMembership.role,
-          existingAccount: true,
-        },
+        membershipId: newMembership.id,
+        invitedUserId: existingUser.id,
+        role: newMembership.role,
+        invitedByUserId: tenant.userId,
       });
 
       return NextResponse.json(
@@ -217,9 +212,11 @@ export async function POST(req: Request) {
           role: newMembership.role,
           department: newMembership.department,
           status: newMembership.status,
-          message: "Existing user added to hotel workspace.",
+          invitationPending: true,
+          message:
+            "Invitation sent. The account holder must accept it before this hotel appears in their workspace.",
         },
-        { status: 201 }
+        { status: 202 }
       );
     }
 

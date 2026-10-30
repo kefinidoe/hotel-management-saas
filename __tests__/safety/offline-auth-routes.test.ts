@@ -63,6 +63,24 @@ describe("database-backed authentication routes in offline preview", () => {
     expect(authModuleLoaded).not.toHaveBeenCalled();
   });
 
+  it("returns 503 for invitation decisions without loading Prisma", async () => {
+    vi.stubEnv("DATABASE_URL", "");
+    const { POST } = await import("../../app/api/auth/invitations/[id]/route");
+    const response = await POST(
+      new Request("http://localhost:3000/api/auth/invitations/mem-1", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "accept" }),
+      }),
+      { params: Promise.resolve({ id: "mem-1" }) }
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: "DATABASE_UNAVAILABLE" });
+    expect(prismaModuleLoaded).not.toHaveBeenCalled();
+    expect(authModuleLoaded).not.toHaveBeenCalled();
+  });
+
   it("returns 503 for NextAuth endpoints without evaluating the Prisma-backed auth config", async () => {
     vi.stubEnv("DATABASE_URL", "");
     const { GET } = await import("../../app/api/auth/[...nextauth]/route");
