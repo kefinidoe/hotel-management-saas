@@ -1,12 +1,13 @@
 import type { Metadata } from "next";
+import { PRODUCT_DESCRIPTION, PRODUCT_NAME } from "@/lib/brand";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: {
-    default: "Axis Hotel Nakuru",
-    template: "%s | Axis Hotel Nakuru",
+    default: PRODUCT_NAME,
+    template: `%s | ${PRODUCT_NAME}`,
   },
-  description: "Axis Hotel Nakuru management system",
+  description: PRODUCT_DESCRIPTION,
   icons: {
     icon: [
       { url: "/favicon.ico", sizes: "any" },

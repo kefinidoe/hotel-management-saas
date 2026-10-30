@@ -53,19 +53,22 @@ trailing slash.
 **URL-encode the password** if it contains `@`, `#`, `/` or a space — `@` → `%40`, `#` → `%23`,
 space → `%20`. This is the single most common cause of "can't reach database server".
 
-## 4. Apply the schema and seed
+## 4. Generate the client; keep migrations and demo seeding isolated
 
 ```bash
-npm run prisma:generate      # generates the client from schema.prisma
-npx prisma migrate deploy    # applies the 5 migrations (use `migrate dev` if you're editing schema.prisma)
-npm run seed                 # admin login, 6 tariffs, 26 rooms, payment methods, menu, 15 inventory items, 3 recipes
+npm run prisma:generate
 ```
 
-`npm run seed` prints the login it creates: `admin@hotel.com` / `Admin123!`.
-**Change that password before anyone else can reach the app.**
+The migration history and target database are under review. Do not run `migrate deploy`,
+`migrate dev`, `db push`, `migrate resolve`, or reset against Supabase or any populated/shared
+database. A migration rehearsal requires an explicitly approved, disposable local target.
 
-If `migrate deploy` reports drift, `npx prisma migrate status` will tell you what it thinks
-is out of sync — don't reach for `migrate reset`, it drops all data.
+`npm run seed` inserts fictional demo hotels and users. It is refused unless both database URLs
+point to the same loopback database named `hotel_saas_demo_<suffix>`,
+`SAAS_ENVIRONMENT=local`, and `SAAS_ALLOW_LOCAL_DEMO_SEED=true`. Set
+`SAAS_DEMO_INITIAL_PASSWORD` only in the local process environment to a unique password of at
+least 16 characters; the seed does not print it. Never seed Supabase, a shared database, or the
+Axis Hotel system. Existing user passwords are not changed by rerunning the seed.
 
 ## 5. Run it
 

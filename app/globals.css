@@ -41,7 +41,7 @@
     @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
   }
   .badge-available   { @apply badge bg-primary-50 text-primary-700; }
-  .badge-occupied    { @apply badge bg-champagne-50 text-champagne-500; }
+  .badge-occupied    { @apply badge bg-accent-50 text-accent-500; }
   .badge-maintenance { @apply badge bg-danger/10 text-danger; }
   .badge-cleaning    { @apply badge bg-info/10 text-info; }
 }

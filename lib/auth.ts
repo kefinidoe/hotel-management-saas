@@ -30,6 +30,9 @@ export const authOptions: NextAuthOptions = {
       },
       async authorize(credentials) {
         if (!credentials?.email || !credentials?.password) return null;
+        if (!process.env.DATABASE_URL?.trim()) {
+          throw new Error("DATABASE_UNAVAILABLE");
+        }
         const cleanEmail = credentials.email.trim();
         const user = await prisma.user.findFirst({
           where: {

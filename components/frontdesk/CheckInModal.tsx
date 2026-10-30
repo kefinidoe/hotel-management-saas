@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { RoomStatus } from "@prisma/client";
 import { X } from "lucide-react";
 import { roundMoney } from "@/lib/billing";
+import { apiErrorMessage, requestJson } from "@/lib/client-api";
 import {
   blocksGuestPlacement,
   isBookableToday,
@@ -55,25 +56,25 @@ export default function CheckInModal({
   const [reference, setReference] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loadingMethods, setLoadingMethods] = useState(true);
+  const [methodLoadAttempt, setMethodLoadAttempt] = useState(0);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
+    setLoadingMethods(true);
+    setError(null);
 
     async function loadMethods() {
       try {
-        const response = await fetch("/api/payment-methods");
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Could not load payment methods.");
+        const data = await requestJson<PaymentMethod[]>("/api/payment-methods");
+        if (!Array.isArray(data)) throw new Error("The server returned an invalid payment-method list.");
         if (!cancelled) {
           setMethods(data);
           setMethodId(data[0]?.id ?? "");
         }
       } catch (loadError) {
         if (!cancelled) {
-          setError(
-            loadError instanceof Error ? loadError.message : "Could not load payment methods."
-          );
+          setError(apiErrorMessage(loadError, "Could not load payment methods."));
         }
       } finally {
         if (!cancelled) setLoadingMethods(false);
@@ -84,7 +85,7 @@ export default function CheckInModal({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [methodLoadAttempt]);
 
   // The room the guest is actually given: the reserved one unless the
   // receptionist moves them because it is not ready.
@@ -125,7 +126,7 @@ export default function CheckInModal({
 
     setSubmitting(true);
     try {
-      const response = await fetch("/api/check-in", {
+      const data = await requestJson<{ ok: true; folioId: string }>("/api/check-in", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -136,14 +137,10 @@ export default function CheckInModal({
           reference,
         }),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Could not check in the guest.");
       onCheckedIn(data.folioId);
       onClose();
     } catch (submitError) {
-      setError(
-        submitError instanceof Error ? submitError.message : "Could not check in the guest."
-      );
+      setError(apiErrorMessage(submitError, "Could not check in the guest."));
     } finally {
       setSubmitting(false);
     }
@@ -293,9 +290,21 @@ export default function CheckInModal({
           )}
 
           {error && (
-            <p className="text-sm text-danger bg-danger/5 border border-danger/20 rounded-control px-3 py-2">
-              {error}
-            </p>
+            <div role="alert" className="flex items-center justify-between gap-3 text-sm text-danger bg-danger/5 border border-danger/20 rounded-control px-3 py-2">
+              <span>{error}</span>
+              {!methods.length && !loadingMethods && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoadingMethods(true);
+                    setMethodLoadAttempt((attempt) => attempt + 1);
+                  }}
+                  className="underline"
+                >
+                  Retry
+                </button>
+              )}
+            </div>
           )}
 
           <div className="flex justify-end gap-2 pt-1">

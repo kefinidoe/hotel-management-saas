@@ -1,11 +1,8 @@
 import type { Config } from "tailwindcss";
+import { BRAND_COLORS } from "./lib/brand";
 
-// Design system tokens for the Hotel Management System.
-// Brand: Axis Hotel Nakuru — deep navy + gold, per the hotel's actual logo.
-// The sidebar nav uses its own `sidebar` scale (matched to a reference
-// screenshot: dark navy-charcoal bg + teal active state) rather than
-// reusing primary/champagne. Keep all screens referencing these tokens
-// instead of raw hex values so the whole app stays visually consistent.
+// HotelFlow design tokens: clean neutrals with a deep teal primary and fresh
+// aqua accent. Keep components on shared tokens for a consistent SaaS identity.
 
 const config: Config = {
   content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}", "./lib/**/*.{ts,tsx}"],
@@ -13,38 +10,38 @@ const config: Config = {
     extend: {
       colors: {
         // Neutral base
-        bg: "#FAF9F6",           // warm off-white app background
-        surface: "#FFFFFF",       // cards
-        border: "#E7E5E0",
+        bg: "#F6F9FA",
+        surface: "#FFFFFF",
+        border: "#DCE6E9",
         text: {
-          primary: "#1F2421",     // deep charcoal
-          secondary: "#6B7268",   // muted gray
-          muted: "#9CA39B",
+          primary: "#1D3036",
+          secondary: "#61747A",
+          muted: "#94A4A8",
         },
-        // Primary accent — Axis navy (from logo, exact hex #0B0244)
         primary: {
-          50: "#ECEBF0",
-          100: "#CECCDA",
-          300: "#918DAB",
-          500: "#0B0244",
-          600: "#0A023D",
-          700: "#090236",
+          50: "#EAF3F5",
+          100: "#D2E5E8",
+          300: "#79AEB7",
+          400: "#388B98",
+          500: BRAND_COLORS.primary,
+          600: "#0B4B58",
+          700: "#083B45",
         },
-        // Secondary accent — Axis gold (from logo, exact hex #DB921F)
-        champagne: {
-          50: "#FAEFDD",
-          200: "#EFCE9A",
-          500: "#DB921F",
-          600: "#BA7C1A",
+        accent: {
+          50: "#E8F7F5",
+          100: "#D4F0EC",
+          200: "#B8E8E2",
+          400: "#55C8BC",
+          500: BRAND_COLORS.accent,
+          600: "#16877C",
         },
-        // Dark sidebar panel — colors matched exactly from reference screenshot
         sidebar: {
-          bg: "#182533",
-          hover: "#22384A",      // derived by lightening bg — no hover state was visible to sample directly
-          active: "#1C989E",
-          text: "#F2F6F9",
-          textMuted: "rgba(242, 246, 249, 0.6)",
-          border: "rgba(242, 246, 249, 0.08)",
+          bg: "#16323A",
+          hover: "#224650",
+          active: "#35B9AC",
+          text: "#F2F8F9",
+          textMuted: "rgba(242, 248, 249, 0.68)",
+          border: "rgba(242, 248, 249, 0.09)",
         },
         success: "#2E7D46",
         warning: "#B8860B",

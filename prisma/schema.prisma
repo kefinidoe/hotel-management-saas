@@ -134,9 +134,10 @@ model HotelMembership {
   user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   hotelId   String
   hotel     Hotel            @relation(fields: [hotelId], references: [id], onDelete: Cascade)
-  role      HotelRole
-  status    MembershipStatus @default(ACTIVE)
-  createdAt DateTime         @default(now())
+  role       HotelRole
+  department String?
+  status     MembershipStatus @default(ACTIVE)
+  createdAt  DateTime         @default(now())
   updatedAt DateTime         @updatedAt
 
   @@unique([userId, hotelId])
@@ -155,7 +156,7 @@ model User {
   phone        String?
   passwordHash String
   platformRole PlatformRole? // NULL for standard hotel staff; non-null for SaaS platform operators
-  department   String?
+  department   String?       // Legacy profile field; hotel staff departments live on HotelMembership.
   isActive     Boolean       @default(true)
   lastLoginAt  DateTime?
   createdAt    DateTime      @default(now())
@@ -320,12 +321,14 @@ model Reservation {
 model ReservationRoom {
   id            String      @id @default(uuid())
   reservationId String
-  reservation   Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  hotelId       String
+  reservation   Reservation @relation(fields: [reservationId, hotelId], references: [id, hotelId], onDelete: Cascade)
   roomId        String
-  room          Room        @relation(fields: [roomId], references: [id])
+  room          Room        @relation(fields: [roomId, hotelId], references: [id, hotelId])
   rate          Decimal     @db.Decimal(10, 2)
 
   @@unique([reservationId, roomId])
+  @@index([hotelId])
 }
 
 // ===========================================================================
@@ -505,6 +508,7 @@ model MenuItem {
   price      Decimal      @db.Decimal(10, 2)
   isActive   Boolean      @default(true)
   recipe     Recipe?
+  orderItems OrderItem[]
 
   @@unique([id, hotelId])
   @@index([hotelId, categoryId, isActive])
@@ -518,33 +522,40 @@ enum OrderStatus {
 }
 
 model Order {
-  id              String         @id @default(uuid())
-  hotelId         String
-  hotel           Hotel          @relation(fields: [hotelId], references: [id], onDelete: Cascade)
-  status          OrderStatus    @default(PAID)
-  paymentMethodId String?
-  paymentMethod   PaymentMethod? @relation(fields: [paymentMethodId, hotelId], references: [id, hotelId])
-  folioId         String?
-  folio           Folio?         @relation(fields: [folioId, hotelId], references: [id, hotelId])
-  total           Decimal        @db.Decimal(10, 2)
-  createdAt       DateTime       @default(now())
-  items           OrderItem[]
+  id                    String         @id @default(uuid())
+  hotelId               String
+  hotel                 Hotel          @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  status                OrderStatus    @default(PAID)
+  paymentMethodId       String?
+  paymentMethod         PaymentMethod? @relation(fields: [paymentMethodId, hotelId], references: [id, hotelId])
+  folioId               String?
+  folio                 Folio?         @relation(fields: [folioId, hotelId], references: [id, hotelId])
+  total                 Decimal        @db.Decimal(10, 2)
+  idempotencyOperation  String?
+  idempotencyKey        String?
+  requestFingerprint    String?
+  createdAt             DateTime       @default(now())
+  items                 OrderItem[]
 
   @@unique([id, hotelId])
+  @@unique([hotelId, idempotencyOperation, idempotencyKey])
   @@index([hotelId, createdAt])
   @@index([hotelId, folioId])
 }
 
-// Inherited tenant ownership strictly via parent Order
+// The tenant key is copied from Order so both the order and optional menu-item
+// references can be enforced with composite foreign keys.
 model OrderItem {
-  id         String   @id @default(uuid())
+  id         String    @id @default(uuid())
   orderId    String
-  order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  hotelId    String
+  order      Order     @relation(fields: [orderId, hotelId], references: [id, hotelId], onDelete: Restrict)
   menuItemId String?
+  menuItem   MenuItem? @relation(fields: [menuItemId, hotelId], references: [id, hotelId], onDelete: Restrict)
   name       String
-  unitPrice  Decimal  @db.Decimal(10, 2)
+  unitPrice  Decimal   @db.Decimal(10, 2)
   quantity   Int
-  total      Decimal  @db.Decimal(10, 2)
+  total      Decimal   @db.Decimal(10, 2)
 
   @@index([orderId])
 }
@@ -580,25 +591,29 @@ model InventoryItem {
   @@index([hotelId, isActive])
 }
 
-// Inherited 1:1 tenant ownership via parent MenuItem
+// The tenant key allows both recipe relationships to be protected by the DB.
 model Recipe {
   id         String   @id @default(uuid())
   menuItemId String   @unique
-  menuItem   MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  hotelId    String
+  menuItem   MenuItem @relation(fields: [menuItemId, hotelId], references: [id, hotelId], onDelete: Restrict)
   portions   Int      @default(1)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
   ingredients RecipeIngredient[]
+
+  @@unique([id, hotelId])
+  @@unique([menuItemId, hotelId])
 }
 
-// Inherited tenant ownership via parent Recipe
 model RecipeIngredient {
   id              String        @id @default(uuid())
   recipeId        String
-  recipe          Recipe        @relation(fields: [recipeId], references: [id], onDelete: Cascade)
   inventoryItemId String
-  inventoryItem   InventoryItem @relation(fields: [inventoryItemId], references: [id])
+  hotelId         String
+  recipe          Recipe        @relation(fields: [recipeId, hotelId], references: [id, hotelId], onDelete: Cascade)
+  inventoryItem   InventoryItem @relation(fields: [inventoryItemId, hotelId], references: [id, hotelId])
   quantity        Decimal       @db.Decimal(10, 2)
 
   @@unique([recipeId, inventoryItemId])

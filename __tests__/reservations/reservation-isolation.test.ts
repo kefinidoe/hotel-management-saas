@@ -105,6 +105,7 @@ vi.doMock("@/lib/authz", () => ({
     }
     return mockCurrentTenant;
   },
+  requireModule: async () => null,
   requireRole: (role: any, allowed: readonly (typeof HotelRole)[keyof typeof HotelRole][]) => {
     if (!role || !allowed.includes(role)) {
       return Response.json({ error: "You don't have permission to do that." }, { status: 403 });
@@ -270,7 +271,13 @@ vi.doMock("@/lib/prisma", () => ({
             if (data.rooms?.create) {
               for (const r of data.rooms.create) {
                 const rrId = `rr-${Date.now()}`;
-                db.reservationRooms.set(rrId, { id: rrId, reservationId: id, roomId: r.roomId, rate: r.rate });
+                db.reservationRooms.set(rrId, {
+                  id: rrId,
+                  reservationId: id,
+                  roomId: r.roomId,
+                  hotelId: created.hotelId,
+                  rate: r.rate,
+                });
               }
             }
             return created;
@@ -593,6 +600,9 @@ describe("Phase 4: Multi-Tenant Reservation & Stay Security Hardening", () => {
       const saved = db.reservations.get(data.id);
       expect(saved).toBeDefined();
       expect(saved.hotelId).toBe("hotel-a"); // Strictly bound to tenant.hotelId
+      expect(saved.rooms.create[0]).not.toHaveProperty("hotelId");
+      const createdRoom = Array.from(db.reservationRooms.values()).find((room) => room.reservationId === data.id);
+      expect(createdRoom).toMatchObject({ reservationId: data.id, roomId: "room-a-101", hotelId: "hotel-a" });
     });
   });
 

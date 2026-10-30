@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
-import { getTenantFromRoute } from "@/lib/authz";
+import { getTenantFromRoute, requireModule } from "@/lib/authz";
 import { CheckOutError, executeCheckOut } from "@/lib/stay-service";
 
 export async function POST(req: Request) {
   const tenant = await getTenantFromRoute();
   if (tenant instanceof NextResponse) return tenant;
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   let body: any;
   try {

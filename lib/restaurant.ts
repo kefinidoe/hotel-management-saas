@@ -116,9 +116,36 @@ export function cartSubtotal(lines: CartLine[]): number {
 }
 
 export function cartTotal(lines: CartLine[]): number {
-  // Axis Hotel selected no restaurant VAT for the current phase. When tax
-  // configuration is added, the approved rate must come from server data.
+  // Restaurant orders currently have no tax component. If tax configuration
+  // is introduced, the approved rate must come from server-controlled settings.
   return cartSubtotal(lines);
+}
+
+export function compareCanonicalIds(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+export function computeChargeToRoomFingerprint(params: {
+  hotelId: string;
+  folioId: string;
+  items: Array<{ menuItemId: string; quantity: number }>;
+  tableNumber?: string;
+}): string {
+  const quantities = new Map<string, number>();
+  for (const item of params.items) {
+    const menuItemId = item.menuItemId.trim();
+    quantities.set(menuItemId, (quantities.get(menuItemId) ?? 0) + item.quantity);
+  }
+  const payload = {
+    scope: "restaurant-charge-to-room-v1",
+    hotelId: params.hotelId.trim(),
+    folioId: params.folioId.trim(),
+    items: [...quantities.entries()]
+      .sort(([a], [b]) => compareCanonicalIds(a, b))
+      .map(([menuItemId, quantity]) => ({ menuItemId, quantity })),
+    tableNumber: (params.tableNumber ?? "").trim(),
+  };
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 }
 
 export function computePosFingerprint(params: {
@@ -131,7 +158,7 @@ export function computePosFingerprint(params: {
   reference?: string;
 }): string {
   const sortedItems = [...params.items]
-    .sort((a, b) => a.menuItemId.localeCompare(b.menuItemId))
+    .sort((a, b) => compareCanonicalIds(a.menuItemId, b.menuItemId))
     .map((item) => ({
       menuItemId: item.menuItemId,
       quantity: item.quantity,

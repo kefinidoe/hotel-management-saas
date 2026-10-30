@@ -1,10 +1,18 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
-import { HotelStatus, MembershipStatus } from "@prisma/client";
+import { isDatabaseConfigured } from "@/lib/db-safety-guard";
 
 export async function GET() {
+  if (!isDatabaseConfigured()) {
+    return NextResponse.json(
+      { error: "DATABASE_UNAVAILABLE", message: "Hotel memberships are unavailable while the database is not configured." },
+      { status: 503 }
+    );
+  }
+
+  // Avoid evaluating the database-backed auth and Prisma modules in offline preview.
+  const { authOptions } = await import("@/lib/auth");
+  const { prisma } = await import("@/lib/prisma");
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) {
     return NextResponse.json({ error: "UNAUTHENTICATED" }, { status: 401 });
@@ -13,9 +21,9 @@ export async function GET() {
   const memberships = await prisma.hotelMembership.findMany({
     where: {
       userId: session.user.id,
-      status: MembershipStatus.ACTIVE,
+      status: "ACTIVE",
       hotel: {
-        status: { in: [HotelStatus.ACTIVE, HotelStatus.TRIALING] },
+        status: { in: ["ACTIVE", "TRIALING"] },
       },
     },
     include: {

@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import type { WastageReason } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
+import { findActiveHotelStaff } from "@/lib/hotel-staff";
 
 const WASTAGE_REASONS = new Set<WastageReason>([
   "SPOILAGE",
@@ -19,12 +20,24 @@ export async function GET() {
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
   if (forbidden) return forbidden;
 
-  const wastages = await prisma.wastage.findMany({
-    where: { hotelId: tenant.hotelId },
-    include: { inventoryItem: true, recordedBy: true, accountableUser: true },
-    orderBy: { createdAt: "desc" },
-    take: 100,
-  });
+  const blocked = await requireModule(tenant.hotelId, "INVENTORY");
+  if (blocked) return blocked;
+
+  const [wastages, memberships] = await Promise.all([
+    prisma.wastage.findMany({
+      where: { hotelId: tenant.hotelId },
+      include: {
+        inventoryItem: { select: { name: true, unit: true, costPerUnit: true } },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    }),
+    prisma.hotelMembership.findMany({
+      where: { hotelId: tenant.hotelId, status: "ACTIVE", user: { isActive: true } },
+      select: { userId: true, user: { select: { name: true } } },
+    }),
+  ]);
+  const staffNamesByUserId = new Map(memberships.map((membership) => [membership.userId, membership.user.name]));
 
   return NextResponse.json(
     wastages.map((wastage) => ({
@@ -34,11 +47,8 @@ export async function GET() {
       quantity: Number(wastage.quantity),
       reason: wastage.reason,
       department: wastage.department,
-      accountableName:
-        wastage.accountableName ??
-        wastage.accountableUser?.name ??
-        "Not recorded (legacy entry)",
-      recordedByName: wastage.recordedBy.name,
+      accountableName: wastage.accountableName ?? "Not recorded (legacy entry)",
+      recordedByName: staffNamesByUserId.get(wastage.recordedById) ?? "Former hotel staff",
       createdAt: wastage.createdAt,
       value: Math.round(
         Number(wastage.quantity) * Number(wastage.inventoryItem.costPerUnit)
@@ -57,6 +67,9 @@ export async function POST(req: Request) {
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "INVENTORY");
+  if (blocked) return blocked;
 
   const body = await req.json();
   const inventoryItemId =
@@ -89,19 +102,16 @@ export async function POST(req: Request) {
   let accountableDepartment: string | null = null;
 
   if (requestedAccountableUserId) {
-    const accountableUser = await prisma.user.findUnique({
-      where: { id: requestedAccountableUserId },
-      select: { id: true, name: true, department: true, isActive: true },
-    });
-    if (!accountableUser || !accountableUser.isActive) {
+    const accountableStaff = await findActiveHotelStaff(tenant.hotelId, requestedAccountableUserId);
+    if (!accountableStaff) {
       return NextResponse.json(
-        { error: "Choose an active staff member who is accountable for the wastage." },
+        { error: "Choose an active staff member from this hotel who is accountable for the wastage." },
         { status: 400 }
       );
     }
-    accountableUserId = accountableUser.id;
-    accountableName = accountableUser.name;
-    accountableDepartment = accountableUser.department;
+    accountableUserId = accountableStaff.user.id;
+    accountableName = accountableStaff.user.name;
+    accountableDepartment = accountableStaff.department;
   }
 
   if (!accountableName) {

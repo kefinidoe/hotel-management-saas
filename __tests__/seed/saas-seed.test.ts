@@ -1,8 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
-import fs from "node:fs";
-import path from "node:path";
+import { applyPendingMigrations } from "../schema/migration-runner";
 
 function countValue(result: { rows: unknown[] }): number {
   return Number((result.rows[0] as { c: number | string }).c);
@@ -13,12 +12,7 @@ describe("Phase 3 Multi-Tenant Fictional Seed Verification", () => {
 
   beforeAll(async () => {
     db = new PGlite();
-    const migrationPath = path.join(
-      process.cwd(),
-      "prisma/migrations/20261008123000_multi_tenant_saas_init/migration.sql"
-    );
-    const sql = fs.readFileSync(migrationPath, "utf8");
-    await db.exec(sql);
+    await applyPendingMigrations(db);
   });
 
   afterAll(async () => {
@@ -137,7 +131,7 @@ describe("Phase 3 Multi-Tenant Fictional Seed Verification", () => {
     );
 
     // Verify record counts
-    const hotels = await db.query(`SELECT count(*) as c FROM "Hotel"`);
+    const hotels = await db.query(`SELECT count(*) as c FROM "Hotel" WHERE id IN ('hotel-a', 'hotel-b')`);
     expect(countValue(hotels)).toBe(2);
 
     const users = await db.query(`SELECT count(*) as c FROM "User"`);

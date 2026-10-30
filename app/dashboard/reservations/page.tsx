@@ -6,14 +6,21 @@ import { ROLE_GROUPS } from "@/lib/permissions";
 export const dynamic = 'force-dynamic';
 
 export default async function ReservationsPage() {
-  const session = await requirePageRole(ROLE_GROUPS.GUEST_STAYS);
+  const tenant = await requirePageRole(ROLE_GROUPS.GUEST_STAYS, "RESERVATIONS");
 
-  const rooms = await prisma.room.findMany({
-    // Retired rooms keep their history but cannot be booked.
-    where: { isActive: true },
-    include: { roomType: true },
-    orderBy: { number: "asc" },
-  });
+  const [rooms, roomTypes] = await Promise.all([
+    prisma.room.findMany({
+      // Retired rooms keep their history but cannot be booked.
+      where: { hotelId: tenant.hotelId, isActive: true },
+      include: { roomType: true },
+      orderBy: { number: "asc" },
+    }),
+    prisma.roomType.findMany({
+      where: { hotelId: tenant.hotelId },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, baseRate: true, mealPlan: true },
+    }),
+  ]);
 
   const initialRooms = rooms.map((r) => ({
     id: r.id,
@@ -23,5 +30,11 @@ export default async function ReservationsPage() {
     status: r.status,
   }));
 
-  return <ReservationsClient rooms={initialRooms} currentUserRole={session.role} />;
+  return (
+    <ReservationsClient
+      rooms={initialRooms}
+      roomTypes={roomTypes.map((type) => ({ ...type, baseRate: Number(type.baseRate) }))}
+      currentUserRole={tenant.role}
+    />
+  );
 }

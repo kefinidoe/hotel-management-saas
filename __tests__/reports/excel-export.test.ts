@@ -219,6 +219,18 @@ describe("Excel export — Booking History sheet", () => {
     expect(widths).toHaveLength(header.length);
   });
 
+  it("uses HotelFlow branding in workbook metadata and the shared brand color", () => {
+    const files = unzipSync(buildReportsWorkbook(__fixtureForPreview() as any));
+    const core = strFromU8(files["docProps/core.xml"]);
+    const app = strFromU8(files["docProps/app.xml"]);
+    const styles = strFromU8(files["xl/styles.xml"]);
+
+    expect(core).toContain("HotelFlow Management Report");
+    expect(core).toContain("<dc:creator>HotelFlow</dc:creator>");
+    expect(app).toContain("<Application>HotelFlow</Application>");
+    expect(styles).toContain('rgb="FF0E5968"');
+  });
+
   it("writes the room as text, not as a number", () => {
     // "07" must stay "07" -- if Excel coerced it to 7 the zero-padding is lost,
     // which matters because the real rooms are numbered 01, 02, ... 41.

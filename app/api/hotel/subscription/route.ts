@@ -1,13 +1,17 @@
 import { NextResponse } from "next/server";
-import { getTenantFromRoute } from "@/lib/authz";
-import { getHotelUsageAndSubscription } from "@/lib/entitlements";
+import { getBillingTenantFromRoute, requireRole } from "@/lib/authz";
+import { ROLE_GROUPS } from "@/lib/permissions";
+import { getHotelUsageAndSubscription, SubscriptionStatusUnavailableError, PAST_DUE_GRACE_PERIOD_DAYS } from "@/lib/entitlements";
 import { ORDERED_ROOM_BANDS, PRICING_CONFIG, calculateBandPricing, BillingInterval } from "@/lib/plans";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const tenant = await getTenantFromRoute();
+  const tenant = await getBillingTenantFromRoute();
   if (tenant instanceof NextResponse) return tenant;
+
+  const forbidden = requireRole(tenant.role, ROLE_GROUPS.STAFF_ADMIN);
+  if (forbidden) return forbidden;
 
   try {
     const details = await getHotelUsageAndSubscription(tenant.hotelId);
@@ -97,6 +101,7 @@ export async function GET() {
         isRecommended: b.id === details.breakdown.recommendedBand.id,
       })),
       policy: {
+        pastDueGracePeriodDays: PAST_DUE_GRACE_PERIOD_DAYS,
         billableDefinition: "Billable rooms include all active rooms in the property inventory (including temporary out-of-order and maintenance rooms). Decommissioned or archived rooms are excluded.",
         additions: "Rooms may be added up to the active band limit. Exceeding the band boundary requires stepping up to the corresponding room band.",
         removals: "Decommissioning rooms reduces your billable room count. Downgrading to a lower room band preserves existing room records without destructive deletion.",
@@ -106,6 +111,12 @@ export async function GET() {
     });
   } catch (error) {
     console.error("Failed to fetch tenant subscription:", error);
+    if (error instanceof SubscriptionStatusUnavailableError) {
+      return NextResponse.json(
+        { error: error.code, message: error.message },
+        { status: error.statusCode }
+      );
+    }
     return NextResponse.json(
       { error: "SERVER_ERROR", message: "Failed to retrieve subscription status." },
       { status: 500 }

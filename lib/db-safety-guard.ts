@@ -29,6 +29,11 @@ export interface DatabaseSafetyConfig {
   directUrl?: string;
 }
 
+/** Runtime availability check for offline-preview and API error handling. */
+export function isDatabaseConfigured(): boolean {
+  return Boolean(process.env.DATABASE_URL?.trim());
+}
+
 export function extractSafeMetadata(rawUrl: string): {
   protocol: string;
   hostname: string;

@@ -27,7 +27,9 @@ function runVerification() {
       console.log(` - Project Reference  : ${meta.userPrefix}`);
     }
     console.log("------------------------------------------------------------");
-    console.log(" Database target confirmed safe for SaaS operations.");
+    console.log(" Configured target matches the declared identifier only.");
+    console.log(" This check does NOT verify ownership, production status, or migration history.");
+    console.log(" Independently verify the project and migration history before any DB operation.");
     console.log("============================================================");
     process.exit(0);
   } catch (error) {

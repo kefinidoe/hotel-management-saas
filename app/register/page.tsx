@@ -1,10 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import Image from "next/image";
 import Link from "next/link";
 import { signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
+import HotelFlowBrand from "@/components/HotelFlowBrand";
+import { PRODUCT_NAME } from "@/lib/brand";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -38,9 +39,9 @@ export default function RegisterPage() {
         body: JSON.stringify({ name, email, phone, password }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(data.error || "Could not complete registration.");
+        setError(data.message || data.error || "Account creation is temporarily unavailable. No account was created.");
         setLoading(false);
         return;
       }
@@ -71,17 +72,12 @@ export default function RegisterPage() {
   return (
     <main className="min-h-screen bg-bg flex items-center justify-center p-4">
       <div className="card w-full max-w-md">
-        <Image
-          src="/axis-hotel-logo.png"
-          alt="Axis Hotel"
-          width={302}
-          height={312}
-          priority
-          className="w-32 h-auto mx-auto mb-4 rounded-xl"
-        />
-        <h1 className="text-xl font-bold mb-1 text-center">Create Hotel Owner Account</h1>
+        <div className="mb-6 flex justify-center">
+          <HotelFlowBrand />
+        </div>
+        <h1 className="text-xl font-bold mb-1 text-center">Create your {PRODUCT_NAME} account</h1>
         <p className="text-text-secondary text-sm mb-6 text-center">
-          Register your account to set up your hotel workspace.
+          Set up your hotel management workspace.
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -173,7 +169,7 @@ export default function RegisterPage() {
         </form>
 
         <div className="mt-6 text-center text-xs text-text-secondary border-t border-border pt-4">
-          Already have an account?{" "}
+          Already using {PRODUCT_NAME}?{" "}
           <Link href="/login" className="text-primary-600 hover:underline font-medium">
             Sign in
           </Link>

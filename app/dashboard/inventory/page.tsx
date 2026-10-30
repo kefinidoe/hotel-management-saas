@@ -7,34 +7,48 @@ import { ROLE_GROUPS } from "@/lib/permissions";
 export const dynamic = "force-dynamic";
 
 export default async function InventoryPage() {
-  await requirePageRole(ROLE_GROUPS.MANAGEMENT);
+  const tenant = await requirePageRole(ROLE_GROUPS.MANAGEMENT, "INVENTORY");
 
   const startOfToday = new Date();
   startOfToday.setHours(0, 0, 0, 0);
 
   const [items, todaysMovements, todaysPurchases] = await Promise.all([
-    prisma.inventoryItem.findMany({ orderBy: { name: "asc" } }),
+    prisma.inventoryItem.findMany({
+      where: { hotelId: tenant.hotelId },
+      orderBy: { name: "asc" },
+    }),
     prisma.stockMovement.findMany({
-      where: { createdAt: { gte: startOfToday }, type: { in: ["MEAL_SALE", "WASTAGE"] } },
+      where: {
+        hotelId: tenant.hotelId,
+        inventoryItem: { is: { hotelId: tenant.hotelId } },
+        createdAt: { gte: startOfToday },
+        type: { in: ["MEAL_SALE", "WASTAGE"] },
+      },
       include: { inventoryItem: true },
     }),
-    prisma.purchase.findMany({ where: { purchaseDate: { gte: startOfToday } } }),
+    prisma.purchase.findMany({
+      where: {
+        hotelId: tenant.hotelId,
+        inventoryItem: { is: { hotelId: tenant.hotelId } },
+        purchaseDate: { gte: startOfToday },
+      },
+    }),
   ]);
 
-  const initialItems = items.map((i) => {
-    const currentStock = Number(i.currentStock);
-    const reorderLevel = Number(i.reorderLevel);
-    const costPerUnit = Number(i.costPerUnit);
+  const initialItems = items.map((item) => {
+    const currentStock = Number(item.currentStock);
+    const reorderLevel = Number(item.reorderLevel);
+    const costPerUnit = Number(item.costPerUnit);
     return {
-      id: i.id,
-      sku: i.sku,
-      name: i.name,
-      category: i.category,
-      unit: i.unit,
+      id: item.id,
+      sku: item.sku,
+      name: item.name,
+      category: item.category,
+      unit: item.unit,
       currentStock,
       reorderLevel,
       costPerUnit,
-      supplier: i.supplier,
+      supplier: item.supplier,
       stockValue: Math.round(currentStock * costPerUnit),
       status: getStockStatus(currentStock, reorderLevel),
     };
@@ -42,19 +56,20 @@ export default async function InventoryPage() {
 
   const todaysConsumption = Math.round(
     todaysMovements.reduce(
-      (sum, m) => sum + Math.abs(Number(m.quantity)) * Number(m.inventoryItem.costPerUnit),
+      (sum, movement) =>
+        sum + Math.abs(Number(movement.quantity)) * Number(movement.inventoryItem.costPerUnit),
       0
     )
   );
   const todaysPurchasesValue = Math.round(
-    todaysPurchases.reduce((sum, p) => sum + Number(p.totalCost), 0)
+    todaysPurchases.reduce((sum, purchase) => sum + Number(purchase.totalCost), 0)
   );
 
   const kpis = {
     totalItems: initialItems.length,
-    totalValue: initialItems.reduce((s, i) => s + i.stockValue, 0),
-    lowStock: initialItems.filter((i) => i.status === "LOW_STOCK" || i.status === "CRITICAL").length,
-    outOfStock: initialItems.filter((i) => i.status === "OUT_OF_STOCK").length,
+    totalValue: initialItems.reduce((sum, item) => sum + item.stockValue, 0),
+    lowStock: initialItems.filter((item) => item.status === "LOW_STOCK" || item.status === "CRITICAL").length,
+    outOfStock: initialItems.filter((item) => item.status === "OUT_OF_STOCK").length,
     todaysConsumption,
     todaysPurchases: todaysPurchasesValue,
   };

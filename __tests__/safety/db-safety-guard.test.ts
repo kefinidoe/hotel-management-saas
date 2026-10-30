@@ -5,6 +5,51 @@ import {
   DatabaseSafetyError,
 } from "../../lib/db-safety-guard";
 
+function withProcessEnvironment(
+  values: Record<string, string | undefined>,
+  run: () => void
+) {
+  const previous = new Map<string, string | undefined>();
+  for (const [name, value] of Object.entries(values)) {
+    previous.set(name, process.env[name]);
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+
+  try {
+    run();
+  } finally {
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+describe("Database Safety Guard — Process Environment", () => {
+  it("fails closed when SAAS_ENVIRONMENT is missing from process.env", () => {
+    withProcessEnvironment({
+      SAAS_ENVIRONMENT: undefined,
+      SAAS_DATABASE_IDENTIFIER: "hotel_saas_local",
+      DATABASE_URL: "postgresql://local@127.0.0.1:5432/hotel_saas_local",
+      DIRECT_URL: undefined,
+    }, () => {
+      expect(() => assertDatabaseSafety()).toThrow(/SAAS_ENVIRONMENT environment variable is MISSING/);
+    });
+  });
+
+  it("fails closed for an invalid SAAS_ENVIRONMENT from process.env", () => {
+    withProcessEnvironment({
+      SAAS_ENVIRONMENT: "development",
+      SAAS_DATABASE_IDENTIFIER: "hotel_saas_local",
+      DATABASE_URL: "postgresql://local@127.0.0.1:5432/hotel_saas_local",
+      DIRECT_URL: undefined,
+    }, () => {
+      expect(() => assertDatabaseSafety()).toThrow(/SAAS_ENVIRONMENT must be strictly 'saas'/);
+    });
+  });
+});
+
 describe("Database Safety Guard — Fail-Closed Behavior", () => {
   it("fails closed when SAAS_ENVIRONMENT is missing", () => {
     expect(() =>

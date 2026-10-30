@@ -1,4 +1,26 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { afterEach, describe, it, expect, vi, beforeEach } from "vitest";
+
+vi.mock("@prisma/client", () => ({
+  HotelRole: {
+    HOTEL_OWNER: "HOTEL_OWNER",
+    HOTEL_ADMIN: "HOTEL_ADMIN",
+    MANAGER: "MANAGER",
+    RECEPTIONIST: "RECEPTIONIST",
+    ACCOUNTANT: "ACCOUNTANT",
+    HOUSEKEEPER: "HOUSEKEEPER",
+    WAITER: "WAITER",
+    CASHIER: "CASHIER",
+    TECHNICIAN: "TECHNICIAN",
+  },
+  HotelStatus: { ACTIVE: "ACTIVE", TRIALING: "TRIALING", SUSPENDED: "SUSPENDED", CANCELLED: "CANCELLED" },
+  MembershipStatus: { ACTIVE: "ACTIVE", SUSPENDED: "SUSPENDED", INVITED: "INVITED" },
+  PlatformRole: {
+    PLATFORM_SUPER_ADMIN: "PLATFORM_SUPER_ADMIN",
+    PLATFORM_SUPPORT: "PLATFORM_SUPPORT",
+    PLATFORM_BILLING: "PLATFORM_BILLING",
+  },
+}));
+
 import { HotelRole, HotelStatus, MembershipStatus, PlatformRole } from "@prisma/client";
 
 // Hoisted mocks
@@ -125,8 +147,11 @@ describe("Phase 4: Multi-Tenant Context & Access Control", () => {
   };
 
   beforeEach(() => {
+    vi.stubEnv("DATABASE_URL", "postgresql://mock:mock@localhost/mock");
     vi.clearAllMocks();
   });
+
+  afterEach(() => vi.unstubAllEnvs());
 
   describe("1. Active Hotel Resolution & Strict Validation", () => {
     it("resolves context when valid explicit active_hotel_id cookie is provided", async () => {
@@ -374,6 +399,23 @@ describe("Phase 4: Multi-Tenant Context & Access Control", () => {
       expect(res.status).toBe(403);
       const json = await res.json();
       expect(json.error).toBe("NO_ACTIVE_MEMBERSHIP");
+    });
+
+    it("returns a clear 503 and preserves membership state while offline", async () => {
+      const { POST } = await import("../../app/api/auth/switch-hotel/route");
+      vi.stubEnv("DATABASE_URL", "");
+      mockGetServerSession.mockResolvedValueOnce({ user: { id: "user-123" } });
+
+      const req = new Request("http://localhost:3000/api/auth/switch-hotel", {
+        method: "POST",
+        headers: { origin: "http://localhost:3000", "content-type": "application/json" },
+        body: JSON.stringify({ hotelId: "hotel-alpha" }),
+      });
+
+      const res = await POST(req);
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toBe("DATABASE_UNAVAILABLE");
+      expect(mockPrismaHotelMembership.findUnique).not.toHaveBeenCalled();
     });
 
     it("sets active_hotel_id cookie when switching to valid operational hotel", async () => {

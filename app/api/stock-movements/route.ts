@@ -1,36 +1,66 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 
 export async function GET(req: Request) {
-  const auth = await requireAuth();
-  if (auth instanceof NextResponse) return auth;
+  const tenant = await getTenantFromRoute();
+  if (tenant instanceof NextResponse) return tenant;
 
-  const forbidden = requireRole(auth, ROLE_GROUPS.MANAGEMENT);
+  const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
   if (forbidden) return forbidden;
 
+  const blocked = await requireModule(tenant.hotelId, "INVENTORY");
+  if (blocked) return blocked;
+
   const { searchParams } = new URL(req.url);
-  const itemId = searchParams.get("itemId");
+  const requestedItemId = searchParams.get("itemId")?.trim();
+  const hotelId = tenant.hotelId;
+
+  if (requestedItemId) {
+    const item = await prisma.inventoryItem.findFirst({
+      where: { id: requestedItemId, hotelId },
+      select: { id: true },
+    });
+    if (!item) return NextResponse.json({ error: "Inventory item not found." }, { status: 404 });
+  }
 
   const movements = await prisma.stockMovement.findMany({
-    where: itemId ? { inventoryItemId: itemId } : undefined,
-    include: { inventoryItem: true, user: true },
+    where: {
+      hotelId,
+      ...(requestedItemId ? { inventoryItemId: requestedItemId } : {}),
+    },
+    include: {
+      inventoryItem: true,
+      user: {
+        select: {
+          name: true,
+          memberships: {
+            where: { hotelId, status: "ACTIVE" },
+            select: { id: true },
+            take: 1,
+          },
+        },
+      },
+    },
     orderBy: { createdAt: "desc" },
     take: 200,
   });
 
   return NextResponse.json(
-    movements.map((m) => ({
-      id: m.id,
-      itemName: m.inventoryItem.name,
-      unit: m.inventoryItem.unit,
-      type: m.type,
-      quantity: Number(m.quantity),
-      beforeQty: Number(m.beforeQty),
-      afterQty: Number(m.afterQty),
-      reference: m.reference,
-      userName: m.user?.name ?? "System",
-      createdAt: m.createdAt,
+    movements.map((movement) => ({
+      id: movement.id,
+      itemName: movement.inventoryItem.name,
+      unit: movement.inventoryItem.unit,
+      type: movement.type,
+      quantity: Number(movement.quantity),
+      beforeQty: Number(movement.beforeQty),
+      afterQty: Number(movement.afterQty),
+      reference: movement.reference,
+      userName:
+        movement.user?.memberships.length
+          ? movement.user.name
+          : "Former staff",
+      createdAt: movement.createdAt,
     }))
   );
 }

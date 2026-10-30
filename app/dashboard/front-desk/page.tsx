@@ -13,22 +13,30 @@ import {
 
 export const dynamic = "force-dynamic";
 
-const frontDeskInclude = {
-  guest: true,
-  rooms: { include: { room: true } },
-  folios: {
-    include: {
-      items: { select: { total: true } },
-      payments: {
-        where: { status: "COMPLETED" },
-        select: { amount: true },
+function frontDeskInclude(hotelId: string) {
+  return {
+    guest: true,
+    // ReservationRoom itself has no hotelId, so constrain the related Room as
+    // well as the parent Reservation to avoid serializing an invalid cross-tenant link.
+    rooms: {
+      where: { room: { is: { hotelId } } },
+      include: { room: true },
+    },
+    folios: {
+      where: { hotelId },
+      include: {
+        items: { select: { total: true } },
+        payments: {
+          where: { hotelId, status: "COMPLETED" },
+          select: { amount: true },
+        },
       },
     },
-  },
-} satisfies Prisma.ReservationInclude;
+  } satisfies Prisma.ReservationInclude;
+}
 
 type FrontDeskReservation = Prisma.ReservationGetPayload<{
-  include: typeof frontDeskInclude;
+  include: ReturnType<typeof frontDeskInclude>;
 }>;
 
 function startOfToday() {
@@ -78,14 +86,15 @@ function serializeReservation(reservation: FrontDeskReservation) {
 }
 
 export default async function FrontDeskPage() {
-  const session = await requirePageRole(ROLE_GROUPS.FRONT_DESK);
+  const session = await requirePageRole(ROLE_GROUPS.FRONT_DESK, "RESERVATIONS");
   const todayStart = startOfToday();
   const todayEnd = endOfToday();
 
-  const [reservations, rooms] = await Promise.all([
+  const [reservations, rooms, roomTypes] = await Promise.all([
     prisma.reservation.findMany({
       relationLoadStrategy: "join",
       where: {
+        hotelId: session.hotelId,
         OR: [
           {
             checkInDate: { gte: todayStart, lt: todayEnd },
@@ -94,16 +103,21 @@ export default async function FrontDeskPage() {
           { status: "CHECKED_IN" },
         ],
       },
-      include: frontDeskInclude,
+      include: frontDeskInclude(session.hotelId),
       orderBy: { checkInDate: "asc" },
     }),
     prisma.room.findMany({
       relationLoadStrategy: "join",
       // Retired rooms keep their history but are not part of the rooms a guest
       // can be given, so they never appear on the board.
-      where: { isActive: true },
+      where: { hotelId: session.hotelId, isActive: true },
       include: { roomType: true },
       orderBy: { number: "asc" },
+    }),
+    prisma.roomType.findMany({
+      where: { hotelId: session.hotelId },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, baseRate: true, mealPlan: true },
     }),
   ]);
 
@@ -129,11 +143,13 @@ export default async function FrontDeskPage() {
 
   return (
     <FrontDeskClient
+      activeTenantId={session.hotelId}
       currentUserRole={session.role}
       arrivals={arrivals.map(serializeReservation)}
       departures={departures.map(serializeReservation)}
       inHouse={inHouse.map(serializeReservation)}
       availableRoomsCount={rooms.filter((room) => isBookableToday(room.status)).length}
+      roomTypes={roomTypes.map((type) => ({ ...type, baseRate: Number(type.baseRate) }))}
       rooms={rooms.map((room) => ({
         id: room.id,
         number: room.number,

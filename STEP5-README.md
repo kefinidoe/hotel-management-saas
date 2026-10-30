@@ -40,10 +40,9 @@ No database or seed changes needed this time. Restart `npm run dev`.
    Mark the ticket Completed and confirm the room returns to Available.
 
 ## Still pending (noted, not forgotten)
-From Axis Hotel Nakuru's real check-in form: vehicle registration, payment
-mode at check-in, the Bed-Only vs B&B meal-plan tariff structure, pax count,
-and a discount field. We'll fold these into the check-in flow and room
-types once the operational core (this step) is solid.
+Potential front-desk requirements include vehicle registration, payment mode
+at check-in, meal-plan tariffs, guest counts, and discounts. Confirm each
+property's workflow and configuration before extending the check-in flow.
 
 ## What's next (Step 6)
 - Restaurant POS with "Charge to Room" (posts straight to the guest's folio)

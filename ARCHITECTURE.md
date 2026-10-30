@@ -1,4 +1,4 @@
-# Hotel Management System — Architecture & Current State
+# HotelFlow — Architecture & Current State
 
 Written from a full read of the repo at commit `1fb45bf` ("Update hotel management system").
 Every claim below was checked against the files named next to it.
@@ -7,7 +7,7 @@ Every claim below was checked against the files named next to it.
 
 ## 1. What this actually is
 
-A **single Next.js 14 (App Router) application** for Axis Hotel Nakuru. There is no separate
+A **Next.js App Router SaaS application** for multiple hotel workspaces. There is no separate
 backend service. The "backend" is:
 
 - **PostgreSQL** (hosted on Supabase) holding the data

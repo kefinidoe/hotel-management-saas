@@ -1,7 +1,7 @@
 
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireModule, requireRole, ROLE_GROUPS } from "@/lib/authz";
 import { REQUIRED_MENU_CATEGORIES } from "@/lib/menu-categories";
 
 export async function POST(req: Request) {
@@ -15,6 +15,8 @@ export async function POST(req: Request) {
   if (forbidden) {
     return forbidden;
   }
+  const blocked = await requireModule(tenant.hotelId, "RESTAURANT_POS");
+  if (blocked) return blocked;
 
   let body: unknown;
 

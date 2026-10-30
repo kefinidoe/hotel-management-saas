@@ -6,6 +6,18 @@ import type { HotelRole } from "@prisma/client";
 import clsx from "clsx";
 import { hasRole, ROLE_GROUPS } from "@/lib/permissions";
 import { isRequiredMenuCategory } from "@/lib/menu-categories";
+import {
+  CheckoutLockBusyError,
+  CheckoutOwnershipError,
+  CheckoutTenantMismatchError,
+  LegacyCheckoutAttemptError,
+  LockedAttemptStorage,
+  POS_LEGACY_STORAGE_KEY,
+  decideStorageEvent,
+  tenantPOSStorageKey,
+  withPOSCheckoutOwnership,
+  type LockManagerLike,
+} from "@/lib/pos-checkout-ownership";
 
 type MenuItem = { id: string; name: string; price: number; availablePortions: number | null };
 type Category = { id: string; name: string; items: MenuItem[] };
@@ -30,18 +42,20 @@ export type CheckoutState =
   | "CONFIRMED_FAILURE";
 
 export interface PendingCheckoutSnapshot {
+  hotelId: string;
+  operation: "PAY_NOW" | "CHARGE_TO_ROOM";
   idempotencyKey: string;
   items: OrderLine[];
-  paymentMethodId: string;
-  customerName: string;
-  reference: string;
+  paymentMethodId?: string;
+  customerName?: string;
+  reference?: string;
+  folioId?: string;
   tableNumber: string;
   timestamp: number;
   isExpired?: boolean;
   status?: "IN_FLIGHT" | "UNCERTAIN" | "PAYLOAD_MISMATCH" | "EXPIRED";
 }
 
-const POS_STORAGE_KEY = "hms_pos_pending_attempt_v1";
 export const POS_SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 /**
@@ -62,6 +76,17 @@ export const POS_SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
  * 4. Anti-Wipe Guarantee: An expired snapshot (>24h) is never silently deleted without verification.
  *    It is quarantined and locked until reconciled against the server.
  */
+function responseRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function responseText(value: unknown, field: string): string | undefined {
+  const record = responseRecord(value);
+  const text = record?.[field];
+  return typeof text === "string" ? text : undefined;
+}
+
 export function validatePendingSnapshot(raw: unknown): PendingCheckoutSnapshot | null {
   if (!raw || typeof raw !== "object") return null;
   const obj = raw as Record<string, unknown>;
@@ -82,7 +107,13 @@ export function validatePendingSnapshot(raw: unknown): PendingCheckoutSnapshot |
     if (typeof it.quantity !== "number" || it.quantity <= 0) return null;
     if (typeof it.unitPrice !== "number" || it.unitPrice < 0) return null;
   }
-  if (typeof obj.paymentMethodId !== "string" || !obj.paymentMethodId.trim()) {
+  if (typeof obj.hotelId !== "string" || !obj.hotelId || obj.hotelId.trim() !== obj.hotelId) return null;
+  const operation = obj.operation;
+  if (operation !== "PAY_NOW" && operation !== "CHARGE_TO_ROOM") return null;
+  if (operation === "PAY_NOW" && (typeof obj.paymentMethodId !== "string" || !obj.paymentMethodId.trim())) {
+    return null;
+  }
+  if (operation === "CHARGE_TO_ROOM" && (typeof obj.folioId !== "string" || !obj.folioId.trim())) {
     return null;
   }
 
@@ -90,53 +121,249 @@ export function validatePendingSnapshot(raw: unknown): PendingCheckoutSnapshot |
   const isExpired =
     typeof obj.timestamp === "number" &&
     (Date.now() - obj.timestamp > POS_SNAPSHOT_TTL_MS || obj.timestamp <= 0);
-
-  return {
-    idempotencyKey: obj.idempotencyKey.trim(),
-    items: obj.items as OrderLine[],
-    paymentMethodId: obj.paymentMethodId.trim(),
-    customerName: typeof obj.customerName === "string" ? obj.customerName.trim() : "",
-    reference: typeof obj.reference === "string" ? obj.reference.trim() : "",
-    tableNumber: typeof obj.tableNumber === "string" ? obj.tableNumber.trim() : "",
-    timestamp: typeof obj.timestamp === "number" ? obj.timestamp : Date.now(),
-    isExpired,
-    status: (typeof obj.status === "string"
+  const status: PendingCheckoutSnapshot["status"] =
+    obj.status === "IN_FLIGHT" || obj.status === "UNCERTAIN" || obj.status === "PAYLOAD_MISMATCH" || obj.status === "EXPIRED"
       ? obj.status
       : isExpired
-      ? "EXPIRED"
-      : "UNCERTAIN") as any,
+        ? "EXPIRED"
+        : "UNCERTAIN";
+
+  return {
+    hotelId: obj.hotelId,
+    operation,
+    idempotencyKey: obj.idempotencyKey,
+    items: obj.items as OrderLine[],
+    ...(typeof obj.paymentMethodId === "string" ? { paymentMethodId: obj.paymentMethodId } : {}),
+    customerName: typeof obj.customerName === "string" ? obj.customerName : "",
+    reference: typeof obj.reference === "string" ? obj.reference : "",
+    ...(typeof obj.folioId === "string" ? { folioId: obj.folioId } : {}),
+    tableNumber: typeof obj.tableNumber === "string" ? obj.tableNumber : "",
+    timestamp: typeof obj.timestamp === "number" ? obj.timestamp : Date.now(),
+    isExpired,
+    status,
   };
 }
 
-function savePendingAttempt(snapshot: PendingCheckoutSnapshot) {
-  try {
-    if (typeof window !== "undefined") {
-      const serialized = JSON.stringify(snapshot);
-      if (window.localStorage) {
-        window.localStorage.setItem(POS_STORAGE_KEY, serialized);
-      }
-      if (window.sessionStorage) {
-        window.sessionStorage.setItem(POS_STORAGE_KEY, serialized);
-      }
+export function buildChargeToRoomRequest(attempt: PendingCheckoutSnapshot): {
+  idempotencyKey: string;
+  payload: { items: OrderLine[]; folioId: string; tableNumber: string };
+} {
+  if (attempt.operation !== "CHARGE_TO_ROOM" || !attempt.folioId) {
+    throw new Error("A room-charge attempt requires its saved operation and folio destination.");
+  }
+  return {
+    idempotencyKey: attempt.idempotencyKey,
+    payload: {
+      items: attempt.items,
+      folioId: attempt.folioId,
+      tableNumber: attempt.tableNumber,
+    },
+  };
+}
+
+export function samePendingRequest(left: PendingCheckoutSnapshot, right: PendingCheckoutSnapshot): boolean {
+  if (left.hotelId !== right.hotelId || left.operation !== right.operation || left.idempotencyKey !== right.idempotencyKey) return false;
+  if (left.operation === "CHARGE_TO_ROOM" && right.operation === "CHARGE_TO_ROOM") {
+    try {
+      return JSON.stringify(buildChargeToRoomRequest(left).payload) ===
+        JSON.stringify(buildChargeToRoomRequest(right).payload);
+    } catch {
+      return false;
     }
-  } catch (err) {
-    console.error("Failed to persist pending POS checkout to storage:", err);
+  }
+  const leftPayload = {
+    items: left.items,
+    paymentMethodId: left.paymentMethodId,
+    customerName: left.customerName,
+    reference: left.reference,
+    tableNumber: left.tableNumber,
+  };
+  const rightPayload = {
+    items: right.items,
+    paymentMethodId: right.paymentMethodId,
+    customerName: right.customerName,
+    reference: right.reference,
+    tableNumber: right.tableNumber,
+  };
+  return JSON.stringify(leftPayload) === JSON.stringify(rightPayload);
+}
+
+export function isChargeToRoomResponse(value: unknown, attempt: PendingCheckoutSnapshot): value is {
+  ok: true;
+  operation: "CHARGE_TO_ROOM";
+  idempotencyKey: string;
+  requestFingerprint: string;
+  orderId: string;
+  folioId: string;
+  guestName: string;
+  total: number;
+} {
+  return Boolean(
+    value && typeof value === "object" &&
+    (value as Record<string, unknown>).ok === true &&
+    (value as Record<string, unknown>).operation === "CHARGE_TO_ROOM" &&
+    (value as Record<string, unknown>).idempotencyKey === attempt.idempotencyKey &&
+    (value as Record<string, unknown>).folioId === attempt.folioId &&
+    typeof (value as Record<string, unknown>).requestFingerprint === "string" &&
+    /^[a-f0-9]{64}$/.test((value as Record<string, unknown>).requestFingerprint as string) &&
+    typeof (value as Record<string, unknown>).orderId === "string" &&
+    Boolean(((value as Record<string, unknown>).orderId as string).trim()) &&
+    typeof (value as Record<string, unknown>).guestName === "string" &&
+    Boolean(((value as Record<string, unknown>).guestName as string).trim()) &&
+    Number.isFinite((value as Record<string, unknown>).total) &&
+    ((value as Record<string, unknown>).total as number) >= 0
+  );
+}
+
+export function isExplicitNotCommittedResponse(value: unknown, status: number): boolean {
+  if (status !== 400 && status !== 409) return false;
+  return Boolean(value && typeof value === "object" &&
+    (value as Record<string, unknown>).outcome === "NOT_COMMITTED");
+}
+
+export async function computePayNowAttemptFingerprint(attempt: PendingCheckoutSnapshot): Promise<string> {
+  if (attempt.operation !== "PAY_NOW" || !attempt.paymentMethodId?.trim()) {
+    throw new Error("A Pay-now attempt with its original payment method is required for verification.");
+  }
+  if (!globalThis.crypto?.subtle) {
+    throw new Error("Secure browser fingerprinting is unavailable; the saved payment was not reconciled.");
+  }
+
+  const quantities = new Map<string, number>();
+  for (const item of attempt.items) {
+    const menuItemId = item.menuItemId.trim();
+    if (!menuItemId || !Number.isInteger(item.quantity) || item.quantity < 1) {
+      throw new Error("The saved Pay-now request cannot be fingerprinted safely.");
+    }
+    const quantity = (quantities.get(menuItemId) ?? 0) + item.quantity;
+    if (quantity > 1000) throw new Error("The saved Pay-now quantity is outside the allowed range.");
+    quantities.set(menuItemId, quantity);
+  }
+
+  // Keep property order and canonical fields aligned with computePosFingerprint
+  // on the server. The POS request does not send customerPhone today.
+  const canonical = {
+    hotelId: attempt.hotelId.trim(),
+    items: [...quantities.entries()]
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([menuItemId, quantity]) => ({ menuItemId, quantity })),
+    paymentMethodId: attempt.paymentMethodId.trim(),
+    customerName: (attempt.customerName ?? "").trim(),
+    customerPhone: "",
+    tableNumber: (attempt.tableNumber ?? "").trim(),
+    reference: (attempt.reference ?? "").trim(),
+  };
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(JSON.stringify(canonical)),
+  );
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export function isPayNowResponse(
+  value: unknown,
+  attempt: PendingCheckoutSnapshot,
+  expectedFingerprint: string,
+): value is {
+  ok: true;
+  operation: "PAY_NOW";
+  idempotencyKey: string;
+  requestFingerprint: string;
+  hotelId: string;
+  paymentId: string;
+  folioId: string;
+  guestName: string;
+  total: number;
+  method: string;
+  isIdempotentReplay?: boolean;
+} {
+  if (!value || typeof value !== "object") return false;
+  const data = value as Record<string, unknown>;
+  return Boolean(
+    attempt.operation === "PAY_NOW" &&
+    /^[a-f0-9]{64}$/.test(expectedFingerprint) &&
+    data.ok === true &&
+    data.hotelId === attempt.hotelId &&
+    data.operation === "PAY_NOW" &&
+    data.idempotencyKey === attempt.idempotencyKey &&
+    data.requestFingerprint === expectedFingerprint &&
+    typeof data.requestFingerprint === "string" && /^[a-f0-9]{64}$/.test(data.requestFingerprint) &&
+    (data.isIdempotentReplay === undefined || typeof data.isIdempotentReplay === "boolean") &&
+    typeof data.paymentId === "string" && Boolean(data.paymentId.trim()) &&
+    typeof data.folioId === "string" && Boolean(data.folioId.trim()) &&
+    typeof data.guestName === "string" && Boolean(data.guestName.trim()) &&
+    typeof data.total === "number" && Number.isFinite(data.total) && data.total >= 0 &&
+    typeof data.method === "string" && Boolean(data.method.trim())
+  );
+}
+
+export function isConfirmedPayNowStatusResponse(
+  value: unknown,
+  attempt: PendingCheckoutSnapshot,
+  expectedFingerprint: string,
+): value is {
+  found: true;
+  hotelId: string;
+  operation: "PAY_NOW";
+  idempotencyKey: string;
+  requestFingerprint: string;
+  matchesFingerprint: true;
+  status: "COMPLETED";
+  paymentId: string;
+  folioId: string;
+  guestName: string;
+  method: string;
+  total: number;
+} {
+  if (!value || typeof value !== "object") return false;
+  const data = value as Record<string, unknown>;
+  return Boolean(
+    attempt.operation === "PAY_NOW" &&
+    /^[a-f0-9]{64}$/.test(expectedFingerprint) &&
+    data.found === true &&
+    data.hotelId === attempt.hotelId &&
+    data.operation === "PAY_NOW" &&
+    data.idempotencyKey === attempt.idempotencyKey &&
+    data.requestFingerprint === expectedFingerprint &&
+    data.matchesFingerprint === true &&
+    data.status === "COMPLETED" &&
+    typeof data.paymentId === "string" && Boolean(data.paymentId.trim()) &&
+    typeof data.folioId === "string" && Boolean(data.folioId.trim()) &&
+    typeof data.guestName === "string" && Boolean(data.guestName.trim()) &&
+    typeof data.method === "string" && Boolean(data.method.trim()) &&
+    typeof data.total === "number" && Number.isFinite(data.total) && data.total >= 0
+  );
+}
+
+function mirrorPendingAttemptToSession(snapshot: PendingCheckoutSnapshot, storageKey: string) {
+  try {
+    window.sessionStorage?.setItem(storageKey, JSON.stringify(snapshot));
+  } catch {
+    // localStorage is the required shared claim; sessionStorage is only a tab-local mirror.
   }
 }
 
-function clearPendingAttemptStorage() {
+function clearSessionMirrorIfOwned(attempt: PendingCheckoutSnapshot, storageKey: string) {
   try {
-    if (typeof window !== "undefined") {
-      if (window.localStorage) {
-        window.localStorage.removeItem(POS_STORAGE_KEY);
-      }
-      if (window.sessionStorage) {
-        window.sessionStorage.removeItem(POS_STORAGE_KEY);
-      }
+    const raw = window.sessionStorage?.getItem(storageKey);
+    if (!raw) return;
+    const current = validatePendingSnapshot(JSON.parse(raw));
+    if (current && samePendingRequest(current, attempt)) {
+      window.sessionStorage.removeItem(storageKey);
     }
-  } catch (err) {
-    console.error("Failed to clear pending POS checkout from storage:", err);
+  } catch {
+    // A stale tab-local mirror is safe: the shared localStorage claim is authoritative.
   }
+}
+
+function clearPendingAttemptStorageIfOwned(
+  attempts: LockedAttemptStorage,
+  attempt: PendingCheckoutSnapshot,
+  storageKey: string,
+): boolean {
+  const cleared = attempts.clearIfOwned(attempt, validatePendingSnapshot, samePendingRequest);
+  if (cleared) clearSessionMirrorIfOwned(attempt, storageKey);
+  return cleared;
 }
 
 const money = (n: number) => `KSh ${n.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
@@ -147,6 +374,7 @@ function inputClass() {
 
 export default function RestaurantClient({
   menu,
+  activeTenantId,
   currentUserRole,
   initialFolios,
   initialMethods,
@@ -154,12 +382,15 @@ export default function RestaurantClient({
   initialTodayTotal,
 }: {
   menu: Category[];
+  /** Server-rendered from the authenticated active tenant context; never read from storage. */
+  activeTenantId: string;
   currentUserRole: HotelRole;
   initialFolios: OpenFolio[];
   initialMethods: PaymentMethod[];
   initialActivity: ActivityItem[];
   initialTodayTotal: number;
 }) {
+  const pendingStorageKey = tenantPOSStorageKey(activeTenantId);
   const canManageMenu = hasRole(currentUserRole, ROLE_GROUPS.MANAGEMENT);
   const [activeCategory, setActiveCategory] = useState(menu[0]?.id ?? "");
   const [order, setOrder] = useState<OrderLine[]>([]);
@@ -183,8 +414,15 @@ export default function RestaurantClient({
 
   const [checkoutState, setCheckoutState] = useState<CheckoutState>("READY");
   const [pendingAttempt, setPendingAttempt] = useState<PendingCheckoutSnapshot | null>(null);
+  const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
 
   const inFlightRef = useRef(false);
+  const pendingAttemptRef = useRef<PendingCheckoutSnapshot | null>(null);
+  const waitingForCrossTabAttemptRef = useRef(false);
+
+  useEffect(() => {
+    pendingAttemptRef.current = pendingAttempt;
+  }, [pendingAttempt]);
 
   const [reconciling, setReconciling] = useState(false);
 
@@ -202,73 +440,152 @@ export default function RestaurantClient({
     setFolioId((current) => current || data[0]?.id || "");
   }, []);
 
+  function adoptPendingSnapshot(snapshot: PendingCheckoutSnapshot) {
+    pendingAttemptRef.current = snapshot;
+    setPendingAttempt(snapshot);
+    setCheckoutState("PENDING_VERIFICATION");
+    setMode(snapshot.operation === "CHARGE_TO_ROOM" ? "ROOM" : "PAY");
+    setOrder(snapshot.items);
+    if (snapshot.folioId) setFolioId(snapshot.folioId);
+    if (snapshot.paymentMethodId) setMethodId(snapshot.paymentMethodId);
+    setCustomerName(snapshot.customerName ?? "");
+    setReference(snapshot.reference ?? "");
+    setTableNumber(snapshot.tableNumber);
+  }
+
+  const withCurrentPOSOwnership = useCallback(<T,>(work: (attempts: LockedAttemptStorage) => Promise<T>): Promise<T> => {
+    if (typeof window === "undefined") {
+      return Promise.reject(new CheckoutOwnershipError("POS recovery is available only in a browser."));
+    }
+    try {
+      const locks = window.navigator?.locks as unknown as LockManagerLike | undefined;
+      const storage = window.localStorage;
+      return withPOSCheckoutOwnership(locks, storage, pendingStorageKey, work, activeTenantId);
+    } catch {
+      return Promise.reject(new CheckoutOwnershipError("Safe POS recovery is unavailable in this browser; no request was sent."));
+    }
+  }, [activeTenantId, pendingStorageKey]);
+
+  const validateCurrentTenantSnapshot = useCallback((raw: unknown): PendingCheckoutSnapshot | null => {
+    const attempt = validatePendingSnapshot(raw);
+    if (attempt && attempt.hotelId !== activeTenantId) throw new CheckoutTenantMismatchError();
+    return attempt;
+  }, [activeTenantId]);
+
+  function assertNoLegacyAttempt(attempts: LockedAttemptStorage) {
+    if (attempts.readRaw(POS_LEGACY_STORAGE_KEY) !== null) throw new LegacyCheckoutAttemptError();
+    try {
+      if (window.sessionStorage.getItem(POS_LEGACY_STORAGE_KEY) !== null) throw new LegacyCheckoutAttemptError();
+    } catch (error) {
+      if (error instanceof LegacyCheckoutAttemptError) throw error;
+      throw new CheckoutOwnershipError("Could not safely inspect legacy checkout recovery data.");
+    }
+  }
+
+  const assertCurrentAuthenticatedTenant = useCallback(async () => {
+    const response = await fetch("/api/restaurant/open-folios", { cache: "no-store" });
+    const serverTenantId = response.headers.get("X-Active-Hotel-Id");
+    if (!response.ok || !serverTenantId) {
+      throw new CheckoutOwnershipError("Could not verify the active hotel with the server; no checkout was sent.");
+    }
+    if (serverTenantId !== activeTenantId) throw new CheckoutTenantMismatchError();
+  }, [activeTenantId]);
+
   // Restore any pending checkout attempt on initial mount, page reload, or tab reopening
   useEffect(() => {
     try {
-      if (typeof window !== "undefined") {
-        let stored = window.localStorage ? window.localStorage.getItem(POS_STORAGE_KEY) : null;
-        if (!stored && window.sessionStorage) {
-          stored = window.sessionStorage.getItem(POS_STORAGE_KEY);
-        }
-        if (stored) {
+      const legacyLocal = window.localStorage.getItem(POS_LEGACY_STORAGE_KEY);
+      const legacySession = window.sessionStorage.getItem(POS_LEGACY_STORAGE_KEY);
+      if (legacyLocal !== null || legacySession !== null) {
+        const message = "An older checkout record has no tenant identity. It was preserved unchanged; verify the original transaction with an administrator before submitting another charge.";
+        setRecoveryNotice(message);
+        setCheckoutState("PENDING_VERIFICATION");
+        setError(message);
+      } else {
+        const stored = window.localStorage.getItem(pendingStorageKey) ??
+          window.sessionStorage.getItem(pendingStorageKey);
+        if (stored !== null) {
           try {
-            const parsed = JSON.parse(stored);
-            const validated = validatePendingSnapshot(parsed);
-            if (validated) {
-              setPendingAttempt(validated);
-              setCheckoutState("PENDING_VERIFICATION");
-              setMode("PAY");
-              setOrder(validated.items);
-              setMethodId(validated.paymentMethodId);
-              setCustomerName(validated.customerName);
-              setReference(validated.reference);
-              setTableNumber(validated.tableNumber);
-              if (validated.isExpired) {
-                setError(
-                  "This checkout attempt was created over 24 hours ago and is still unresolved. Reconcile with server before clearing."
-                );
-              } else if (validated.status === "PAYLOAD_MISMATCH") {
-                setError(
-                  "This checkout had an idempotency key conflict with previous order details. Reconcile with server before clearing."
-                );
-              } else {
-                setError("Payment status is uncertain. Do not start another checkout until this attempt is verified.");
-              }
+            const validated = validatePendingSnapshot(JSON.parse(stored));
+            if (!validated) throw new CheckoutOwnershipError("Stored checkout recovery data is malformed.");
+            if (validated.hotelId !== activeTenantId) throw new CheckoutTenantMismatchError();
+            adoptPendingSnapshot(validated);
+            if (validated.isExpired) {
+              setError("This checkout attempt was created over 24 hours ago and is still unresolved. Reconcile with server before clearing.");
+            } else if (validated.status === "PAYLOAD_MISMATCH") {
+              setError("This checkout had an idempotency key conflict with previous order details. Reconcile with server before clearing.");
             } else {
-              // Malformed storage data: DO NOT silently delete storage. Lock in PENDING_VERIFICATION.
-              setCheckoutState("PENDING_VERIFICATION");
-              setError("A previous checkout attempt was interrupted, but stored recovery data could not be validated. Please verify recent transactions before starting a new checkout.");
+              setError("Payment status is uncertain. Do not start another checkout until this attempt is verified.");
             }
-          } catch {
+          } catch (error) {
+            const message = error instanceof CheckoutTenantMismatchError
+              ? error.message
+              : "Stored checkout recovery data could not be validated. It remains preserved; do not submit a new charge.";
+            setRecoveryNotice(message);
             setCheckoutState("PENDING_VERIFICATION");
-            setError("A previous checkout attempt was detected, but could not be parsed. Verify recent transactions before proceeding.");
+            setError(message);
           }
         }
       }
     } catch (e) {
       console.error("Failed to restore pending POS checkout:", e);
+      const message = "A previous checkout attempt could not be read safely. It was not modified; verify recovery before proceeding.";
+      setRecoveryNotice(message);
       setCheckoutState("PENDING_VERIFICATION");
-      setError("A previous checkout attempt was detected, but could not be read safely. Verify recent transactions before proceeding.");
+      setError(message);
     }
 
     // Cross-tab synchronization via storage events
     const handleStorageEvent = (e: StorageEvent) => {
-      if (e.key === POS_STORAGE_KEY) {
-        if (e.newValue) {
-          try {
-            const parsed = JSON.parse(e.newValue);
-            const validated = validatePendingSnapshot(parsed);
-            if (validated) {
-              setPendingAttempt(validated);
-              setCheckoutState("PENDING_VERIFICATION");
-            }
-          } catch {}
-        } else if (!e.newValue) {
-          // Cleared by another tab upon confirmed settlement
-          setPendingAttempt(null);
-          setCheckoutState("READY");
-          loadActivity();
+      if ((e.key !== pendingStorageKey && e.key !== POS_LEGACY_STORAGE_KEY) || e.storageArea !== window.localStorage) return;
+      try {
+        if (e.key === POS_LEGACY_STORAGE_KEY) {
+          if (window.localStorage.getItem(POS_LEGACY_STORAGE_KEY) !== null) {
+            const message = "An older checkout record has no tenant identity. It was preserved unchanged; verify the original transaction before submitting another charge.";
+            setRecoveryNotice(message);
+            setCheckoutState("PENDING_VERIFICATION");
+            setError(message);
+          }
+          return;
         }
+        // Ignore e.newValue: storage events may arrive late. Re-read the current
+        // tenant-scoped value, and never replace a locally unresolved attempt.
+        const raw = window.localStorage.getItem(pendingStorageKey);
+        if (raw === null) {
+          if (!pendingAttemptRef.current && waitingForCrossTabAttemptRef.current) {
+            waitingForCrossTabAttemptRef.current = false;
+            setCheckoutState("READY");
+            setError("The other tab released the checkout lock. Retry when ready; no request was sent from this tab.");
+          }
+          return;
+        }
+        const latest = validatePendingSnapshot(JSON.parse(raw));
+        if (!latest || latest.hotelId !== activeTenantId) {
+          if (!pendingAttemptRef.current) {
+            const message = latest
+              ? "A recovery record belongs to another hotel. It was preserved; switch back to its original hotel to continue recovery."
+              : "Shared checkout recovery data is malformed. It was preserved; do not submit a new charge.";
+            setRecoveryNotice(message);
+            setCheckoutState("PENDING_VERIFICATION");
+            setError(message);
+          }
+          return;
+        }
+        const current = pendingAttemptRef.current;
+        const decision = decideStorageEvent(current, latest, samePendingRequest);
+        if (decision === "CONFLICT") {
+          setCheckoutState("PENDING_VERIFICATION");
+          setError("Another tab has a different unresolved checkout. This tab will not replace or submit over it.");
+          return;
+        }
+        if (decision !== "ADOPT") return;
+        waitingForCrossTabAttemptRef.current = false;
+        setRecoveryNotice(null);
+        adoptPendingSnapshot(latest);
+        setError("Another tab owns an unresolved checkout. Retry that exact saved attempt to verify it.");
+      } catch {
+        setCheckoutState("PENDING_VERIFICATION");
+        setError("Could not safely read shared checkout recovery storage.");
       }
     };
 
@@ -277,14 +594,18 @@ export default function RestaurantClient({
       if (typeof window !== "undefined" && "BroadcastChannel" in window) {
         bc = new BroadcastChannel("hms_pos_channel");
         bc.onmessage = (msg) => {
-          if (msg.data?.type === "CHECKOUT_SETTLED") {
-            setPendingAttempt(null);
-            setCheckoutState("READY");
-            clearOrderInternal();
-            loadActivity();
-            loadFolios();
-            setSuccess(`Payment settled in another tab for ${msg.data.guestName || "guest"}.`);
-          }
+          if (msg.data?.type !== "CHECKOUT_SETTLED" || msg.data.hotelId !== activeTenantId) return;
+          const current = pendingAttemptRef.current;
+          const messageOperation = msg.data.operation ?? "PAY_NOW";
+          if (
+            !current ||
+            current.idempotencyKey !== msg.data.idempotencyKey ||
+            current.operation !== messageOperation
+          ) return;
+          // A broadcast is advisory, not permission to clear shared storage or
+          // local state. Retry under the lock for a fresh server confirmation.
+          setCheckoutState("PENDING_VERIFICATION");
+          setError("This attempt may have been resolved in another tab. Retry the exact saved request to confirm it safely.");
         };
       }
     } catch {}
@@ -301,61 +622,144 @@ export default function RestaurantClient({
         bc.close();
       }
     };
-  }, [loadActivity, loadFolios]);
+  }, [activeTenantId, pendingStorageKey, loadActivity, loadFolios]);
 
 
 
-  const reconcilePaymentStatus = useCallback(async (keyOverride?: string) => {
-    const keyToQuery = keyOverride || pendingAttempt?.idempotencyKey;
-    if (!keyToQuery) return;
+  const reconcilePaymentStatus = useCallback(async () => {
+    const attempt = pendingAttemptRef.current ?? pendingAttempt;
+    if (!attempt || attempt.operation !== "PAY_NOW") {
+      setError("Only a saved Pay-now attempt can be reconciled through payment status.");
+      return;
+    }
 
     setReconciling(true);
     setError(null);
-
     try {
-      const res = await fetch(`/api/restaurant/payments/status?key=${encodeURIComponent(keyToQuery)}`);
-      const data = await res.json();
+      const result = await withCurrentPOSOwnership(async (attempts) => {
+        await assertCurrentAuthenticatedTenant();
+        assertNoLegacyAttempt(attempts);
+        const stored = attempts.read(validateCurrentTenantSnapshot);
+        if (!stored || !samePendingRequest(stored, attempt)) {
+          throw new CheckoutOwnershipError("The exact saved payment attempt is no longer stored; it was not reconciled or cleared.");
+        }
+        const fingerprint = await computePayNowAttemptFingerprint(stored);
+        const query = new URLSearchParams({
+          key: stored.idempotencyKey,
+          operation: "PAY_NOW",
+          fingerprint,
+        });
+        const res = await fetch(`/api/restaurant/payments/status?${query.toString()}`, {
+          headers: { "X-Expected-Hotel-Id": activeTenantId },
+          cache: "no-store",
+        });
+        let data: unknown = null;
+        try {
+          data = await res.json();
+        } catch {
+          // A malformed response is ambiguous; retain the original attempt.
+        }
+        const response = responseRecord(data);
 
-      if (res.ok && data.found) {
+        if (res.ok && isConfirmedPayNowStatusResponse(data, stored, fingerprint)) {
+          if (!clearPendingAttemptStorageIfOwned(attempts, stored, pendingStorageKey)) {
+            return { kind: "ownership-mismatch" as const, data };
+          }
+          return { kind: "found" as const, data };
+        }
+        if (response?.code === "TENANT_CONTEXT_MISMATCH") {
+          return { kind: "tenant-mismatch" as const, data };
+        }
+        if (res.ok && response?.found === false && response?.status === "NOT_FOUND") {
+          return { kind: "not-found" as const, data };
+        }
+        if (res.ok && response?.found === true) {
+          return { kind: "unconfirmed" as const, data };
+        }
+        return { kind: "error" as const, data };
+      });
+
+      if (result.kind === "found") {
         setCheckoutState("CONFIRMED_SUCCESS");
-        clearPendingAttemptStorage();
+        pendingAttemptRef.current = null;
+        setRecoveryNotice(null);
         setPendingAttempt(null);
         clearOrderInternal();
         loadActivity();
         loadFolios();
-        setSuccess(
-          `Payment of ${money(data.total)} verified on server for ${data.guestName} via ${data.method}. (Reconciled)`
-        );
-
+        setSuccess(`Payment of ${money(result.data.total)} verified on server for ${result.data.guestName} via ${result.data.method}. (Reconciled)`);
+        setCheckoutState("READY");
         try {
           if (typeof window !== "undefined" && "BroadcastChannel" in window) {
             const bc = new BroadcastChannel("hms_pos_channel");
-            bc.postMessage({ type: "CHECKOUT_SETTLED", guestName: data.guestName, total: data.total });
+            bc.postMessage({ type: "CHECKOUT_SETTLED", hotelId: activeTenantId, operation: "PAY_NOW", idempotencyKey: attempt.idempotencyKey, guestName: result.data.guestName, total: result.data.total });
             bc.close();
           }
         } catch {}
-
-        setCheckoutState("READY");
-      } else if (res.ok && !data.found) {
-        setError(
-          "Server verification confirmed no payment was recorded with this key. You may safely retry this order or clear it."
-        );
+      } else if (result.kind === "not-found") {
+        setError("Server verification found no payment with this key. The pending attempt remains locked; retry or resolve it with an administrator.");
+      } else if (result.kind === "ownership-mismatch") {
+        setError("A different recovery record is now stored. It was preserved; do not start another checkout.");
+      } else if (result.kind === "tenant-mismatch") {
+        const errorMessage = responseText(result.data, "error");
+        setRecoveryNotice(errorMessage || "The active hotel changed. This attempt was preserved; refresh in its original hotel.");
+        setCheckoutState("PENDING_VERIFICATION");
+        setError(errorMessage || "The attempt could not be reconciled under the active hotel.");
+      } else if (result.kind === "unconfirmed") {
+        setCheckoutState("PENDING_VERIFICATION");
+        setError("The server response did not confirm this exact Pay-now attempt as completed. The original recovery record remains unchanged.");
       } else {
-        setError(data?.error || "Could not check server status. Please try again.");
+        setCheckoutState("PENDING_VERIFICATION");
+        setError(responseText(result.data, "error") || "Could not verify this payment. The original recovery record remains unchanged.");
       }
-    } catch (err) {
-      setError("Network error while checking payment status. Please try again.");
+    } catch (error) {
+      if (error instanceof CheckoutTenantMismatchError || error instanceof LegacyCheckoutAttemptError || error instanceof CheckoutOwnershipError) {
+        setRecoveryNotice(error.message);
+      }
+      setCheckoutState("PENDING_VERIFICATION");
+      setError(error instanceof Error ? error.message : "Safe server reconciliation is unavailable.");
     } finally {
       setReconciling(false);
     }
-  }, [pendingAttempt, loadActivity, loadFolios]);
+  }, [
+    activeTenantId,
+    pendingAttempt,
+    pendingStorageKey,
+    assertCurrentAuthenticatedTenant,
+    validateCurrentTenantSnapshot,
+    withCurrentPOSOwnership,
+    loadActivity,
+    loadFolios,
+  ]);
 
-  function dismissVerifiedFailure() {
-    clearPendingAttemptStorage();
-    setPendingAttempt(null);
-    clearOrderInternal();
-    setCheckoutState("READY");
-    setError(null);
+  async function dismissVerifiedFailure() {
+    const attempt = pendingAttemptRef.current ?? pendingAttempt;
+    if (!attempt || attempt.operation === "CHARGE_TO_ROOM") return;
+    try {
+      const cleared = await withCurrentPOSOwnership(async (attempts) => {
+        await assertCurrentAuthenticatedTenant();
+        assertNoLegacyAttempt(attempts);
+        const stored = attempts.read(validateCurrentTenantSnapshot);
+        if (attempt.hotelId !== activeTenantId || !stored || !samePendingRequest(stored, attempt)) return false;
+        return clearPendingAttemptStorageIfOwned(attempts, attempt, pendingStorageKey);
+      });
+      if (!cleared) {
+        setError("This tab no longer owns the stored attempt. It was not cleared.");
+        return;
+      }
+      pendingAttemptRef.current = null;
+        setRecoveryNotice(null);
+      setPendingAttempt(null);
+      clearOrderInternal();
+      setCheckoutState("READY");
+      setError(null);
+    } catch (error) {
+      if (error instanceof CheckoutTenantMismatchError || error instanceof LegacyCheckoutAttemptError) {
+        setRecoveryNotice(error.message);
+        setCheckoutState("PENDING_VERIFICATION");
+      }
+      setError(error instanceof Error ? error.message : "Could not safely clear the attempt.");
+    }
   }
 
   const subtotal = order.reduce((s, l) => s + l.unitPrice * l.quantity, 0);
@@ -408,202 +812,292 @@ export default function RestaurantClient({
 
   async function submit() {
     if (inFlightRef.current || loading || checkoutState === "SUBMITTING") return;
+    inFlightRef.current = true;
 
-    // Terminal-wide multi-tab check: Ensure no other checkout is active in storage
-    if (!pendingAttempt && typeof window !== "undefined" && window.localStorage) {
-      try {
-        const existingRaw = window.localStorage.getItem(POS_STORAGE_KEY);
-        if (existingRaw) {
-          const validated = validatePendingSnapshot(JSON.parse(existingRaw));
-          if (validated) {
-            setPendingAttempt(validated);
+    try {
+      await withCurrentPOSOwnership(async (attempts) => {
+        await assertCurrentAuthenticatedTenant();
+        assertNoLegacyAttempt(attempts);
+        let activeSnapshot = pendingAttemptRef.current ?? pendingAttempt;
+        if (activeSnapshot && activeSnapshot.hotelId !== activeTenantId) throw new CheckoutTenantMismatchError();
+        const storedSnapshot = attempts.read(validateCurrentTenantSnapshot);
+
+        if (storedSnapshot) {
+          if (activeSnapshot && !samePendingRequest(activeSnapshot, storedSnapshot)) {
             setCheckoutState("PENDING_VERIFICATION");
-            setError("Another browser tab has an unresolved checkout on this terminal. Verify or resolve it before starting a new order.");
+            setError("Another tab owns a different unresolved checkout. This tab will not replace it or submit a competing request.");
             return;
           }
-        }
-      } catch {}
-    }
+          if (!activeSnapshot) {
+            // The shared store, not a delayed event, is authoritative. Present
+            // the existing attempt and require an explicit retry gesture.
+            adoptPendingSnapshot(storedSnapshot);
+            setError("Another tab has an unresolved checkout. Retry that exact saved request to verify it.");
+            return;
+          }
+          activeSnapshot = storedSnapshot;
+        } else if (!activeSnapshot) {
+          if (checkoutState === "PENDING_VERIFICATION") {
+            setError("Recovery ownership cannot be verified. No new checkout was sent; restore the exact saved attempt first.");
+            return;
+          }
+          if (order.length === 0) {
+            setError("Add at least one item to the order.");
+            return;
+          }
 
-    if (checkoutState === "PENDING_VERIFICATION" && !pendingAttempt) {
-      setError("Payment status is uncertain. Do not start another checkout until this attempt is verified.");
-      return;
-    }
-
-    const itemsToSubmit = pendingAttempt ? pendingAttempt.items : order;
-    if (itemsToSubmit.length === 0) {
-      setError("Add at least one item to the order.");
-      return;
-    }
-
-    const performSubmit = async () => {
-      inFlightRef.current = true;
-      setLoading(true);
-      setCheckoutState("SUBMITTING");
-      setError(null);
-      setSuccess(null);
-
-      let activeSnapshot: PendingCheckoutSnapshot | null = pendingAttempt;
-      if (mode === "PAY") {
-        if (!activeSnapshot) {
           const key =
             typeof window !== "undefined" && typeof window.crypto?.randomUUID === "function"
               ? window.crypto.randomUUID()
               : `pos-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
-          activeSnapshot = {
-            idempotencyKey: key,
-            items: [...order],
-            paymentMethodId: methodId,
-            customerName,
-            reference,
-            tableNumber,
-            timestamp: Date.now(),
-            status: "IN_FLIGHT",
-          };
-          setPendingAttempt(activeSnapshot);
-          savePendingAttempt(activeSnapshot);
-        }
-      }
-
-      try {
-        const endpoint =
-          mode === "ROOM" ? "/api/restaurant/charge-to-room" : "/api/restaurant/pay-now";
-        const payload =
-          mode === "ROOM"
-            ? { items: itemsToSubmit, folioId, tableNumber }
+          const operation = mode === "ROOM" ? "CHARGE_TO_ROOM" : "PAY_NOW";
+          if (operation === "CHARGE_TO_ROOM" && !folioId) {
+            setError("Choose an open folio before charging to a room.");
+            return;
+          }
+          activeSnapshot = operation === "CHARGE_TO_ROOM"
+            ? {
+                hotelId: activeTenantId,
+                operation,
+                idempotencyKey: key,
+                items: [...order],
+                folioId,
+                tableNumber,
+                timestamp: Date.now(),
+                status: "IN_FLIGHT",
+              }
             : {
-                items: activeSnapshot!.items,
-                paymentMethodId: activeSnapshot!.paymentMethodId,
-                customerName: activeSnapshot!.customerName,
-                reference: activeSnapshot!.reference,
-                tableNumber: activeSnapshot!.tableNumber,
+                hotelId: activeTenantId,
+                operation,
+                idempotencyKey: key,
+                items: [...order],
+                paymentMethodId: methodId,
+                customerName,
+                reference,
+                tableNumber,
+                timestamp: Date.now(),
+                status: "IN_FLIGHT",
               };
-
-        const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (mode === "PAY" && activeSnapshot) {
-          headers["X-Idempotency-Key"] = activeSnapshot.idempotencyKey;
         }
 
-        const res = await fetch(endpoint, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(payload),
-        });
+        if (!activeSnapshot) return;
+        if (activeSnapshot.items.length === 0) {
+          setError("Add at least one item to the order.");
+          return;
+        }
+        const operation = activeSnapshot.operation;
+        const expectedPayNowFingerprint = operation === "PAY_NOW"
+          ? await computePayNowAttemptFingerprint(activeSnapshot)
+          : null;
+        if (!attempts.claim(activeSnapshot, validateCurrentTenantSnapshot, samePendingRequest)) {
+          setCheckoutState("PENDING_VERIFICATION");
+          setError("A different checkout attempt is already stored. It was preserved; no request was sent.");
+          return;
+        }
+        mirrorPendingAttemptToSession(activeSnapshot, pendingStorageKey);
+        pendingAttemptRef.current = activeSnapshot;
+        setPendingAttempt(activeSnapshot);
+        setCheckoutState("SUBMITTING");
+        setLoading(true);
+        setError(null);
+        setSuccess(null);
 
-        let data: any = null;
+        const roomRequest = operation === "CHARGE_TO_ROOM"
+          ? buildChargeToRoomRequest(activeSnapshot)
+          : null;
+        const endpoint = operation === "CHARGE_TO_ROOM"
+          ? "/api/restaurant/charge-to-room"
+          : "/api/restaurant/pay-now";
+        const payload = roomRequest?.payload ?? {
+          items: activeSnapshot.items,
+          paymentMethodId: activeSnapshot.paymentMethodId,
+          customerName: activeSnapshot.customerName,
+          reference: activeSnapshot.reference,
+          tableNumber: activeSnapshot.tableNumber,
+        };
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+          "X-Expected-Hotel-Id": activeTenantId,
+        };
+        headers["X-Idempotency-Key"] = activeSnapshot.idempotencyKey;
+
         try {
-          data = await res.json();
-        } catch {
-          // Non-JSON response (e.g. 502/504 gateway or socket termination)
-        }
-
-        if (res.ok) {
-          setCheckoutState("CONFIRMED_SUCCESS");
-          clearPendingAttemptStorage();
-          setPendingAttempt(null);
-          setSuccess(
-            mode === "ROOM"
-              ? `${money(data?.total ?? subtotal)} charged to ${data?.guestName ?? "guest"}'s folio.`
-              : `${money(data?.total ?? subtotal)} received from ${data?.guestName ?? "guest"} via ${data?.method ?? "payment"}.${data?.isIdempotentReplay ? " (Verified & Replayed)" : ""}`
-          );
-          clearOrderInternal();
-          loadActivity();
-          loadFolios();
-          setCheckoutState("READY");
-
+          const res = await fetch(endpoint, {
+            method: "POST",
+            headers,
+            body: JSON.stringify(payload),
+          });
+          let data: unknown = null;
           try {
-            if (typeof window !== "undefined" && "BroadcastChannel" in window) {
-              const bc = new BroadcastChannel("hms_pos_channel");
-              bc.postMessage({ type: "CHECKOUT_SETTLED", guestName: data?.guestName, total: data?.total ?? subtotal });
-              bc.close();
-            }
-          } catch {}
-          return;
-        }
+            data = await res.json();
+          } catch {
+            // Non-JSON responses are ambiguous and retain the exact attempt.
+          }
+          const response = responseRecord(data);
 
-        // Classify error responses:
-        if (res.status === 400 || res.status === 403) {
-          // Known client/validation errors: transaction never committed
-          setCheckoutState("CONFIRMED_FAILURE");
-          clearPendingAttemptStorage();
-          setPendingAttempt(null);
-          setError(data?.error || "Could not complete the order.");
-          setCheckoutState("READY");
-          return;
-        }
-
-        if (res.status === 409) {
-          if (
-            data?.code === "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD" ||
-            (data?.error && data.error.includes("different order details"))
-          ) {
-            // Do NOT clear storage! A payment with this key may have already committed on the server.
+          if (response?.code === "TENANT_CONTEXT_MISMATCH") {
+            // Preserve the exact pre-POST snapshot and storage bytes. A stale
+            // tenant response is not evidence about the checkout's commit state.
+            pendingAttemptRef.current = activeSnapshot;
+            setPendingAttempt(activeSnapshot);
+            const errorMessage = responseText(data, "error");
+            setRecoveryNotice(errorMessage || "The active hotel changed. The saved checkout was preserved; refresh in its original hotel.");
             setCheckoutState("PENDING_VERIFICATION");
-            if (activeSnapshot) {
-              activeSnapshot.status = "PAYLOAD_MISMATCH";
-              savePendingAttempt(activeSnapshot);
-            }
-            setError(
-              "This idempotency key was previously recorded for a different order. The original transaction may have already succeeded on the server. Verify server status before attempting a new checkout."
-            );
+            setError(errorMessage || "The active hotel changed. This attempt was preserved and not resolved.");
             return;
           }
 
-          if (data?.code === "DATABASE_UNIQUE_CONSTRAINT_CONFLICT") {
-            // Unrelated database unique constraint violation: transaction rolled back
-            setCheckoutState("CONFIRMED_FAILURE");
-            clearPendingAttemptStorage();
+          if (operation === "CHARGE_TO_ROOM") {
+            if (res.ok && isChargeToRoomResponse(data, activeSnapshot)) {
+              if (!clearPendingAttemptStorageIfOwned(attempts, activeSnapshot, pendingStorageKey)) {
+                setCheckoutState("PENDING_VERIFICATION");
+                setError("The server confirmed this charge, but the stored attempt changed. Its recovery record was preserved; verify it before continuing.");
+                return;
+              }
+              clearSessionMirrorIfOwned(activeSnapshot, pendingStorageKey);
+              pendingAttemptRef.current = null;
+        setRecoveryNotice(null);
+              setPendingAttempt(null);
+              setSuccess(`${money(data.total)} charged to ${data.guestName}'s folio.`);
+              clearOrderInternal();
+              loadActivity();
+              loadFolios();
+              setCheckoutState("READY");
+              try {
+                if (typeof window !== "undefined" && "BroadcastChannel" in window) {
+                  const bc = new BroadcastChannel("hms_pos_channel");
+                  bc.postMessage({ type: "CHECKOUT_SETTLED", hotelId: activeTenantId, operation, idempotencyKey: activeSnapshot.idempotencyKey, guestName: data.guestName, total: data.total });
+                  bc.close();
+                }
+              } catch {}
+              return;
+            }
+
+            if (isExplicitNotCommittedResponse(data, res.status)) {
+              if (!clearPendingAttemptStorageIfOwned(attempts, activeSnapshot, pendingStorageKey)) {
+                setCheckoutState("PENDING_VERIFICATION");
+                setError("The server rejected this request, but a different attempt now owns recovery storage. Nothing was cleared.");
+                return;
+              }
+              clearSessionMirrorIfOwned(activeSnapshot, pendingStorageKey);
+              pendingAttemptRef.current = null;
+        setRecoveryNotice(null);
+              setPendingAttempt(null);
+              setCheckoutState("READY");
+              setError(responseText(data, "error") || "The server confirmed that this room charge was not committed.");
+              return;
+            }
+
+            activeSnapshot.status = response?.outcome === "CONFLICT" ? "PAYLOAD_MISMATCH" : "UNCERTAIN";
+            if (!attempts.claim(activeSnapshot, validateCurrentTenantSnapshot, samePendingRequest)) {
+              setCheckoutState("PENDING_VERIFICATION");
+              setError("A different recovery record now owns the shared store. It was preserved; retry only after verifying ownership.");
+              return;
+            }
+            mirrorPendingAttemptToSession(activeSnapshot, pendingStorageKey);
+            pendingAttemptRef.current = activeSnapshot;
+            setPendingAttempt(activeSnapshot);
+            setCheckoutState("PENDING_VERIFICATION");
+            setError(responseText(data, "error") || "Room-charge outcome is uncertain. Retry this exact key and request; do not edit the order or destination.");
+            return;
+          }
+
+          if (
+            res.ok &&
+            operation === "PAY_NOW" &&
+            expectedPayNowFingerprint !== null &&
+            isPayNowResponse(data, activeSnapshot, expectedPayNowFingerprint)
+          ) {
+            if (!clearPendingAttemptStorageIfOwned(attempts, activeSnapshot, pendingStorageKey)) {
+              setCheckoutState("PENDING_VERIFICATION");
+              setError("The server response succeeded, but a different attempt owns recovery storage. It was preserved.");
+              return;
+            }
+            clearSessionMirrorIfOwned(activeSnapshot, pendingStorageKey);
+            pendingAttemptRef.current = null;
+        setRecoveryNotice(null);
+            setCheckoutState("CONFIRMED_SUCCESS");
             setPendingAttempt(null);
-            setError(data?.error || "A database unique constraint violation occurred. Please verify your records.");
+            setSuccess(`${money(data?.total ?? subtotal)} received from ${data?.guestName ?? "guest"} via ${data?.method ?? "payment"}.${data?.isIdempotentReplay ? " (Verified & Replayed)" : ""}`);
+            clearOrderInternal();
+            loadActivity();
+            loadFolios();
+            setCheckoutState("READY");
+            try {
+              if (typeof window !== "undefined" && "BroadcastChannel" in window) {
+                const bc = new BroadcastChannel("hms_pos_channel");
+                bc.postMessage({ type: "CHECKOUT_SETTLED", hotelId: activeTenantId, operation, idempotencyKey: activeSnapshot.idempotencyKey, guestName: data?.guestName, total: data?.total ?? subtotal });
+                bc.close();
+              }
+            } catch {}
+            return;
+          }
+
+          if (isExplicitNotCommittedResponse(data, res.status)) {
+            if (!clearPendingAttemptStorageIfOwned(attempts, activeSnapshot, pendingStorageKey)) {
+              setCheckoutState("PENDING_VERIFICATION");
+              setError("The server confirmed non-commit, but a different attempt owns recovery storage. It was preserved.");
+              return;
+            }
+            clearSessionMirrorIfOwned(activeSnapshot, pendingStorageKey);
+            pendingAttemptRef.current = null;
+        setRecoveryNotice(null);
+            setCheckoutState("CONFIRMED_FAILURE");
+            setPendingAttempt(null);
+            setError(responseText(data, "error") || "The server confirmed this payment was not committed.");
             setCheckoutState("READY");
             return;
           }
 
-          // Concurrent submission or serialization lock conflict: outcome uncertain
-          setCheckoutState("PENDING_VERIFICATION");
-          if (activeSnapshot) {
+          if (res.status === 409 && response?.code === "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD") {
+            activeSnapshot.status = "PAYLOAD_MISMATCH";
+          } else {
             activeSnapshot.status = "UNCERTAIN";
-            savePendingAttempt(activeSnapshot);
           }
-          setError(data?.error || "Payment status is uncertain. Do not start another checkout until this attempt is verified.");
-          return;
-        }
-
-        // 5xx or unclassified: ambiguous outcome
-        setCheckoutState("PENDING_VERIFICATION");
-        if (activeSnapshot) {
-          activeSnapshot.status = "UNCERTAIN";
-          savePendingAttempt(activeSnapshot);
-        }
-        setError("Payment status is uncertain. Do not start another checkout until this attempt is verified.");
-      } catch (err) {
-        // Network drop, timeout, or connection reset
-        setCheckoutState("PENDING_VERIFICATION");
-        if (activeSnapshot) {
-          activeSnapshot.status = "UNCERTAIN";
-          savePendingAttempt(activeSnapshot);
-        }
-        setError("Network error or timeout. Payment status is uncertain. Do not start another checkout until this attempt is verified.");
-      } finally {
-        inFlightRef.current = false;
-        setLoading(false);
-      }
-    };
-
-    if (typeof window !== "undefined" && window.navigator?.locks?.request) {
-      try {
-        await window.navigator.locks.request("hms_pos_checkout_lock", { ifAvailable: true }, async (lock) => {
-          if (!lock) {
-            setError("Another browser tab on this workstation is actively processing a checkout. Please wait for it to complete.");
+          if (!attempts.claim(activeSnapshot, validateCurrentTenantSnapshot, samePendingRequest)) {
+            setCheckoutState("PENDING_VERIFICATION");
+            setError("A different recovery record now owns the shared store. It was preserved.");
             return;
           }
-          await performSubmit();
-        });
-      } catch {
-        await performSubmit();
+          mirrorPendingAttemptToSession(activeSnapshot, pendingStorageKey);
+          pendingAttemptRef.current = activeSnapshot;
+          setPendingAttempt(activeSnapshot);
+          setCheckoutState("PENDING_VERIFICATION");
+          setError(responseText(data, "error") || "Checkout status is uncertain. Retry this exact saved request.");
+        } catch {
+          activeSnapshot.status = "UNCERTAIN";
+          try {
+            if (attempts.claim(activeSnapshot, validateCurrentTenantSnapshot, samePendingRequest)) {
+              mirrorPendingAttemptToSession(activeSnapshot, pendingStorageKey);
+            }
+          } catch {
+            // The pre-POST shared claim remains in localStorage if refresh fails.
+          }
+          pendingAttemptRef.current = activeSnapshot;
+          setPendingAttempt(activeSnapshot);
+          setCheckoutState("PENDING_VERIFICATION");
+          setError("Network error or timeout. Checkout status is uncertain; retry the exact saved request.");
+        } finally {
+          setLoading(false);
+        }
+      });
+    } catch (error) {
+      if (error instanceof CheckoutLockBusyError) {
+        waitingForCrossTabAttemptRef.current = !pendingAttemptRef.current;
+        setCheckoutState("PENDING_VERIFICATION");
+        setError("Another tab is processing a checkout. This tab sent no request and is waiting for the shared recovery record.");
+      } else if (error instanceof CheckoutTenantMismatchError || error instanceof LegacyCheckoutAttemptError) {
+        waitingForCrossTabAttemptRef.current = false;
+        setRecoveryNotice(error.message);
+        setCheckoutState("PENDING_VERIFICATION");
+        setError(error.message);
+      } else {
+        setCheckoutState(pendingAttemptRef.current ? "PENDING_VERIFICATION" : "READY");
+        setError(error instanceof Error ? error.message : "Safe cross-tab recovery is unavailable; no request was sent.");
       }
-    } else {
-      await performSubmit();
+    } finally {
+      inFlightRef.current = false;
+      setLoading(false);
     }
   }
 
@@ -835,27 +1329,45 @@ export default function RestaurantClient({
             {checkoutState === "PENDING_VERIFICATION" && (
               <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 space-y-2 text-sm mt-3">
                 <p className="font-semibold text-amber-800 dark:text-amber-200">
-                  {pendingAttempt?.status === "PAYLOAD_MISMATCH"
+                  {recoveryNotice
+                    ? "Recovery Requires Attention"
+                    : waitingForCrossTabAttemptRef.current
+                    ? "Checkout In Progress in Another Tab"
+                    : pendingAttempt?.status === "PAYLOAD_MISMATCH"
                     ? "Idempotency Key Conflict / Reused Key"
                     : pendingAttempt?.isExpired
                     ? "Unresolved Checkout Expired (>24h)"
+                    : pendingAttempt?.operation === "CHARGE_TO_ROOM"
+                    ? "Room-Charge Status Uncertain"
                     : "Payment Status Uncertain"}
                 </p>
                 <p className="text-text-secondary text-xs">
-                  {pendingAttempt?.status === "PAYLOAD_MISMATCH"
-                    ? "This idempotency key was previously submitted with different order details. The original payment may have already committed. Verify server status before attempting a new checkout."
+                  {recoveryNotice
+                    ? recoveryNotice
+                    : waitingForCrossTabAttemptRef.current
+                    ? "This tab sent no request. Wait for the other tab to finish, then check or retry the exact shared recovery attempt."
+                    : pendingAttempt?.status === "PAYLOAD_MISMATCH"
+                    ? "This key was previously used for different request details. The original transaction may have committed. Retry the exact saved request to verify it; do not clear or edit this attempt."
                     : pendingAttempt?.isExpired
-                    ? "This checkout attempt was created more than 24 hours ago. Verify server status to confirm if payment succeeded before clearing."
+                    ? "This checkout attempt is older than 24 hours. Keep it locked and retry or have an administrator verify the server-side record before resolving it."
+                    : pendingAttempt?.operation === "CHARGE_TO_ROOM"
+                    ? "The room-charge outcome is uncertain. Retry the exact saved key and request; do not change the items or folio destination."
                     : "Payment status is uncertain. Do not start another checkout until this attempt is verified."}
                 </p>
                 <div className="flex flex-wrap gap-2 pt-1">
                   <button
                     type="button"
-                    onClick={() => reconcilePaymentStatus()}
-                    disabled={reconciling}
+                    onClick={() => waitingForCrossTabAttemptRef.current || pendingAttempt?.operation === "CHARGE_TO_ROOM" ? submit() : reconcilePaymentStatus()}
+                    disabled={Boolean(recoveryNotice) || reconciling || loading}
                     className="btn-primary text-xs px-3 py-1.5 rounded-lg shadow-sm !bg-amber-700 hover:!bg-amber-800 !text-white"
                   >
-                    {reconciling ? "Checking Server..." : "Check Server Status"}
+                    {loading || reconciling
+                      ? "Checking Server..."
+                      : waitingForCrossTabAttemptRef.current
+                      ? "Check Shared Attempt"
+                      : pendingAttempt?.operation === "CHARGE_TO_ROOM"
+                      ? "Retry Exact Room Charge"
+                      : "Check Server Status"}
                   </button>
                   <button
                     type="button"
@@ -864,7 +1376,7 @@ export default function RestaurantClient({
                   >
                     Check Recent Activity
                   </button>
-                  {(pendingAttempt?.status === "PAYLOAD_MISMATCH" || pendingAttempt?.isExpired) && (
+                  {pendingAttempt?.operation !== "CHARGE_TO_ROOM" && (pendingAttempt?.status === "PAYLOAD_MISMATCH" || pendingAttempt?.isExpired) && (
                     <button
                       type="button"
                       onClick={dismissVerifiedFailure}
@@ -892,6 +1404,7 @@ export default function RestaurantClient({
               onClick={submit}
               disabled={
                 loading ||
+                Boolean(recoveryNotice) ||
                 (mode === "ROOM" && !folioId) ||
                 (order.length === 0 && !pendingAttempt)
               }
@@ -937,7 +1450,7 @@ export default function RestaurantClient({
                   </div>
                   <div className="text-right shrink-0">
                     <p className="font-medium">{money(a.total)}</p>
-                    <p className={clsx("text-xs", a.settled ? "text-success" : "text-champagne-500")}>
+                    <p className={clsx("text-xs", a.settled ? "text-success" : "text-accent-500")}>
                       {a.settled ? "Paid" : "On folio"}
                     </p>
                   </div>

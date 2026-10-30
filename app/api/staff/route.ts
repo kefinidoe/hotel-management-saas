@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { HotelRole, MembershipStatus } from "@prisma/client";
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -16,6 +16,9 @@ export async function GET() {
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.STAFF_VIEW);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   const isManagement =
     tenant.role === HotelRole.HOTEL_OWNER ||
@@ -35,7 +38,6 @@ export async function GET() {
             name: true,
             email: true,
             phone: true,
-            department: true,
             isActive: true,
             lastLoginAt: true,
             createdAt: true,
@@ -54,7 +56,7 @@ export async function GET() {
       email: isManagement ? m.user.email : undefined,
       phone: isManagement ? m.user.phone : undefined,
       role: m.role,
-      department: isManagement ? m.user.department : undefined,
+      department: isManagement ? m.department : undefined,
       status: m.status,
       isActive: m.user.isActive && m.status === MembershipStatus.ACTIVE,
       lastLoginAt: isManagement && m.user.lastLoginAt ? m.user.lastLoginAt.toISOString() : null,
@@ -78,6 +80,9 @@ export async function POST(req: Request) {
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.STAFF_ADMIN);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   let body: any;
   try {
@@ -111,6 +116,10 @@ export async function POST(req: Request) {
     );
   }
 
+  if (department && department.length > 100) {
+    return NextResponse.json({ error: "Department name must be 100 characters or fewer." }, { status: 400 });
+  }
+
   // Role validation: Must be a legitimate HotelRole (never a platform role)
   if (!PERMITTED_HOTEL_ROLES.includes(requestedRole as HotelRole)) {
     return NextResponse.json(
@@ -130,26 +139,23 @@ export async function POST(req: Request) {
     );
   }
 
-  // Enforce SaaS Subscription Plan Staff Member Limit
-  const { checkUsageLimit } = await import("@/lib/entitlements");
-  const staffLimit = await checkUsageLimit(tenant.hotelId, "maxStaff", 1);
-  if (!staffLimit.allowed) {
-    return NextResponse.json(
-      {
-        error: staffLimit.code || "PLAN_LIMIT_EXCEEDED",
-        message: staffLimit.reason,
-      },
-      { status: 403 }
-    );
-  }
-
   try {
     // Check if user account already exists globally
     const existingUser = await prisma.user.findFirst({
       where: { email: { equals: email, mode: "insensitive" } },
+      select: { id: true, name: true, email: true, phone: true, isActive: true },
     });
 
     if (existingUser) {
+      if (!existingUser.isActive) {
+        return NextResponse.json(
+          { error: "This account is inactive and cannot be added to the hotel." },
+          { status: 403 }
+        );
+      }
+
+      // Existing account credentials and global profile are never changed by
+      // adding a hotel membership. Only the new membership receives hotel data.
       // Check if user is already a member of this hotel
       const existingMembership = await prisma.hotelMembership.findUnique({
         where: {
@@ -167,20 +173,25 @@ export async function POST(req: Request) {
         );
       }
 
-      // Add existing user to this hotel
-      const newMembership = await prisma.hotelMembership.create({
+      // Serialize the count and membership insertion under one hotel-scoped lock.
+      const { withUsageLimitLock } = await import("@/lib/entitlements");
+      const quotaResult = await withUsageLimitLock(tenant.hotelId, "maxStaff", 1, async (tx) => tx.hotelMembership.create({
         data: {
           userId: existingUser.id,
           hotelId: tenant.hotelId,
           role: requestedRole as HotelRole,
+          department: department || null,
           status: MembershipStatus.ACTIVE,
         },
-        include: {
-          user: {
-            select: { id: true, name: true, email: true },
-          },
-        },
-      });
+        include: { user: { select: { id: true, name: true, email: true, phone: true } } },
+      }));
+      if (!quotaResult.allowed) {
+        return NextResponse.json(
+          { error: quotaResult.limit.code || "PLAN_LIMIT_EXCEEDED", message: quotaResult.limit.reason },
+          { status: quotaResult.limit.code === "SUBSCRIPTION_STATUS_UNAVAILABLE" || quotaResult.limit.code === "USAGE_LIMIT_UNAVAILABLE" ? 503 : 403 }
+        );
+      }
+      const newMembership = quotaResult.value;
 
       return NextResponse.json(
         {
@@ -188,7 +199,9 @@ export async function POST(req: Request) {
           userId: newMembership.user.id,
           name: newMembership.user.name,
           email: newMembership.user.email,
+          phone: newMembership.user.phone,
           role: newMembership.role,
+          department: newMembership.department,
           status: newMembership.status,
           message: "Existing user added to hotel workspace.",
         },
@@ -199,29 +212,29 @@ export async function POST(req: Request) {
     // Create new User and HotelMembership atomically
     const passwordHash = await bcrypt.hash(password, 10);
 
-    const result = await prisma.$transaction(async (tx) => {
+    const { withUsageLimitLock } = await import("@/lib/entitlements");
+    const quotaResult = await withUsageLimitLock(tenant.hotelId, "maxStaff", 1, async (tx) => {
       const newUser = await tx.user.create({
-        data: {
-          name,
-          email,
-          phone,
-          department,
-          passwordHash,
-          isActive: true,
-        },
+        data: { name, email, phone, passwordHash, isActive: true },
       });
-
       const newMembership = await tx.hotelMembership.create({
         data: {
           userId: newUser.id,
           hotelId: tenant.hotelId,
           role: requestedRole as HotelRole,
+          department: department || null,
           status: MembershipStatus.ACTIVE,
         },
       });
-
       return { user: newUser, membership: newMembership };
     });
+    if (!quotaResult.allowed) {
+      return NextResponse.json(
+        { error: quotaResult.limit.code || "PLAN_LIMIT_EXCEEDED", message: quotaResult.limit.reason },
+        { status: quotaResult.limit.code === "SUBSCRIPTION_STATUS_UNAVAILABLE" || quotaResult.limit.code === "USAGE_LIMIT_UNAVAILABLE" ? 503 : 403 }
+      );
+    }
+    const result = quotaResult.value;
 
     return NextResponse.json(
       {
@@ -229,13 +242,18 @@ export async function POST(req: Request) {
         userId: result.user.id,
         name: result.user.name,
         email: result.user.email,
+        phone: result.user.phone,
         role: result.membership.role,
+        department: result.membership.department,
         status: result.membership.status,
         message: "Staff member created and assigned to hotel.",
       },
       { status: 201 }
     );
-  } catch (error) {
+  } catch (error: any) {
+    if (error?.code === "SUBSCRIPTION_STATUS_UNAVAILABLE" || error?.code === "USAGE_LIMIT_UNAVAILABLE") {
+      return NextResponse.json({ error: error.code, message: error.message }, { status: 503 });
+    }
     console.error("Failed to add staff member:", error);
     return NextResponse.json(
       { error: "Could not add staff member. Please try again." },
