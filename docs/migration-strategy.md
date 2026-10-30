@@ -426,12 +426,23 @@ checkable, even though the CDN itself is not. Those four values are now embedded
 `scripts/prisma-engine-pins.mjs`, so a supplied binary can be rejected by digest rather than trusted by
 filename.
 
-Nothing in this environment can fetch those files: `binaries.prisma.sh` resets the TLS connection and
-every GitHub host is unreachable; only `registry.npmjs.org` and `pypi.org` respond. No npm or PyPI
-package ships the 5.17.0 native engines (checked: `prisma`, `@prisma/engines`, `@prisma/migrate`,
-`@prisma/client`, `@prisma/schema-engine-wasm`, `prisma-engines`, `prisma-binaries`, plus three
-third-party downloaders), and the local Prisma cache contains only WASM engines. The gap is an
-egress restriction, not a missing procedure.
+Nothing in this environment can fetch those files: `binaries.prisma.sh` resets the TLS connection (its
+legacy S3 bucket, plain HTTP and jsDelivr fail the same way). GitHub **is** reachable from here, which
+made a second sweep possible on 2026-10-30 — every route was checked, and none carries the artifact:
+
+| Route | Result |
+|---|---|
+| `prisma/prisma-engines`, `prisma/prisma` 5.17.0 releases | 0 release assets |
+| code search for the commit in any path | 141 hits, all `.sha256` files in `Jolg42/prisma-engines-artifacts` |
+| code search for the plain `schema-engine` digest | 2 hits, both in that same archive |
+| `filename:libquery_engine-debian-openssl-3.0.x.so.node` | 0 hits |
+| any committed `schema-engine-debian-openssl-3.0.x` | 1 hit — a 34-byte placeholder file |
+| forks that publish engine binaries (`lifeng5210/prisma-engines-binaries`) | two commits, Kingbase/Oracle forks, no release assets, not 393aa359… |
+| npm: 268 packages across five engine/binary/mirror searches, and every plausible name's `unpackedSize` | largest Prisma-family packages are 7.x/8.x clients; no package ships the 5.17.0 native engines |
+| PyPI: 74 `prisma`-ish project names in the simple index | all unrelated (Palo Alto "Prisma" cloud tooling and similar) |
+| build from source | no Rust toolchain; `crates.io`, `static.crates.io`, `index.crates.io` all return 000 |
+
+The gap is an egress restriction, not a missing procedure.
 
 ### 7.1.2 Recovering the engine where egress permits
 
@@ -566,13 +577,41 @@ Two operational facts came out of the run:
   message (`Tenant-integrity precheck failed: ReservationRoom …`) is only visible on the adapter side.
   Do not expect the ledger to explain *why* in prose.
 
+### 7.5 Schema validation with the pinned version's own parser
+
+`prisma validate` and `prisma generate` both fetch engines from the CDN, so neither can run here. The
+schema was therefore validated with the schema parser Prisma 5.17.0 itself ships as WebAssembly
+(`@prisma/prisma-schema-wasm`, pulled in by `@prisma/internals@5.17.0`), in a scratch directory outside
+the repository:
+
+```bash
+mkdir -p /tmp/schema-val && cd /tmp/schema-val && npm init -y
+npm i --ignore-scripts @prisma/internals@5.17.0
+DATABASE_URL="postgresql://user:pass@localhost:5432/placeholder" \
+DIRECT_URL="postgresql://user:pass@localhost:5432/placeholder" \
+node -e 'const {getDMMF,getConfig}=require("@prisma/internals");
+  const d=require("fs").readFileSync("<repo>/prisma/schema.prisma","utf8");
+  Promise.all([getDMMF({datamodel:d}),getConfig({datamodel:d})]).then(([m,c])=>{
+    console.log(m.datamodel.models.length, m.datamodel.enums.length, c.datasources[0].provider);})'
+```
+
+Result on 2026-10-30: **28 models, 19 enums, datasource `postgresql`, zero P1012 errors**, from
+`@prisma/internals@5.17.0`. The placeholder URLs are never dialled — `getDMMF`/`getConfig` parse and
+validate only.
+
+This is narrower than a migration run and is not offered as a substitute for one: it proves the pinned
+version accepts the schema, not that its engine applies the migrations.
+
 ---
 
 ## 8. What is still unproven
 
 Be explicit about this; do not let the rehearsal or engine evidence imply more than it shows.
 `npm run migration:readiness` reports the state of the three external prerequisites below as three
-separate lines — it never collapses "no archive", "no credentials" and "no engine" into one "blocked".
+separate lines — it never collapses "no archive", "no credentials" and "no engine" into one "blocked" —
+using exactly four states: **PASS** (demonstrated here), **BLOCKED** (external input missing),
+**FAIL** (a check ran and failed) and **PENDING APPROVAL** (the owner's decision). A green test suite
+cannot produce PASS for any of them.
 
 1. **The pinned Prisma 5.17.0 engine has not run.** §7 exercises the real engine, but from the 6.19.0
    tool stack, because the 5.17.0 binaries are only published to a host this environment cannot reach

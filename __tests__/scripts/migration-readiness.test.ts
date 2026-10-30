@@ -7,13 +7,18 @@ import path from "node:path";
 
 /**
  * `scripts/migration-readiness.mjs` exists to stop three separate gaps from being
- * reported as one vague "blocked". It must therefore be precise about *which*
- * prerequisite is missing, and must never report ready when one is absent.
+ * reported as one vague "blocked", and to keep a green test suite from being read
+ * as production readiness.
  *
- * None of these tests needs a database: the archive and engine checks are hashes,
- * and the credentials check inspects the environment. `--check-target` (the one
- * path that connects) is deliberately not exercised here — it is covered by the
- * target-check tests and by the recorded runs in docs/saas-migration-rehearsal.md.
+ * The vocabulary is therefore part of the contract: PASS means "demonstrated
+ * here", BLOCKED means "external input missing", FAIL means "a check ran and did
+ * not pass", and the owner's approval is always PENDING APPROVAL. These tests
+ * assert those distinctions, not just exit codes.
+ *
+ * None of them needs a database: the archive and engine checks are hashes, and
+ * the credentials check inspects the environment. `--check-target` (the one path
+ * that connects) is covered by the target-check tests and by the recorded runs in
+ * docs/saas-migration-rehearsal.md.
  */
 
 const repoRoot = path.resolve(__dirname, "../..");
@@ -50,7 +55,7 @@ const fakeEngine = (() => {
   return { file };
 })();
 
-describe("migration readiness — reporting, never inferring", () => {
+describe("migration readiness — four states, no inference", () => {
   it("prints usage and exits 0 for --help", () => {
     const { status, stdout } = run(["--help"]);
     expect(status).toBe(0);
@@ -59,63 +64,73 @@ describe("migration readiness — reporting, never inferring", () => {
     expect(stdout).toContain("Pinned engine");
   });
 
-  it("names all three prerequisites when none is supplied", () => {
+  it("reports all three prerequisites as BLOCKED when none is supplied", () => {
     const { status, stdout } = run([]);
     expect(status).toBe(1);
-    expect(stdout).toMatch(/archive\s+: MISSING/);
-    expect(stdout).toMatch(/credentials\s+: MISSING/);
-    expect(stdout).toMatch(/engine\s+: MISSING/);
-    expect(stdout).toContain("Not ready");
+    expect(stdout).toMatch(/archive\s+: BLOCKED/);
+    expect(stdout).toMatch(/credentials\s+: BLOCKED/);
+    expect(stdout).toMatch(/engine\s+: BLOCKED/);
+    expect(stdout).toMatch(/Decision\s+: BLOCKED/);
   });
 
-  it("accepts an archive whose digest matches the expected value", () => {
+  it("always reports approval as PENDING APPROVAL, never granted", () => {
+    const { stdout } = run([]);
+    expect(stdout).toMatch(/approval\s+: PENDING APPROVAL/);
+    expect(stdout).not.toMatch(/approval\s+: PASS/);
+  });
+
+  it("reports PASS for an archive whose digest matches the expected value", () => {
     const { stdout, status } = run(["--dump", archive.file, "--expect-sha256", archive.digest]);
-    expect(stdout).toMatch(/archive\s+: PRESENT/);
-    // Only the archive is satisfied; readiness still requires the other two.
+    expect(stdout).toMatch(/archive\s+: PASS/);
+    // Only the archive is demonstrated; readiness still requires the other two.
     expect(status).toBe(1);
-    expect(stdout).toContain("Not ready");
+    expect(stdout).toMatch(/Decision\s+: BLOCKED/);
   });
 
-  it("refuses an archive that does not match the recorded digest", () => {
+  it("reports FAIL, not BLOCKED, for an archive that does not match", () => {
     const { stdout } = run(["--dump", archive.file]);
-    expect(stdout).toMatch(/archive\s+: MISMATCH/);
+    expect(stdout).toMatch(/archive\s+: FAIL/);
     expect(stdout).toContain("not the recorded backup");
+    expect(stdout).toMatch(/Decision\s+: FAIL/);
   });
 
-  it("reports configured credentials without contacting the target by default", () => {
+  it("does not treat configured credentials as demonstrated", () => {
     const { stdout, status } = run([], {
       SAAS_ENVIRONMENT: "saas",
       SAAS_DATABASE_IDENTIFIER: "example",
       DIRECT_URL: "postgresql://postgres@127.0.0.1:5432/example",
     });
-    expect(stdout).toMatch(/credentials\s+: CONFIGURED/);
-    expect(stdout).toContain("not contacted");
-    expect(status).toBe(1); // archive and engine are still missing
+    expect(stdout).toMatch(/credentials\s+: BLOCKED/);
+    expect(stdout).toContain("has not been contacted");
+    expect(status).toBe(1);
   });
 
-  it("fails the engine prerequisite for a file that is not the pinned release", () => {
+  it("reports FAIL for an engine file that is not the pinned release", () => {
     const { stdout } = run([], { PRISMA_SCHEMA_ENGINE_BINARY: fakeEngine.file });
-    expect(stdout).toMatch(/engine\s+: FAILED/);
+    expect(stdout).toMatch(/engine\s+: FAIL/);
     expect(stdout).toContain("does not match the pinned 5.17.0 artifact");
+    expect(stdout).toMatch(/Decision\s+: FAIL/);
   });
 
-  it("never claims approval", () => {
-    const { stdout } = run(["--json"], { BACKUP_ARCHIVE: archive.file });
-    expect(JSON.parse(stdout).approval.granted).toBe(false);
+  it("exposes the same distinctions in JSON", () => {
+    const { stdout, status } = run(["--json", "--expect-sha256", archive.digest], { BACKUP_ARCHIVE: archive.file });
+    const report = JSON.parse(stdout);
+    expect(status).toBe(1);
+    expect(report.readyForApproval).toBe(false);
+    expect(report.decision.status).toBe("BLOCKED");
+    expect(report.approval.status).toBe("PENDING APPROVAL");
+    expect(report.prerequisites.map((entry: { id: string }) => entry.id)).toEqual([
+      "archive",
+      "credentials",
+      "engine",
+    ]);
+    // The archive matches its recorded digest, so that row alone is PASS.
+    expect(report.prerequisites[0].status).toBe("PASS");
   });
 
   it("rejects unknown flags", () => {
     const { status, stderr } = run(["--force-ready"]);
     expect(status).toBe(2);
     expect(stderr).toContain("Unknown option");
-  });
-
-  it("reports ready=false in JSON when something is missing", () => {
-    const { status, stdout } = run(["--json"], { BACKUP_ARCHIVE: archive.file });
-    const report = JSON.parse(stdout);
-    expect(status).toBe(1);
-    expect(report.ready).toBe(false);
-    expect(report.approval.granted).toBe(false);
-    expect(report.prerequisites.map((entry: { id: string }) => entry.id)).toEqual(["archive", "credentials", "engine"]);
   });
 });
