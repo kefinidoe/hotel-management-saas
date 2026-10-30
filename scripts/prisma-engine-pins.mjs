@@ -90,8 +90,11 @@ export function parseEngineCommit(output) {
  * so the matching, mismatch and missing-file paths can be tested without a
  * 40 MB engine.
  *
- * @param {{ path: string, artifact: { artifact: string, sha256: string, envVar: string } }} params
- * @returns {{ ok: boolean, artifact: string, path: string, digest: string | null, expected: string, size: number | null, problems: string[] }}
+ * `path` is null when the caller supplied no artifact at all, which is a
+ * distinct failure from supplying one that does not exist.
+ *
+ * @param {{ path?: string | null, artifact: { artifact: string, sha256: string, envVar: string } }} params
+ * @returns {{ ok: boolean, artifact: string, path: string | null, digest: string | null, expected: string, size: number | null, problems: string[] }}
  */
 export function verifyPinnedArtifact({ path: filePath, artifact }) {
   const expected = artifact.sha256;
