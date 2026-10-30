@@ -81,9 +81,10 @@ There are 19 reviewed migrations, checksum-pinned in `prisma/migration-release-m
   disposable PostgreSQL server; it never touches the app's pinned `prisma@5.17.0` dependency.
 - **What is still missing, in one command:** `npm run migration:readiness` reports the three external
   prerequisites — the owner's archive (hashed against its recorded digest), the read-only target
-  credentials (inspected, not contacted), and the pinned 5.17.0 engine artifacts (hashed against the
-  official digests) — and refuses to call anything ready while one is absent. Add `--check-target` to
-  run the read-only target check as well.
+  credentials, and the pinned 5.17.0 engine artifacts (hashed against the official digests) — using four
+  states: **PASS** (demonstrated), **BLOCKED** (external input missing), **FAIL** (a check ran and
+  failed), **PENDING APPROVAL** (owner decision). A green test suite never produces PASS. Add
+  `--check-target` to run the read-only target check as well.
 - **Pinned Prisma 5.17.0 engine:** `npm run migration:verify-pin -- --schema-engine <path>
   --query-engine-library <path>` checks both files against the official digests recorded in
   `scripts/prisma-engine-pins.mjs`, requires `schema-engine --version` to name commit `393aa359…`, and

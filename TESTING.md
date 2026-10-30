@@ -39,7 +39,7 @@ placeholder cases have limited reach. Relevant tenant and schema test groups inc
 | `subscriptions/subscription-entitlements.test.ts` | 48 | Subscription and entitlement behavior with mocked storage |
 | `scripts/cleanup-scope.test.ts` | 3 | Static guardrails against unscoped cleanup and non-transactional execution |
 | `scripts/database-target-safety.test.ts` | 4 | Identifier validation and wiring for standalone backup/restore target checks |
-| `scripts/migration-readiness.test.ts` | 9 | The three prerequisites are reported individually, and never as ready while one is missing; approval can never be claimed |
+| `scripts/migration-readiness.test.ts` | 9 | The three prerequisites are reported individually with the PASS / BLOCKED / FAIL vocabulary; approval is always PENDING APPROVAL; decision is the worst prerequisite |
 | `scripts/prisma-engine-pin.test.ts` | 16 | Pinned Prisma 5.17.0 digests and commit: parser, match/mismatch/missing paths, and the `verify-pin` CLI refusals |
 | `scripts/migration-evidence-tools.test.ts` | 15 | CLI-level refusals for `target-check.mjs` (no write path, target binding, pooler port) and `restore-rehearsal.mjs` (digest, missing archive, shared host, reserved names) — no database needed |
 | `safety/offline-auth-routes.test.ts` | 3 | Offline 503 responses without importing Prisma-backed auth modules |
@@ -261,6 +261,9 @@ Supabase target are still not exercised by any of these layers.
   Cleanup, reset-password, and seed scripts were not executed against any DB.
 - `backup-db.mjs` and `restore-rehearsal.mjs` were executed against a disposable local PostgreSQL
   17.11 server (never the target); `target-check.mjs` was executed read-only against local copies only.
+- `migration-readiness.mjs` was run with no inputs, with a digest-matching archive, with a deliberately
+  non-matching archive, with configured-but-uncontacted credentials, and with `--check-target` against a
+  disposable local database (archive PASS, credentials PASS, engine BLOCKED, decision BLOCKED).
 - `prisma-engine-pin.mjs` was executed against deliberately wrong and missing files (both refused) and
   in its `--help`/no-argument forms. Its positive path needs the genuine 5.17.0 artifacts, which no
   reachable host serves, so it has not been run against a real engine.

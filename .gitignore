@@ -48,6 +48,8 @@ Thumbs.db
 
 # Database dumps. These contain real guest data -- never commit them.
 backups/
+*.dump
+*.dump.gz
 
 # Local recovery files: retain locally, never commit
 *.backup

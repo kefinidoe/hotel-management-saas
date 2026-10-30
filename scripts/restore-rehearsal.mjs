@@ -81,6 +81,17 @@ Options:
 // rejects writes while the restored database is being read.
 const READ_ONLY_OPTION = "-c default_transaction_read_only=on";
 
+/**
+ * A scratch database that exists and has not been dropped yet.
+ *
+ * The normal path drops it and clears this, so reaching the top-level error
+ * handler with it still set means main() threw somewhere unexpected (an fs
+ * error, a psql failure outside the handled branches, a bug). Without this, such
+ * a throw would leave a database behind on the server -- which is how
+ * "disposable" quietly stops being true.
+ */
+let scratchToClean = null;
+
 // Tables fingerprinting tries to count. Absent tables are skipped, so this list
 // can cover both the pre-tenancy and the current schema.
 const KEY_TABLES = [
@@ -345,6 +356,20 @@ function inspectRestored(url, psqlBin) {
   };
 }
 
+/**
+ * Drop the scratch database and clear the read-only session default first.
+ *
+ * `DROP DATABASE` is refused inside a read-only transaction, and the inspection
+ * phase sets that default for the whole process, so the option has to come off
+ * before the maintenance connection is used -- whether or not inspection got far
+ * enough to matter.
+ */
+function dropScratchDatabase({ maintenanceUrl, psqlBin, database }) {
+  process.env.PGOPTIONS = (process.env.PGOPTIONS ?? "").replace(READ_ONLY_OPTION, "").trim();
+  if (!process.env.PGOPTIONS) delete process.env.PGOPTIONS;
+  runPsql({ url: maintenanceUrl, psqlBin, sql: `DROP DATABASE IF EXISTS ${quoteIdent(database)} WITH (FORCE);` });
+}
+
 function printHumanReport(report) {
   const lines = [];
   lines.push("");
@@ -564,6 +589,7 @@ async function main() {
     }
     runPsql({ url: maintenanceUrl, psqlBin, sql: `CREATE DATABASE ${quoteIdent(database)};` });
     report.scratch.created = true;
+    scratchToClean = { maintenanceUrl, psqlBin, database };
   } catch (error) {
     if (error instanceof PsqlError) {
       process.stderr.write(`Could not create the scratch database (${database}): ${error.message}\n`);
@@ -660,15 +686,12 @@ async function main() {
   if (report.scratch.created) {
     if (options.keep) {
       report.cleanup = { dropped: false, ok: true, kept: true, details: `kept at request (--keep): ${database}` };
+      scratchToClean = null;
     } else {
       try {
-        // DROP DATABASE is refused inside a read-only transaction, so the
-        // inspection default is removed before the maintenance connection is
-        // used. Unconditionally: inspection may have set it and then thrown.
-        process.env.PGOPTIONS = (process.env.PGOPTIONS ?? "").replace(READ_ONLY_OPTION, "").trim();
-        if (!process.env.PGOPTIONS) delete process.env.PGOPTIONS;
-        runPsql({ url: maintenanceUrl, psqlBin, sql: `DROP DATABASE IF EXISTS ${quoteIdent(database)} WITH (FORCE);` });
+        dropScratchDatabase({ maintenanceUrl, psqlBin, database });
         report.cleanup = { dropped: true, ok: true, details: `scratch database ${database} dropped` };
+        scratchToClean = null;
       } catch (error) {
         const message = error instanceof PsqlError ? error.message : String(error?.message ?? error);
         report.cleanup = { dropped: false, ok: false, details: `could not drop ${database}: ${message}` };
@@ -690,5 +713,14 @@ main()
   })
   .catch((error) => {
     process.stderr.write(`${error?.message ?? error}\n`);
+    if (scratchToClean) {
+      try {
+        dropScratchDatabase(scratchToClean);
+        process.stderr.write(`Dropped scratch database ${scratchToClean.database} after the failure.\n`);
+      } catch (cleanupError) {
+        const message = cleanupError instanceof PsqlError ? cleanupError.message : String(cleanupError?.message ?? cleanupError);
+        process.stderr.write(`Could not drop scratch database ${scratchToClean.database}: ${message}\n`);
+      }
+    }
     process.exitCode = 1;
   });

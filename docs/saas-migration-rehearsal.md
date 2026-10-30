@@ -8,7 +8,7 @@ a reachable Prisma 5.17.0 engine — so production readiness is not claimed. No 
 this document is the evidence record: what was run, on what, and what it does *not* prove.
 
 This file supersedes the earlier "preparation only / NO-GO" notes, which were accurate when no
-PostgreSQL server existed in the sandbox. See [§10](#10-history-of-this-record) for why the status
+PostgreSQL server existed in the sandbox. See [§11](#11-history-of-this-record) for why the status
 changed.
 
 ---
@@ -314,6 +314,8 @@ sha256sum hotel-management-saas-20261028-140823.dump     # expect F81566E9…24A
 | Verified restore of **the owner's** archive | **NOT DONE** — archive not supplied (§7); one command once the file exists |
 | Read-only checkpoint detection against the live target | **NOT DONE** — needs `DIRECT_URL`; `npm run migration:target-check` is the command |
 | `prisma migrate deploy` with the **pinned 5.17.0** engine | **NOT DONE** — `binaries.prisma.sh` unreachable; recovery and acceptance steps recorded in [migration-strategy.md §7.1.1–7.1.3](migration-strategy.md) |
+| Schema validated by the **pinned 5.17.0** parser | **PASS** — `@prisma/internals@5.17.0` WASM parser: 28 models, 19 enums, 0 P1012 errors ([§7.5](migration-strategy.md)) |
+| Readiness reporting distinguishes PASS / BLOCKED / FAIL / PENDING APPROVAL | **PASS** — demonstrated in §10.3 |
 | Owner approval for the deployment window | **NOT DONE** |
 
 ---
@@ -389,7 +391,76 @@ because no reachable host serves it.
 
 ---
 
-## 10. History of this record
+---
+
+## 10. Safety audit and readiness vocabulary (2026-10-30)
+
+A full pass over the migration workflow — not just the scripts — looking for ways it could do the wrong
+thing quietly. Two real defects were found and fixed; the rest of the workflow held.
+
+### 10.1 Defects found and fixed
+
+| Defect | Why it mattered | Fix | Proof |
+|---|---|---|---|
+| A scratch database could survive an unexpected failure in `restore-rehearsal` | Cleanup ran only on the normal path. An fs error or a bug after `CREATE DATABASE` would leave a database behind on the server — the exact "disposable" failure the tool exists to prevent | A module-level `scratchToClean` record plus a drop in the top-level error handler; the normal path clears it | A temporary copy of the script with an injected throw immediately after `CREATE DATABASE` printed `Dropped scratch database rehearsal_restore_20261030_120151 after the failure.` and `select count(*) from pg_database where datname like 'rehearsal_restore%'` returned **0**. The copy was deleted; no test hook ships |
+| A `.dump` file at the repository root was **not** ignored | The owner's archive contains real guest data; only `backups/` was ignored, so an archive copied next to the scripts could be committed | `*.dump` and `*.dump.gz` added to `.gitignore` | `git check-ignore -v hotel-management-saas-20261028-140823.dump` → `.gitignore:51:*.dump` |
+
+### 10.2 What the audit confirmed (by reading and by running)
+
+| Property | How it holds |
+|---|---|
+| No connection to the legacy Axis Hotel database | No script accepts a host it has not been given; rehearsal tooling refuses non-loopback; the adoption tool binds to `SAAS_DATABASE_IDENTIFIER` before connecting |
+| No replay of an existing schema | `buildAdoptionPlan` refuses to baseline unless the schema matches exactly one checkpoint; migration 1 is never re-run against live tables (proved by the `unmanaged-*` and `conflict-guard` scenarios) |
+| No cross-tenant corruption | Migration 19's tenant precheck aborts the deploy and rolls back (`conflict-guard`, `failure`), verified again in this pass by the 8/8 rehearsal |
+| No unsafe ledger adoption | Baseline rows are written in one transaction that re-verifies the checkpoint predicate inside it; checksums come from the reviewed manifest |
+| No checksum bypass | `migrate-adopt` exits 1 on a mismatched ledger checksum; `verify-pin` has no flag that skips the digest comparison; `restore-rehearsal` refuses a mismatch before connecting |
+| No destructive operation on an unverified database | `restore-db` requires `--confirm-target` and refuses the live target without `--force`; `restore-rehearsal` refuses existing names and never drops a database it did not create |
+| Credentials never logged | Scripts print host/database, never the URL; `prisma-engine-verify` masks the password; `.env*` is ignored |
+| Fail-safe with missing prerequisites | Every tool exits non-zero with the exact missing input; `migration:readiness` reports BLOCKED rather than implying success |
+| Explicit owner approval required | `migrate-adopt --execute` requires `--approved-by` and `--confirm-database`; readiness always reports `PENDING APPROVAL` |
+
+Known, accepted limitation: connection strings are passed to `psql`/`pg_restore` as an argument, so they
+are visible to `ps` on the same host for the lifetime of that process — the same exposure as running
+`psql '<url>'` by hand. This is documented rather than fixed, because moving to `PGPASSWORD`/`~/.pgpass`
+changes how every operator runs the tools.
+
+### 10.3 Readiness vocabulary and what this pass demonstrated
+
+`npm run migration:readiness` now reports exactly four states — **PASS**, **BLOCKED**, **FAIL**,
+**PENDING APPROVAL** — and its decision is the worst of the three prerequisites. A passing test suite
+never produces PASS.
+
+Observed in this pass (local PostgreSQL 17.11, disposable database):
+
+```
+archive     : PASS — /tmp/audit-backups/hms-2026-10-30T12-01-41.dump (sha256 matches 37fe67ac…)
+credentials : PASS — target-check passed read-only; checkpoint saas_current; ledger ABSENT
+engine      : BLOCKED — no artifacts supplied (…); pinned commit 393aa359c9ad…
+approval    : PENDING APPROVAL — owner sign-off for the deployment window
+Decision     : BLOCKED — 1 of 3 prerequisites are not demonstrated: engine
+```
+
+With no inputs (the state of this environment) all three read BLOCKED. With a non-matching archive the
+decision is FAIL, not BLOCKED, because that is a check that ran and failed.
+
+### 10.4 Verification run in this pass
+
+| Check | Result |
+|---|---|
+| `npm run migration:rehearse` (psql, PostgreSQL 17.11) | **8/8 scenarios, 83 assertions** |
+| `migration:restore-rehearsal` on a locally built archive (digest-verified) | **PASS** — 28 tables, checkpoint `saas_current`, inspection read-only, scratch database dropped; 0 `rehearsal_restore%` databases left afterwards |
+| `migration:target-check` on the ledgerless full-schema copy | **PASS** — fingerprint `cd13215577c5b085e071c9a131c30790`, ledger ABSENT, checkpoint `saas_current` |
+| `migration:readiness` (with archive + credentials, `--check-target`) | archive PASS, credentials PASS, engine BLOCKED, decision BLOCKED |
+| Prisma 5.17.0 schema validation (`@prisma/internals@5.17.0` WASM parser) | **28 models, 19 enums, datasource postgresql, 0 P1012 errors** ([migration-strategy §7.5](migration-strategy.md)) |
+| `vitest run` | **718/718 in 49 files** |
+| `eslint` | clean |
+| `migration:manifest` | 19/19 files match |
+| `prisma validate` / `prisma generate` | blocked — fetch `libquery_engine…sha256` from `binaries.prisma.sh` (§7.1.1) |
+| `tsc --noEmit` | 297 diagnostics, all from `@prisma/client` not being generated (same cause); none in migration/adoption/rehearsal code |
+
+---
+
+## 11. History of this record
 
 * **Before 2026-10-30 — preparation only.** No `psql`, `postgres`, `initdb`, Docker or Podman
   existed in the sandbox, so the documented procedure was written but not executed, and the status
@@ -408,6 +479,9 @@ because no reachable host serves it.
   [migration-strategy.md §7.1](migration-strategy.md).
 * **2026-10-30 — restoration procedure rehearsed** on a synthetic archive; the owner's archive is
   still missing (§7).
+* **2026-10-30 — safety audit and readiness vocabulary.** Two defects fixed (scratch-database cleanup on
+  unexpected failure, proved with an injected fault; `.dump` not ignored by git), the readiness report
+  moved to four explicit states, and the schema validated by Prisma 5.17.0's own WASM parser (§10).
 * **2026-10-30 — evidence-gap pass.** `scripts/restore-rehearsal.mjs` and `scripts/target-check.mjs`
   were added with 15 CLI tests: the first enforces the archive digest before connecting and cleans up
   its scratch database in every path, the second has no write path at all and proves the session is
