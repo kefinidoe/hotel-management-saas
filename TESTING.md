@@ -2,7 +2,7 @@
 
 > ## Current verification status (2026-10-30)
 >
-> The latest full Vitest run passed **693/693 tests across 47 files**, and `npm run lint` passed.
+> The latest full Vitest run passed **718/718 tests across 49 files**, and `npm run lint` passed.
 > `npx tsc --noEmit` currently reports 296 diagnostics, all of them consequences of the Prisma
 > client not being generated in this sandbox (77 missing `@prisma/client` exports plus cascading
 > inference errors); none are in the migration, adoption or rehearsal code. Prisma generation,
@@ -23,7 +23,7 @@
 > above; production readiness is not claimed.
 
 ## Overview
-The current suite has **693 tests in 47 files**. It is green as a test suite, but mocked and
+The current suite has **718 tests in 49 files**. It is green as a test suite, but mocked and
 placeholder cases have limited reach. Relevant tenant and schema test groups include:
 
 | Suite | Tests | What it checks |
@@ -39,6 +39,8 @@ placeholder cases have limited reach. Relevant tenant and schema test groups inc
 | `subscriptions/subscription-entitlements.test.ts` | 48 | Subscription and entitlement behavior with mocked storage |
 | `scripts/cleanup-scope.test.ts` | 3 | Static guardrails against unscoped cleanup and non-transactional execution |
 | `scripts/database-target-safety.test.ts` | 4 | Identifier validation and wiring for standalone backup/restore target checks |
+| `scripts/migration-readiness.test.ts` | 9 | The three prerequisites are reported individually, and never as ready while one is missing; approval can never be claimed |
+| `scripts/prisma-engine-pin.test.ts` | 16 | Pinned Prisma 5.17.0 digests and commit: parser, match/mismatch/missing paths, and the `verify-pin` CLI refusals |
 | `scripts/migration-evidence-tools.test.ts` | 15 | CLI-level refusals for `target-check.mjs` (no write path, target binding, pooler port) and `restore-rehearsal.mjs` (digest, missing archive, shared host, reserved names) — no database needed |
 | `safety/offline-auth-routes.test.ts` | 3 | Offline 503 responses without importing Prisma-backed auth modules |
 
@@ -224,8 +226,8 @@ npm run test:coverage
 Latest full run on the worktree:
 
 ```
-Test Files  47 passed (47)
-     Tests  693 passed (693)
+Test Files  49 passed (49)
+     Tests  718 passed (718)
 ```
 
 The PGlite schema/migration tests create disposable in-memory databases and close them after
@@ -259,6 +261,9 @@ Supabase target are still not exercised by any of these layers.
   Cleanup, reset-password, and seed scripts were not executed against any DB.
 - `backup-db.mjs` and `restore-rehearsal.mjs` were executed against a disposable local PostgreSQL
   17.11 server (never the target); `target-check.mjs` was executed read-only against local copies only.
+- `prisma-engine-pin.mjs` was executed against deliberately wrong and missing files (both refused) and
+  in its `--help`/no-argument forms. Its positive path needs the genuine 5.17.0 artifacts, which no
+  reachable host serves, so it has not been run against a real engine.
 - `workflows/guest-lifecycle.test.ts` (36 tests) and `utilities/helpers.test.ts` (37 tests) are
   illustrative placeholders. They do not call application routes or the real utility functions.
 - Middleware matcher tests check route matching, not a full browser session or live middleware

@@ -22,6 +22,8 @@
     "migration:adopt": "node scripts/migrate-adopt.mjs",
     "migration:rehearse": "node scripts/migration-rehearsal.mjs",
     "migration:verify-engine": "node scripts/prisma-engine-verify.mjs",
+    "migration:verify-pin": "node scripts/prisma-engine-pin.mjs",
+    "migration:readiness": "node scripts/migration-readiness.mjs",
     "migration:target-check": "node scripts/target-check.mjs",
     "migration:restore-rehearsal": "node scripts/restore-rehearsal.mjs",
     "db:clean": "tsx scripts/clean-test-data.ts",

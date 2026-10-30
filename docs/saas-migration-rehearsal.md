@@ -362,12 +362,30 @@ or `psql` required), because the important behaviour is refusal. Full suite afte
 |---|---|---|---|
 | 1 | Recover and verify `hotel-management-saas-20261028-140823.dump`, then rehearse it | **BLOCKED — file absent.** Searched the whole filesystem (`*.dump`, `*140823*`); the only archive present is one built here. The recorded identity to check against is 384 096 bytes / `F81566E9…24A7`; the rehearsal is now one command (`--expect-sha256`) that cannot silently restore the wrong file | the archive itself |
 | 2 | Read-only fingerprint and checkpoint against the configured Supabase target | **BLOCKED — credentials absent.** No `DIRECT_URL`, `DATABASE_URL`, `.env`, or Supabase token exists in this workspace; connecting without them would mean inventing a target. The read-only tool is built and proven against local targets | `DIRECT_URL` + `SAAS_DATABASE_IDENTIFIER` (and the owner's authorisation to connect read-only) |
-| 3 | Obtain the official Prisma 5.17.0 engine and verify it against a restored disposable database | **BLOCKED — egress.** `binaries.prisma.sh` TLS-resets and all GitHub hosts are unreachable; no npm/PyPI package carries the native 5.17.0 engines. URL contract, artifact checksums (`schema-engine` = `0a52943c…956e`) and the four acceptance criteria are recorded in [migration-strategy.md §7.1.1–7.1.3](migration-strategy.md) | network access to `binaries.prisma.sh` (or the mirror) and the engine commit `393aa359…` |
+| 3 | Obtain the official Prisma 5.17.0 engine and verify it against a restored disposable database | **BLOCKED — the artifact has no reachable distributor; the verification half is built.** Probed 2026-10-30: `binaries.prisma.sh` still TLS-resets (the legacy `prisma-builds.s3-eu-west-1.amazonaws.com` and plain HTTP do too), while `github.com`/`codeload`/`api.github.com` now answer 200. Using that access: all four official digests were confirmed against `Jolg42/prisma-engines-artifacts` (§9.3), and code/registry searches show the binaries are not mirrored anywhere reachable — no repo commits them (`filename:libquery_engine-debian-openssl-3.0.x.so.node` → 0 hits; the one `schema-engine-debian-openssl-3.0.x` hit is a 34-byte placeholder), `prisma/prisma-engines` has no release assets, and no npm or PyPI package ships the native 5.17.0 engines. Building from source is also out: no Rust toolchain and `crates.io`/`static.crates.io`/`index.crates.io` all return 000. `npm run migration:verify-pin` now checks a supplied pair against the pinned digests and commit, so acceptance is one command once the artifact exists | the two artifacts themselves (commit `393aa359…`, platform `debian-openssl-3.0.x`), from `binaries.prisma.sh` or a mirror |
 | 4 | Fix what the pass found, document actual results | **DONE** — three real defects found and fixed while building the tools: `pg_restore` needed `--clean --if-exists` for the pre-existing `public` schema; the row-count query aliased a column `rows` inside `FROM (…) rows`, so `row_to_json` bound to the bigint column; the scratch database was not dropped when inspection failed after setting the read-only default | — |
 | 5 | Keep the work committed and pushed | Committed to `main` with the tests passing | — |
 
 No synthetic result stands in for a missing input: where a file or credential is absent, the row above
 says so and the tool that would consume it is built, tested and waiting.
+
+### 9.3 Pinned-engine verification pass (this round)
+
+Gap 3 needed two things: the binaries, and a way to prove that whatever is supplied *is* the release. The
+second half is now code rather than prose.
+
+| Piece | Detail |
+|---|---|
+| `scripts/prisma-engine-pins.mjs` | Records `prisma 5.17.0`, engine commit `393aa359c9ad4a4bb28630fb5613f9c281cde053`, platform `debian-openssl-3.0.x`, and the four official SHA-256 values (`schema-engine` `0a52943c…956e`, its archive `98ad433f…9a41`, `libquery_engine.so.node` `077e8682…7f9f`, its archive `125d7573…b1bd`) |
+| Independent confirmation | The third and fourth values — including the plain `libquery_engine.so.node` digest the live CDN probe never reached — were read from the public `Jolg42/prisma-engines-artifacts` archive, whose paths are `artifacts/all_commits/393aa359…/debian-openssl-3.0.x/*.sha256`. They agree with what the CDN sidecars returned before it became unreachable |
+| `scripts/prisma-engine-pin.mjs` (`npm run migration:verify-pin`) | Hashes each supplied artifact, compares it with the pin, runs `schema-engine --version` and requires commit `393aa359…`, and optionally runs `prisma -v` with the two `PRISMA_*` variables exported to confirm the CLI resolves `5.17.0` + the same commit. It never executes a binary whose digest failed, downloads nothing, and has no digest-skipping flag |
+| Behaviour observed | With no arguments: exit 2, listing the variables and artifacts. With a 1 KB file in place of `schema-engine`: exit 1, `MISMATCH`, both digests printed, `--version` explicitly **not run**. With a nonexistent path: exit 1, "No such file". `--skip-digest`: exit 2, "Unknown option" |
+| Readiness reporting | `npm run migration:readiness` prints the three prerequisites as separate lines with the exact next command for each, and `ready: false` while one is absent. Run in this environment it reports: archive **MISSING** (no `--dump`/`$BACKUP_ARCHIVE`), credentials **MISSING** (`SAAS_ENVIRONMENT=saas`, `SAAS_DATABASE_IDENTIFIER`, `DIRECT_URL`), engine **MISSING** (`PRISMA_SCHEMA_ENGINE_BINARY`/`PRISMA_QUERY_ENGINE_LIBRARY`). It cannot and does not mark approval as granted |
+| Tests | `__tests__/scripts/prisma-engine-pin.test.ts` — 16 tests: pin table shape, commit parsing (including a short hash being rejected), digest match/mismatch/missing/unsupplied paths, and the CLI refusals. The positive CLI path needs the genuine artifact, so it is **not** faked |
+
+What this changes: gap 3 is no longer "we hope the right file is used". The bytes are pinned, the commit
+is pinned, and the check fails closed. What it does not change: the pinned engine still has not run,
+because no reachable host serves it.
 
 ---
 
