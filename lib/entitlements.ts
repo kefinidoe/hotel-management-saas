@@ -511,7 +511,7 @@ export async function withUsageLimitLock<T>(
     let currentCount: number;
     try {
       const lockKey = `hotel-${hotelId}-${limitType}-quota`;
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))::text AS locked`;
       currentCount = limitType === "maxRooms"
         ? await tx.room.count({ where: { hotelId, isActive: true } })
         : await tx.hotelMembership.count({ where: { hotelId, status: "ACTIVE" } });
