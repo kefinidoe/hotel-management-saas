@@ -313,7 +313,7 @@ Before reporting, check these — they are design decisions, not bugs:
 
 These are covered by the automated suite, so you do not have to re-test them — but you are welcome to:
 
-* 833 unit/integration tests, 52 HTTP end-to-end checks and 33 browser steps across two hotels and
+* 833 unit/integration tests, 55 HTTP end-to-end checks and 33 browser steps across two hotels and
   every role, all green on this build (see `docs/production-readiness-report-round14.md`).
 * Sign-up, onboarding, invitations, acceptance, hotel switching, role denial by direct URL.
 * A reservation driven from creation through check-in, partial payment, settlement and check-out.

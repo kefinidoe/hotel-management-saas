@@ -1400,7 +1400,7 @@
       "rows": [
         {
           "table_name": "AuditLog",
-          "rows": 32
+          "rows": 0
         },
         {
           "table_name": "Expense",
@@ -1408,107 +1408,107 @@
         },
         {
           "table_name": "Folio",
-          "rows": 26
+          "rows": 10
         },
         {
           "table_name": "FolioItem",
-          "rows": 30
-        },
-        {
-          "table_name": "Guest",
-          "rows": 33
-        },
-        {
-          "table_name": "Hotel",
-          "rows": 20
-        },
-        {
-          "table_name": "HotelMembership",
-          "rows": 45
-        },
-        {
-          "table_name": "HousekeepingTask",
-          "rows": 9
-        },
-        {
-          "table_name": "InventoryItem",
-          "rows": 22
-        },
-        {
-          "table_name": "MaintenanceTicket",
-          "rows": 8
-        },
-        {
-          "table_name": "MenuCategory",
-          "rows": 19
-        },
-        {
-          "table_name": "MenuItem",
-          "rows": 23
-        },
-        {
-          "table_name": "Notification",
           "rows": 12
         },
         {
-          "table_name": "Order",
+          "table_name": "Guest",
+          "rows": 10
+        },
+        {
+          "table_name": "Hotel",
+          "rows": 3
+        },
+        {
+          "table_name": "HotelMembership",
+          "rows": 18
+        },
+        {
+          "table_name": "HousekeepingTask",
           "rows": 4
+        },
+        {
+          "table_name": "InventoryItem",
+          "rows": 10
+        },
+        {
+          "table_name": "MaintenanceTicket",
+          "rows": 2
+        },
+        {
+          "table_name": "MenuCategory",
+          "rows": 10
+        },
+        {
+          "table_name": "MenuItem",
+          "rows": 14
+        },
+        {
+          "table_name": "Notification",
+          "rows": 6
+        },
+        {
+          "table_name": "Order",
+          "rows": 2
         },
         {
           "table_name": "OrderItem",
-          "rows": 4
+          "rows": 2
         },
         {
           "table_name": "Payment",
-          "rows": 22
+          "rows": 4
         },
         {
           "table_name": "PaymentMethod",
-          "rows": 74
+          "rows": 6
         },
         {
           "table_name": "Purchase",
-          "rows": 7
+          "rows": 0
         },
         {
           "table_name": "Recipe",
-          "rows": 6
+          "rows": 2
         },
         {
           "table_name": "RecipeIngredient",
-          "rows": 6
+          "rows": 2
         },
         {
           "table_name": "Reservation",
-          "rows": 22
+          "rows": 10
         },
         {
           "table_name": "ReservationRoom",
-          "rows": 22
+          "rows": 10
         },
         {
           "table_name": "Room",
-          "rows": 24
+          "rows": 14
         },
         {
           "table_name": "RoomType",
-          "rows": 21
+          "rows": 13
         },
         {
           "table_name": "StockMovement",
-          "rows": 25
+          "rows": 10
         },
         {
           "table_name": "Subscription",
-          "rows": 19
+          "rows": 2
         },
         {
           "table_name": "User",
-          "rows": 41
+          "rows": 19
         },
         {
           "table_name": "Wastage",
-          "rows": 6
+          "rows": 0
         }
       ]
     }
