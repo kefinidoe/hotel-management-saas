@@ -493,6 +493,8 @@ scratch server:
 
 ```bash
 # 1. restore the archive into a scratch database, digest-verified, and keep it
+#    (pg_restore --list parses the archive first; a corrupt file fails before any
+#    database is created)
 npm run migration:restore-rehearsal -- \
   --dump hotel-management-saas-20261028-140823.dump \
   --expect-sha256 F81566E9CCBB511DD34D0FEA5076934CDFBB03CD8BCDE1B1611E8D0F77DB24A7 \
@@ -629,7 +631,9 @@ cannot produce PASS for any of them.
    apply it, and it prints the checkpoint, the ledger-versus-manifest comparison and an md5
    fingerprint of the public schema. §4.2 (`migration:adopt`, a dry run) answers the same question
    with the adoption plan attached.
-3. **The production archive has not been restored.** The restoration *procedure* is now a single
+3. **The production archive has not been restored.** (As of the latest pass the owner reports the file
+   recovered and verified, but its bytes are not present in this environment — see
+   [saas-migration-rehearsal.md §11.1](saas-migration-rehearsal.md).) The restoration *procedure* is now a single
    command, `npm run migration:restore-rehearsal`, which verifies the archive's SHA-256 **before**
    contacting the server, creates its own scratch database, restores, fingerprints the result
    read-only and drops the database again. It is proven end to end on an archive built here (see

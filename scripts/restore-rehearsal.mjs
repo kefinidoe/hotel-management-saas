@@ -381,6 +381,11 @@ function printHumanReport(report) {
   );
   lines.push(`Archive SHA-256      : ${report.archive.sha256}`);
   lines.push(
+    `Table of contents    : ${
+      report.archive.tocEntries === null ? "plain SQL (no table of contents)" : `${report.archive.tocEntries} entries, parsed by pg_restore`
+    }`
+  );
+  lines.push(
     `Digest verified      : ${
       report.archive.digestVerified
         ? "yes, matches --expect-sha256"
@@ -545,6 +550,30 @@ async function main() {
     return 1;
   }
 
+  // Read the archive's table of contents before touching the server. A truncated
+  // or corrupt dump must fail here, with no database created and nothing to
+  // clean up -- the previous behaviour created the scratch database first and
+  // only discovered the corruption inside pg_restore.
+  let tocEntries = null;
+  if (format !== "plain") {
+    const listing = spawnSync(pgRestoreBin, ["--list", dumpPath], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    if (listing.error) {
+      process.stderr.write(`Could not run ${pgRestoreBin}: ${listing.error.message}\n`);
+      return 1;
+    }
+    if (listing.status !== 0) {
+      process.stderr.write(
+        `The archive could not be read by pg_restore; nothing was restored and no database was created.\n` +
+          `${(listing.stderr ?? "").trim().slice(0, 500)}\n`
+      );
+      return 1;
+    }
+    tocEntries = (listing.stdout ?? "")
+      .split("\n")
+      .filter((line) => line && !line.startsWith(";"))
+      .length;
+  }
+
   const maintenanceUrl = withDatabase(baseUrl.toString(), options.maintenanceDb);
   const scratchUrl = withDatabase(baseUrl.toString(), database);
 
@@ -557,6 +586,7 @@ async function main() {
       sha256,
       expectedSha256: options.expectSha256 ?? null,
       digestVerified,
+      tocEntries,
     },
     server: {
       host: baseUrl.hostname,
