@@ -19,9 +19,9 @@
  *   2. If `Origin` is present it must match the configured origin exactly.
  *   3. If `Origin` is absent, accept only `Sec-Fetch-Site: same-origin`, which is
  *      what a same-origin `fetch()` from the app carries.
- *   4. Anything else (no Origin, no Sec-Fetch-Site) is rejected: a client that
- *      sends neither is not a browser we can vouch for, and our own UI always
- *      sends at least one.
+ *   4. If both headers are absent, the request is not a cross-site browser
+ *      request (those always carry one of them), so accept it only when `Host`
+ *      is the host this application is configured to serve.
  *
  * A cross-site attacker cannot forge either header from a browser, and a
  * non-browser client that can forge headers is not the threat model this
@@ -50,5 +50,17 @@ export function isSameOriginRequest(request: Request): boolean {
     );
   }
 
-  return fetchSite === "same-origin";
+  if (fetchSite) return fetchSite === "same-origin";
+
+  // Neither header. No browser sends a cross-site POST without `Origin`, so this
+  // is either a same-origin request from a browser/proxy that drops the fetch
+  // metadata, or a non-browser client. Accept only if the request is addressed
+  // to this application's own host.
+  const host = request.headers.get("host");
+  if (!host) return false;
+  try {
+    return new URL(process.env.NEXTAUTH_URL || "http://localhost:3000").host === host;
+  } catch {
+    return false;
+  }
 }
