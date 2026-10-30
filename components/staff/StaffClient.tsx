@@ -13,6 +13,8 @@ export type StaffRow = {
   department: string | null;
   status: string;
   isActive: boolean;
+  /** True while the account holder has not yet accepted the invitation. */
+  invitationPending?: boolean;
   lastLoginAt: string | null;
   createdAt: string;
 };
@@ -232,7 +234,11 @@ export default function StaffClient({
                   </td>
                   <td className="px-4 py-3 text-text-secondary">{s.department || "—"}</td>
                   <td className="px-4 py-3">
-                    {canEditThisMember ? (
+                    {s.invitationPending ? (
+                      <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-amber-50 text-amber-700">
+                        Invitation pending
+                      </span>
+                    ) : canEditThisMember ? (
                       <button
                         onClick={() => toggleStatus(s.id, s.status)}
                         disabled={busyId === s.id}
@@ -290,7 +296,11 @@ export default function StaffClient({
           onCreated={(newMember) => {
             setAddOpen(false);
             setStaff((prev) => [...prev, newMember].sort((a, b) => a.name.localeCompare(b.name)));
-            setActionMessage(`Added ${newMember.name} to hotel staff.`);
+            setActionMessage(
+              newMember.invitationPending
+                ? `Invitation sent to ${newMember.name}. They must accept it before they can access this hotel.`
+                : `Added ${newMember.name} to hotel staff.`
+            );
           }}
         />
       )}
@@ -373,6 +383,10 @@ function AddStaffModal({
       return;
     }
 
+    // An existing account is invited, not added: the API answers 202 with a
+    // SUSPENDED membership. Showing it as active would tell the administrator the
+    // person has access when they do not.
+    const invitationPending = data.invitationPending === true;
     onCreated({
       id: data.id,
       userId: data.userId,
@@ -381,8 +395,9 @@ function AddStaffModal({
       phone: data.phone ?? (phone || null),
       role: data.role || role,
       department: data.department ?? (department || null),
-      status: "ACTIVE",
-      isActive: true,
+      status: invitationPending ? "SUSPENDED" : "ACTIVE",
+      isActive: !invitationPending,
+      invitationPending,
       lastLoginAt: null,
       createdAt: new Date().toISOString(),
     });
@@ -440,12 +455,14 @@ function AddStaffModal({
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-text-secondary mb-1">Initial Password (new accounts only)</label>
+            <label className="block text-xs font-medium text-text-secondary mb-1">
+              Initial Password (new accounts only — leave blank when inviting an existing account)
+            </label>
             <input
-              type="text"
+              type="password"
+              autoComplete="new-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              required
               minLength={8}
               placeholder="At least 8 characters"
               className="w-full rounded-control border border-border px-3 py-2 text-sm font-mono"
@@ -480,7 +497,7 @@ function AddStaffModal({
           </div>
 
           <p className="text-xs text-text-muted pt-1">
-            The staff member will be granted membership in this hotel workspace with the selected role. If the email already has an account, its existing password and global profile are unchanged; only this hotel membership is added.
+            If the email already has an account, that person is <strong>invited</strong>: their password and global profile are untouched, and they get access only after they accept from their own workspace list. A new email becomes a staff account immediately, with the password you set here.
           </p>
 
           <div className="flex gap-2 pt-2">
