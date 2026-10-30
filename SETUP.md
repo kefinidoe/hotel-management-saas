@@ -79,6 +79,17 @@ There are 19 reviewed migrations, checksum-pinned in `prisma/migration-release-m
   baselines, detects drift and recovers using Prisma's own migrate implementation. It needs a
   verification-only tool stack outside the repository (`docs/migration-strategy.md` §7.2) and a
   disposable PostgreSQL server; it never touches the app's pinned `prisma@5.17.0` dependency.
+- **What is still missing, in one command:** `npm run migration:readiness` reports the three external
+  prerequisites — the owner's archive (hashed against its recorded digest), the read-only target
+  credentials (inspected, not contacted), and the pinned 5.17.0 engine artifacts (hashed against the
+  official digests) — and refuses to call anything ready while one is absent. Add `--check-target` to
+  run the read-only target check as well.
+- **Pinned Prisma 5.17.0 engine:** `npm run migration:verify-pin -- --schema-engine <path>
+  --query-engine-library <path>` checks both files against the official digests recorded in
+  `scripts/prisma-engine-pins.mjs`, requires `schema-engine --version` to name commit `393aa359…`, and
+  (with `--prisma node_modules/prisma/build/index.js`) requires `prisma -v` to report 5.17.0 with that
+  commit. It downloads nothing and fails closed; obtaining the artifacts is §7.1.2 of
+  `docs/migration-strategy.md`.
 - **Read-only checkpoint and fingerprint of a target:** `npm run migration:target-check` has no write
   path at all (the session runs with `default_transaction_read_only = on`, enforced by the server) and
   reports the detected schema checkpoint, the ledger against the release manifest, and an md5

@@ -416,7 +416,15 @@ same probe, so they can be compared without trusting a download):
 | `schema-engine.gz` | `98ad433fd64da2ea1eb6d565553a9a4339ecf30f1c211b28b69690f591269a41` |
 | `schema-engine` (gunzipped) | `0a52943c68c41f28d00359001b6f271df7c0ad9a68aa32be2570f80594db956e` |
 | `libquery_engine.so.node.gz` | `125d75739bd7fcdb8eabb5428355b5be00f540043e6bc1f5b30268947afab1bd` |
-| `libquery_engine.so.node` (gunzipped) | not captured — the probe answered with 404 before the plain digest was read |
+| `libquery_engine.so.node` (gunzipped) | `077e86821d96c3225ec75c4e2172822f8969cd4f720942f944bc853ea1b77f9f` |
+
+The first, second and third digests were captured directly from the CDN sidecars. The fourth (the plain
+`libquery_engine.so.node`, which the live probe did not reach) and all three others were then confirmed
+against **`Jolg42/prisma-engines-artifacts`**, a public GitHub archive that stores Prisma's published
+`.sha256` sidecars under the same `all_commits/<commit>/<platform>/` layout — reachable, and therefore
+checkable, even though the CDN itself is not. Those four values are now embedded in
+`scripts/prisma-engine-pins.mjs`, so a supplied binary can be rejected by digest rather than trusted by
+filename.
 
 Nothing in this environment can fetch those files: `binaries.prisma.sh` resets the TLS connection and
 every GitHub host is unreachable; only `registry.npmjs.org` and `pypi.org` respond. No npm or PyPI
@@ -449,6 +457,23 @@ done
 The commit printed by `--version` is the check that matters: a binary from a different commit may
 still say `5.17.0`-ish in a filename, but the commit decides which SQL and ledger behaviour it has.
 
+Both checks are automated, so "obtained the official binaries" is an assertion a machine re-checks:
+
+```bash
+npm run migration:verify-pin -- \
+  --schema-engine "$OUT/schema-engine" \
+  --query-engine-library "$OUT/libquery_engine.so.node" \
+  --prisma node_modules/prisma/build/index.js
+```
+
+`migration:verify-pin` (`scripts/prisma-engine-pin.mjs`) compares each file's SHA-256 with the digests in
+`scripts/prisma-engine-pins.mjs`, runs `schema-engine --version` and requires commit `393aa359…`, and —
+when `--prisma` is given — runs `prisma -v` with `PRISMA_SCHEMA_ENGINE_BINARY`/`PRISMA_QUERY_ENGINE_LIBRARY`
+exported and requires it to report `5.17.0` and the same commit. It **does not execute a binary whose
+digest failed** (running an unverified engine is the risk the check exists to avoid), it downloads
+nothing, and it has no flag that skips the digest comparison. Exit codes: `0` verified, `1` failed,
+`2` nothing supplied.
+
 ### 7.1.3 Verifying the pinned engine against a restored disposable database
 
 The engine is only proven once it has run the migration set against a **restored copy**, never the
@@ -472,7 +497,8 @@ npx prisma migrate status --schema prisma/schema.prisma
 Acceptance criteria for closing gap 1 in §8, recorded verbatim in
 [saas-migration-rehearsal.md §9](saas-migration-rehearsal.md):
 
-1. `prisma -v` reports `5.17.0` and engine commit `393aa359…`.
+1. `npm run migration:verify-pin` reports PASS — `prisma -v` reports `5.17.0` and engine commit
+   `393aa359…`, and both artifacts match the published digests.
 2. `migrate status` on the restored copy reports the full 19-migration history (after adoption) and
    no failed migrations; `migrate deploy` applies exactly the pending migrations.
 3. Every ledger checksum equals `prisma/migration-release-manifest.json`.
@@ -545,6 +571,8 @@ Two operational facts came out of the run:
 ## 8. What is still unproven
 
 Be explicit about this; do not let the rehearsal or engine evidence imply more than it shows.
+`npm run migration:readiness` reports the state of the three external prerequisites below as three
+separate lines — it never collapses "no archive", "no credentials" and "no engine" into one "blocked".
 
 1. **The pinned Prisma 5.17.0 engine has not run.** §7 exercises the real engine, but from the 6.19.0
    tool stack, because the 5.17.0 binaries are only published to a host this environment cannot reach
@@ -552,7 +580,9 @@ Be explicit about this; do not let the rehearsal or engine evidence imply more t
    checksum algorithm are unchanged between those releases, and the 5.17.0 engine is still the one
    production will run. §7.1.1–7.1.3 record the exact artifacts, checksums and recovery commands, so
    closing this is a matter of running them where `binaries.prisma.sh` is reachable and recording the
-   four acceptance results from §7.1.3.
+   four acceptance results from §7.1.3. The verification half is already built:
+   `npm run migration:verify-pin` fails closed on a wrong digest, a wrong commit or a missing file, so
+   the binaries cannot be accepted on the strength of a filename.
 2. **The deployed database's checkpoint is inferred, not observed.** No connection to the Supabase
    target was made in this work — no `DIRECT_URL` or credentials were available, and connecting was
    out of scope. `npm run migration:target-check` settles it read-only: it has no write path, it sets
@@ -594,6 +624,9 @@ Be explicit about this; do not let the rehearsal or engine evidence imply more t
 | `scripts/migrate-adopt.mjs` | Ledgerless-target adoption CLI (dry-run by default) |
 | `scripts/migration-rehearsal.mjs` | Disposable PostgreSQL rehearsal driver |
 | `scripts/prisma-engine-verify.mjs` | Drives the real Prisma migration engine against disposable databases |
+| `scripts/prisma-engine-pins.mjs` | The pinned 5.17.0 release: commit, platform, official artifact digests, digest/commit checks |
+| `scripts/prisma-engine-pin.mjs` | `migration:verify-pin` — verifies supplied binaries against the pin (fails closed; downloads nothing) |
+| `scripts/migration-readiness.mjs` | `migration:readiness` — reports the three external prerequisites (archive, credentials, engine) separately; restores/connects/writes nothing |
 | `scripts/backup-db.mjs` / `scripts/restore-db.mjs` | Verified custom-format backup and restore into a scratch database |
 | `scripts/restore-rehearsal.mjs` | Digest-verified restore into a self-created, self-dropped scratch database, with a read-only fingerprint of the result |
 | `scripts/target-check.mjs` | Read-only checkpoint, ledger-vs-manifest and schema-fingerprint check against a configured target |
@@ -601,3 +634,5 @@ Be explicit about this; do not let the rehearsal or engine evidence imply more t
 | `__tests__/schema/migration-adoption.test.ts` | Unit tests for checkpoints, planning and manifest |
 | `__tests__/schema/migrations.test.ts` | Chain, schema parity, legacy conversion, idempotency guards |
 | `__tests__/scripts/migration-evidence-tools.test.ts` | CLI-level refusals for `target-check` and `restore-rehearsal` (no database needed) |
+| `__tests__/scripts/prisma-engine-pin.test.ts` | Pin table, commit parser and digest comparison; CLI refusals for `verify-pin` |
+| `__tests__/scripts/migration-readiness.test.ts` | Each prerequisite reported separately; never ready while one is missing |
