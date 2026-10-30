@@ -13,8 +13,11 @@
  * never touches an existing database's rows: it is meant to be run against the
  * dedicated demo database that `scripts/owner-test-env.mjs` creates and resets.
  *
- * Credentials are generated per run and written to `.owner-test/credentials.json`
- * (git-ignored). They are never printed to a committed file.
+ * Every account gets its own generated password, written to
+ * `.owner-test/credentials.json` and `.owner-test/CREDENTIALS.md` (both
+ * git-ignored, mode 0600). Re-running the seed rotates every one of them, which
+ * is the supported way to revoke a set of demo passwords that has been shared
+ * outside the workspace. They are never printed to a committed file.
  *
  *   node scripts/owner-test-env.mjs reset     # drop, migrate, seed  (preferred)
  *   SAAS_DEMO_INITIAL_PASSWORD=... npx tsx scripts/owner-test/seed-demo.ts
@@ -33,14 +36,21 @@ import { SUBSCRIPTION_PLANS } from "../../lib/plans";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const prisma = new PrismaClient();
 
-const PASSWORD = (() => {
+/**
+ * Demo passwords are per account. One shared password is easier to hand over but
+ * a single leak then exposes every role — which is exactly what happened once —
+ * so each account is issued its own. `SAAS_DEMO_INITIAL_PASSWORD` is kept as an
+ * override for an operator who wants one password while setting the demo up.
+ */
+const FIXED_PASSWORD = (() => {
   const supplied = process.env.SAAS_DEMO_INITIAL_PASSWORD;
-  if (supplied && supplied.length >= 16) return supplied;
-  // One strong password per run for every demo account. Separate passwords would
-  // be better practice, but this set exists to be typed by hand at a login
-  // screen during acceptance testing, and it never guards real data.
-  return generatePassword(16);
+  return supplied && supplied.length >= 16 ? supplied : null;
 })();
+
+async function issueCredentials(): Promise<{ password: string; passwordHash: string }> {
+  const password = FIXED_PASSWORD ?? generatePassword(16);
+  return { password, passwordHash: await bcrypt.hash(password, 10) };
+}
 
 /** Day boundaries are dates at local midnight, which is how the app stores them. */
 function daysFromToday(offset: number): Date {
@@ -59,7 +69,12 @@ const CREDENTIALS: Array<{
   role: string;
   name: string;
   email: string;
+  password: string;
 }> = [];
+
+function fingerprintOf(password: string): string {
+  return createHash("sha256").update(password).digest("hex").slice(0, 12);
+}
 
 async function main() {
   assertLocalDemoSeedTarget();
@@ -73,14 +88,14 @@ async function main() {
     }
   }
 
-  const passwordHash = await bcrypt.hash(PASSWORD, 10);
+  const platformCredentials = await issueCredentials();
   const platformAdmin = await prisma.user.upsert({
     where: { email: "platform@demo.test" },
-    update: { passwordHash },
+    update: { passwordHash: platformCredentials.passwordHash },
     create: {
       name: "Demo Platform Admin",
       email: "platform@demo.test",
-      passwordHash,
+      passwordHash: platformCredentials.passwordHash,
       platformRole: "PLATFORM_SUPER_ADMIN",
     },
   });
@@ -89,10 +104,10 @@ async function main() {
     role: "PLATFORM_SUPER_ADMIN",
     name: platformAdmin.name,
     email: platformAdmin.email,
+    password: platformCredentials.password,
   });
 
   const riverside = await seedHotel({
-    passwordHash,
     name: "Riverside Grand Hotel",
     slug: "riverside-grand",
     email: "frontdesk@riverside-grand.demo",
@@ -145,7 +160,6 @@ async function main() {
   });
 
   const lakeview = await seedHotel({
-    passwordHash,
     name: "Lakeview Lodge",
     slug: "lakeview-lodge",
     email: "stay@lakeview-lodge.demo",
@@ -186,19 +200,38 @@ async function main() {
     guests: ["Purity Kerubo", "George Barasa", "Anne Njoki", "Stephen Kilonzo"],
   });
 
+  // ---- one owner for both hotels ----------------------------------------
+  // The owner has to be able to exercise hotel switching, which only exists for
+  // an account with two active memberships. Grace therefore owns Riverside and is
+  // a co-owner at Lakeview; the Lakeview owner account keeps its own hotel.
+  await prisma.hotelMembership.create({
+    data: {
+      hotelId: lakeview.id,
+      userId: riverside.owner.id,
+      role: "HOTEL_OWNER",
+      status: "ACTIVE",
+      department: "Administration",
+    },
+  });
+
   mkdirSync(join(ROOT, ".owner-test"), { recursive: true });
   const target = join(ROOT, ".owner-test", "credentials.json");
   const payload = {
     generatedAt: new Date().toISOString(),
     database: process.env.DATABASE_URL?.replace(/:\/\/[^@]*@/, "://***@"),
-    note: "Local demo data. These accounts exist only in the owner-test database.",
-    password: PASSWORD,
+    note: "Local demo data. These accounts exist only in the owner-test database. Passwords are per account; re-running the seed rotates all of them.",
     accounts: CREDENTIALS,
     hotels: [
       { name: "Riverside Grand Hotel", slug: riverside.slug, id: riverside.id },
       { name: "Lakeview Lodge", slug: lakeview.slug, id: lakeview.id },
     ],
-    fingerprint: createHash("sha256").update(PASSWORD).digest("hex").slice(0, 12),
+    feedback: {
+      // sha256 prefix only: enough to confirm a password in use is the one this
+      // run issued, without storing anything that reveals a different one.
+      fingerprints: Object.fromEntries(
+        CREDENTIALS.map((account) => [account.email, fingerprintOf(account.password)])
+      ),
+    },
   };
   writeFileSync(target, JSON.stringify(payload, null, 2) + "\n", { mode: 0o600 });
   writeFileSync(
@@ -208,38 +241,37 @@ async function main() {
   );
 
   console.log(`Seeded 2 hotels and ${CREDENTIALS.length} accounts.`);
-  console.log(`Credentials written to ${target} (git-ignored).`);
-  console.log(`Password fingerprint: ${payload.fingerprint}`);
+  console.log(`Credentials written to ${target} (git-ignored, one password per account).`);
 }
 
 function renderCredentialsMarkdown(payload: {
   generatedAt: string;
-  password: string;
-  accounts: Array<{ hotel: string; role: string; name: string; email: string }>;
+  accounts: Array<{ hotel: string; role: string; name: string; email: string; password: string }>;
   hotels: Array<{ name: string; slug: string }>;
 }): string {
   const rows = payload.accounts
-    .map((a) => `| ${a.hotel} | ${a.role} | ${a.name} | \`${a.email}\` |`)
+    .map((a) => `| ${a.hotel} | ${a.role} | ${a.name} | \`${a.email}\` | \`${a.password}\` |`)
     .join("\n");
   return `# Owner acceptance-testing credentials
 
 Generated ${payload.generatedAt}. **Local demo data only — never production.**
 
-Password for every demo account: \`${payload.password}\`
+Every account has its own password. Nothing here is reused outside this
+throw-away demo database.
 
-| Hotel | Role | Name | Email |
-|---|---|---|---|
+| Hotel | Role | Name | Email | Password |
+|---|---|---|---|---|
 ${rows}
 
 Hotels: ${payload.hotels.map((h) => h.name).join(", ")}.
 
-This file lives in \`.owner-test/\`, which is git-ignored. Deleting that directory
-and re-running \`node scripts/owner-test-env.mjs setup\` issues a new password.
+This file lives in \`.owner-test/\`, which is git-ignored (mode 0600). Re-running
+\`npm run owner:env -- reset\` drops the demo database and issues a fresh password
+for every account, which is how a leaked set is revoked.
 `;
 }
 
 interface HotelSpec {
-  passwordHash: string;
   name: string;
   slug: string;
   email: string;
@@ -294,18 +326,19 @@ async function seedHotel(spec: HotelSpec) {
   const usersByRole = new Map<HotelRole, { id: string; name: string; email: string }>();
   for (const [role, name, handle] of spec.staff) {
     const email = `${handle}@${spec.slug}.demo`;
+    const issued = await issueCredentials();
     const user = await prisma.user.create({
       data: {
         name,
         email,
-        passwordHash: spec.passwordHash,
+        passwordHash: issued.passwordHash,
         memberships: {
           create: { hotelId, role, status: "ACTIVE", department: departmentFor(role) },
         },
       },
     });
     usersByRole.set(role, { id: user.id, name, email });
-    CREDENTIALS.push({ hotel: spec.name, role, name, email });
+    CREDENTIALS.push({ hotel: spec.name, role, name, email, password: issued.password });
   }
   const owner = usersByRole.get("HOTEL_OWNER")!;
   const receptionist = usersByRole.get("RECEPTIONIST") ?? owner;
@@ -644,7 +677,7 @@ async function seedHotel(spec: HotelSpec) {
     });
   }
 
-  return { id: hotelId, slug: spec.slug };
+  return { id: hotelId, slug: spec.slug, name: spec.name, owner: usersByRole.get("HOTEL_OWNER")! };
 }
 
 function departmentFor(role: HotelRole): string {
