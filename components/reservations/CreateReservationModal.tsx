@@ -14,20 +14,49 @@ import {
   roomStatusRank,
 } from "@/lib/room-status";
 import {
-  findTariff,
   MEAL_PLAN_LABELS,
   MEAL_PLANS,
   OCCUPANCY_LABELS,
   OCCUPANCIES,
+  resolveApprovedRate,
   type MealPlanCode,
   type Occupancy,
 } from "@/lib/tariffs";
 
-type Room = { id: string; number: string; roomTypeName: string; baseRate: number; status: RoomStatus };
+type Room = {
+  id: string;
+  number: string;
+  roomTypeId?: string;
+  roomTypeName: string;
+  baseRate: number;
+  status: RoomStatus;
+};
 type RoomTypeTariff = { id: string; name: string; baseRate: number | string; mealPlan: string | null };
 
 function inputClass() {
   return "w-full rounded-control border border-border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent";
+}
+
+/** Whole nights between two date-input values, or null when they are not a stay. */
+function nightsBetween(checkIn: string, checkOut: string): number | null {
+  const start = new Date(checkIn);
+  const end = new Date(checkOut);
+  if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) return null;
+  const nights = Math.round((end.getTime() - start.getTime()) / 86_400_000);
+  return Number.isInteger(nights) && nights >= 1 ? nights : null;
+}
+
+function money(amount: number, currency: string): string {
+  try {
+    return new Intl.NumberFormat("en-KE", {
+      style: "currency",
+      currency,
+      maximumFractionDigits: 2,
+    }).format(amount);
+  } catch {
+    // An unknown/blank currency code must not blank the screen.
+    return `${currency} ${amount.toLocaleString()}`.trim();
+  }
 }
 
 export default function CreateReservationModal({
@@ -35,6 +64,7 @@ export default function CreateReservationModal({
   roomTypes,
   defaultRoomId,
   defaultDate,
+  currency,
   canApplyDiscount,
   onClose,
   onCreated,
@@ -44,6 +74,7 @@ export default function CreateReservationModal({
   roomTypes: RoomTypeTariff[];
   defaultRoomId: string;
   defaultDate: Date;
+  currency: string;
   canApplyDiscount: boolean;
   onClose: () => void;
   onCreated: (reservationId: string) => void;
@@ -69,13 +100,22 @@ export default function CreateReservationModal({
 
   const room = rooms.find((r) => r.id === roomId);
 
-  // Every room can be sold as Single, Double or Twin: the receptionist's choice
-  // of occupancy and meal plan picks the tariff.
-  const matchedTariff = useMemo(
-    () => findTariff(tariffs, occupancy, mealPlan),
-    [tariffs, occupancy, mealPlan]
+  // The rate comes from the occupancy/meal-plan tariff when the hotel has one,
+  // otherwise from the selected room's own room type. Both are resolved here and
+  // re-derived on the server, so the figure on screen is never what is trusted.
+  const approved = useMemo(
+    () =>
+      resolveApprovedRate({
+        tariffs,
+        occupancy,
+        mealPlan,
+        roomTypeId: room?.roomTypeId ?? null,
+      }),
+    [tariffs, occupancy, mealPlan, room?.roomTypeId]
   );
-  const rate = matchedTariff ? Number(matchedTariff.baseRate) : 0;
+  const rate = approved.ok ? approved.rate : 0;
+  const nights = nightsBetween(checkInDate, checkOutDate);
+  const total = approved.ok && nights ? rate * nights : null;
 
   // Status is a "right now" fact, so it is enforced only when the stay starts
   // today -- a room being cleaned today says nothing about next month.
@@ -92,10 +132,36 @@ export default function CreateReservationModal({
     [rooms]
   );
 
+  // Everything the button depends on, phrased so the person can act on it.
+  const problems: string[] = [];
+  if (!guestName.trim()) problems.push("Enter the guest's full name.");
+  if (!room) problems.push("Choose a room.");
+  if (selectedRoomBlocked && room) {
+    problems.push(`Room ${room.number} is ${ROOM_STATUS_LABELS[room.status]}. Choose an available room.`);
+  }
+  if (!checkInDate || !checkOutDate) {
+    problems.push("Choose both a check-in and a check-out date.");
+  } else if (!nights) {
+    problems.push("Check-out must be at least one night after check-in.");
+  }
+  if (!Number.isInteger(Number(adults)) || Number(adults) < 1) {
+    problems.push("Adults must be at least 1.");
+  }
+  if (!approved.ok) {
+    problems.push(
+      approved.reason === "NO_TARIFF"
+        ? "This hotel has no nightly rate for the selected room. Set one on the Rooms page."
+        : "The nightly rate for this room is not a valid amount. Correct it on the Rooms page."
+    );
+  }
+  const canSubmit = problems.length === 0 && !loading;
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!matchedTariff) {
-      onError("No tariff is set up for this occupancy and meal plan. Add one on the Rooms page.");
+    // The button is disabled in these cases; this is the belt-and-braces path for
+    // a submit that arrives anyway (Enter key, assistive tech, stale markup).
+    if (!approved.ok || problems.length > 0) {
+      onError(problems[0] ?? "Complete the reservation details before submitting.");
       return;
     }
     if (selectedRoomBlocked && room) {
@@ -117,7 +183,7 @@ export default function CreateReservationModal({
           checkInDate: new Date(checkInDate).toISOString(),
           checkOutDate: new Date(checkOutDate).toISOString(),
           roomId,
-          tariffId: matchedTariff.id,
+          tariffId: approved.tariff.id,
           occupancy,
           mealPlan,
           adults: Number(adults) || 1,
@@ -269,17 +335,29 @@ export default function CreateReservationModal({
 
           <div className={canApplyDiscount ? "grid grid-cols-2 gap-3" : ""}>
             <div>
-              <label className="block text-sm font-medium mb-1.5">
-                Approved rate per night (KSh)
+              <label className="block text-sm font-medium mb-1.5" htmlFor="approved-rate">
+                Approved rate per night ({currency})
               </label>
-              <p className={`${inputClass()} bg-bg font-medium`}>
-                {matchedTariff ? rate.toLocaleString() : "--"}
+              <p
+                id="approved-rate"
+                data-testid="approved-rate"
+                aria-live="polite"
+                className={`${inputClass()} bg-bg font-medium`}
+              >
+                {approved.ok ? money(rate, currency) : "--"}
               </p>
+              {approved.ok && (
+                <p className="mt-1 text-xs text-text-muted" data-testid="approved-rate-source">
+                  {approved.source === "OCCUPANCY_TARIFF"
+                    ? `${approved.tariff.name} · ${MEAL_PLAN_LABELS[mealPlan]}`
+                    : `${room?.roomTypeName ?? approved.tariff.name} room rate`}
+                </p>
+              )}
             </div>
             {canApplyDiscount && (
               <div>
                 <label className="block text-sm font-medium mb-1.5">
-                  Discount (KSh, optional)
+                  Discount ({currency}, optional)
                 </label>
                 <input
                   type="number"
@@ -293,7 +371,34 @@ export default function CreateReservationModal({
             )}
           </div>
 
-          <button type="submit" disabled={loading || !matchedTariff} className="btn-primary w-full mt-2">
+          {approved.ok && total !== null && (
+            <p className="text-sm text-text-secondary" data-testid="stay-total">
+              {nights} night{nights === 1 ? "" : "s"} × {money(rate, currency)} ={" "}
+              <span className="font-medium text-text-primary">{money(total, currency)}</span>
+              {canApplyDiscount && discount ? " before discount" : ""}
+            </p>
+          )}
+
+          {!canApplyDiscount && (
+            <p className="text-xs text-text-muted">
+              Only an owner, admin or manager can apply a discount.
+            </p>
+          )}
+
+          {problems.length > 0 && (
+            <div className="rounded-control border border-border bg-bg p-2.5" role="status">
+              <p className="text-xs font-medium text-text-primary mb-1">
+                To create this reservation:
+              </p>
+              <ul className="list-disc pl-4 text-xs text-text-secondary space-y-0.5">
+                {problems.map((problem) => (
+                  <li key={problem}>{problem}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <button type="submit" disabled={!canSubmit} className="btn-primary w-full mt-2">
             {loading ? "Creating..." : "Create Reservation"}
           </button>
         </form>
