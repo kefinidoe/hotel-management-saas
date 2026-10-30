@@ -35,6 +35,7 @@ type ResRow = {
   nightlyRateTotal: number;
 };
 type Room = {
+  roomTypeId?: string;
   id: string;
   number: string;
   floor: string | null;
@@ -53,6 +54,7 @@ function money(value: number) {
 export default function FrontDeskClient({
   activeTenantId,
   currentUserRole,
+  currency,
   arrivals,
   departures,
   inHouse,
@@ -62,6 +64,7 @@ export default function FrontDeskClient({
 }: {
   activeTenantId: string;
   currentUserRole: HotelRole;
+  currency: string;
   arrivals: ResRow[];
   departures: ResRow[];
   inHouse: ResRow[];
@@ -394,6 +397,7 @@ export default function FrontDeskClient({
           roomTypes={roomTypes}
           defaultRoomId={rooms[0].id}
           defaultDate={new Date()}
+          currency={currency}
           canApplyDiscount={canOverrideBalance}
           onClose={() => setWalkInOpen(false)}
           onCreated={() => refresh()}

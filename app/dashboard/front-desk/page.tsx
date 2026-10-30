@@ -145,6 +145,7 @@ export default async function FrontDeskPage() {
     <FrontDeskClient
       activeTenantId={session.hotelId}
       currentUserRole={session.role}
+      currency={session.hotel.currency}
       arrivals={arrivals.map(serializeReservation)}
       departures={departures.map(serializeReservation)}
       inHouse={inHouse.map(serializeReservation)}
@@ -153,6 +154,7 @@ export default async function FrontDeskPage() {
       rooms={rooms.map((room) => ({
         id: room.id,
         number: room.number,
+        roomTypeId: room.roomTypeId,
         floor: room.floor,
         status: room.status,
         roomTypeName: room.roomType.name,

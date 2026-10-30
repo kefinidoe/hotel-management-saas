@@ -9,7 +9,14 @@ const mocks = vi.hoisted(() => {
   };
   return {
     groups,
-    tenant: { hotelId: "hotel-a", userId: "user-a", role: "HOTEL_ADMIN" },
+    // requirePageRole returns a full TenantContext in the app; the pages now read
+    // the active hotel's currency from it, so the mock must supply it too.
+    tenant: {
+      hotelId: "hotel-a",
+      userId: "user-a",
+      role: "HOTEL_ADMIN",
+      hotel: { id: "hotel-a", name: "Hotel A", slug: "hotel-a", currency: "KES", timezone: "Africa/Nairobi", status: "ACTIVE" },
+    },
     requirePageRole: vi.fn(),
     expenseFindMany: vi.fn(),
     guestFindMany: vi.fn(),
@@ -99,7 +106,12 @@ function reservation(hotelId: string, id: string, roomHotelId = hotelId) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.tenant = { hotelId: "hotel-a", userId: "user-a", role: "HOTEL_ADMIN" };
+  mocks.tenant = {
+    hotelId: "hotel-a",
+    userId: "user-a",
+    role: "HOTEL_ADMIN",
+    hotel: { id: "hotel-a", name: "Hotel A", slug: "hotel-a", currency: "KES", timezone: "Africa/Nairobi", status: "ACTIVE" },
+  };
   mocks.requirePageRole.mockImplementation(async (allowed: string[]) => {
     if (!allowed.includes(mocks.tenant.role)) throw new Error("page authorization denied");
     return mocks.tenant;
@@ -278,6 +290,8 @@ describe("affected server pages (Prisma mocked; page functions executed)", () =>
     expect(mocks.roomTypeFindMany.mock.calls[0][0].where.hotelId).toBe("hotel-a");
     expect(element.props.rooms.map((room: any) => room.id)).toEqual(["room-a"]);
     expect(element.props.roomTypes.map((type: any) => type.id)).toEqual(["type-a"]);
+    // The hotel's own currency is what the form must show, never a hardcoded KSh.
+    expect(element.props.currency).toBe("KES");
     expect(JSON.stringify(element.props)).not.toContain("B secret type");
   });
 

@@ -67,3 +67,100 @@ export function findTariff<T extends { name: string; mealPlan: string | null }>(
 ): T | undefined {
   return tariffs.find((tariff) => tariffMatches(tariff.name, tariff.mealPlan, occupancy, mealPlan));
 }
+
+/**
+ * The rate a reservation is sold at.
+ *
+ * Hotels price stays in one of two ways, and both must work:
+ *
+ *   1. Per occupancy/meal-plan tariffs -- room types named "Single — Half Board"
+ *      and so on. This is the richer model and is preferred when the hotel has
+ *      set it up, because it lets one room be sold as a single, a double or on
+ *      half board at different prices.
+ *   2. A single rate on the room type itself, with no occupancy variants.
+ *
+ * The screen and the API previously required (1) only. A hotel that named its
+ * room types anything else ("Standard", "Deluxe Garden", "Family Suite") could
+ * therefore never price a booking: the approved rate showed "--", the submit
+ * button stayed disabled, and a hand-crafted request was rejected with "the
+ * selected tariff does not match the occupancy and meal plan". That is the
+ * defect this resolver fixes, on both sides at once so they cannot drift.
+ */
+export type TariffPricing = {
+  id: string;
+  name: string;
+  baseRate: number | string;
+  mealPlan: string | null;
+};
+
+export type ApprovedRate<T extends TariffPricing> =
+  | {
+      ok: true;
+      tariff: T;
+      rate: number;
+      /** Which rule produced the price, so the screen can explain it. */
+      source: "OCCUPANCY_TARIFF" | "ROOM_TYPE";
+    }
+  | { ok: false; reason: "NO_TARIFF" | "INVALID_TARIFF_RATE" };
+
+function usableRate(baseRate: number | string): number | null {
+  const rate = typeof baseRate === "number" ? baseRate : Number(baseRate);
+  // A zero, negative, NaN or infinite rate is not a price. Returning null here
+  // is what stops a reservation being silently submitted at 0.
+  return Number.isFinite(rate) && rate > 0 ? rate : null;
+}
+
+/**
+ * Resolve the nightly rate for a stay.
+ *
+ * `roomTypeId` is the type of the room the guest is being put in, and it is the
+ * price that wins: a hotel sets the rate on the room type it is selling, so the
+ * rate must follow the room the receptionist picks. A tariff matched by
+ * occupancy/meal-plan name is only used when the room's own type has no usable
+ * rate (for example a hotel that leaves the type blank and prices by occupancy).
+ */
+export function resolveApprovedRate<T extends TariffPricing>(input: {
+  tariffs: readonly T[];
+  occupancy: Occupancy;
+  mealPlan: MealPlanCode;
+  roomTypeId?: string | null;
+}): ApprovedRate<T> {
+  const matched = findTariff([...input.tariffs], input.occupancy, input.mealPlan);
+  const roomType = input.roomTypeId
+    ? input.tariffs.find((tariff) => tariff.id === input.roomTypeId)
+    : undefined;
+
+  const candidates: Array<{ tariff: T; source: "OCCUPANCY_TARIFF" | "ROOM_TYPE" }> = [];
+  if (roomType) candidates.push({ tariff: roomType, source: "ROOM_TYPE" });
+  if (matched && matched.id !== roomType?.id) {
+    candidates.push({ tariff: matched, source: "OCCUPANCY_TARIFF" });
+  }
+
+  for (const candidate of candidates) {
+    const rate = usableRate(candidate.tariff.baseRate);
+    if (rate !== null) {
+      return { ok: true, tariff: candidate.tariff, rate, source: candidate.source };
+    }
+  }
+
+  return candidates.length > 0
+    ? { ok: false, reason: "INVALID_TARIFF_RATE" }
+    : { ok: false, reason: "NO_TARIFF" };
+}
+
+/**
+ * Is this tariff allowed to price this booking?
+ *
+ * Either it is the tariff for the chosen occupancy and meal plan, or it is the
+ * room's own room type. Nothing else: a client cannot price a Twin room at
+ * another type's cheaper rate.
+ */
+export function tariffPricesStay(
+  tariff: { id: string; name: string; mealPlan: string | null },
+  roomTypeId: string | null,
+  occupancy: Occupancy,
+  mealPlan: MealPlanCode
+): boolean {
+  if (tariffMatches(tariff.name, tariff.mealPlan, occupancy, mealPlan)) return true;
+  return Boolean(roomTypeId) && tariff.id === roomTypeId;
+}

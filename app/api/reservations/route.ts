@@ -6,7 +6,7 @@ import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/l
 import { accommodationRequired, parseMoney, stayNights } from "@/lib/billing";
 import { hasRole } from "@/lib/permissions";
 import { nextReservationCode } from "@/lib/reservation-code";
-import { isMealPlan, isOccupancy, tariffMatches } from "@/lib/tariffs";
+import { isMealPlan, isOccupancy, tariffPricesStay } from "@/lib/tariffs";
 import { blocksGuestPlacement, ROOM_STATUS_LABELS } from "@/lib/room-status";
 
 const BOOKING_SOURCES = ["WALK_IN", "PHONE", "WEBSITE", "OTA", "CORPORATE", "OTHER"] as const;
@@ -162,7 +162,9 @@ export async function POST(req: Request) {
         const [room, tariff] = await Promise.all([
           tx.room.findUnique({
             where: { id_hotelId: { id: roomId, hotelId } },
-            select: { id: true, number: true, status: true, isActive: true },
+            // roomTypeId is needed to price a hotel that sells its rooms at the
+            // room type's own rate instead of per occupancy/meal-plan tariffs.
+            select: { id: true, number: true, status: true, isActive: true, roomTypeId: true },
           }),
           tx.roomType.findUnique({
             where: { id_hotelId: { id: tariffId, hotelId } },
@@ -183,8 +185,10 @@ export async function POST(req: Request) {
           );
         }
 
-        // Verify tariff matches occupancy and meal plan
-        if (!tariffMatches(tariff.name, tariff.mealPlan, occupancy, mealPlan)) {
+        // The price must come from either the tariff for this occupancy and meal
+        // plan, or the selected room's own room type. Anything else is refused so
+        // a client cannot price a room at another type's rate.
+        if (!tariffPricesStay(tariff, room.roomTypeId, occupancy, mealPlan)) {
           throw new ReservationError(
             "The selected tariff does not match the occupancy and meal plan."
           );
@@ -195,8 +199,16 @@ export async function POST(req: Request) {
           rate = parseMoney(Number(tariff.baseRate), "Configured nightly rate", {
             allowZero: true,
           });
+          if (rate <= 0) {
+            // A hotel that never set a rate must not be able to give rooms away
+            // silently: say what is wrong and where to fix it.
+            throw new ReservationError(
+              "This room has no nightly rate configured. Set a rate on the Rooms page before selling it."
+            );
+          }
           accommodationRequired([rate], nights, discount);
         } catch (error) {
+          if (error instanceof ReservationError) throw error;
           throw new ReservationError(
             error instanceof Error ? error.message : "The configured tariff is invalid."
           );

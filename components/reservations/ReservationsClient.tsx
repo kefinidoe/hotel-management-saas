@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import { useRouter } from "next/navigation";
 import { ChevronLeft, ChevronRight, Plus, X } from "lucide-react";
 import clsx from "clsx";
 import type { HotelRole } from "@prisma/client";
@@ -10,7 +11,14 @@ import type { RoomStatus } from "@prisma/client";
 import CreateReservationModal from "./CreateReservationModal";
 import { apiErrorMessage, requestJson } from "@/lib/client-api";
 
-type Room = { id: string; number: string; roomTypeName: string; baseRate: number; status: RoomStatus };
+type Room = {
+  id: string;
+  number: string;
+  roomTypeId?: string;
+  roomTypeName: string;
+  baseRate: number;
+  status: RoomStatus;
+};
 type Reservation = {
   id: string;
   code: string;
@@ -118,13 +126,17 @@ function statusBarClasses(status: string) {
 export default function ReservationsClient({
   rooms,
   roomTypes,
+  currency,
   currentUserRole,
 }: {
   rooms: Room[];
   roomTypes: { id: string; name: string; baseRate: number; mealPlan: string | null }[];
+  currency: string;
   currentUserRole: HotelRole;
 }) {
+  const router = useRouter();
   const canApplyDiscount = hasRole(currentUserRole, ROLE_GROUPS.MANAGEMENT);
+
   const [weekOffset, setWeekOffset] = useState(0);
   const [reservations, setReservations] = useState<Reservation[]>([]);
   const [loading, setLoading] = useState(true);
@@ -192,6 +204,16 @@ export default function ReservationsClient({
       }
     }
   }, [weekOffset]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const onReservationCreated = useCallback(
+    (reservationId: string) => {
+      void reservationId;
+      void load();
+      // Re-render the server component so rooms (and their statuses) are re-read.
+      router.refresh();
+    },
+    [load, router]
+  );
 
   useEffect(() => {
     load();
@@ -484,9 +506,15 @@ export default function ReservationsClient({
           roomTypes={roomTypes}
           defaultRoomId={createFor.roomId}
           defaultDate={createFor.date}
+          currency={currency}
           canApplyDiscount={canApplyDiscount}
           onClose={() => setCreateFor(null)}
-          onCreated={load}
+          onCreated={(reservationId) => {
+            // The calendar is client state; the room list and its statuses come
+            // from the server component, so refresh both after a booking.
+            setCreateFor(null);
+            onReservationCreated(reservationId);
+          }}
           onError={(message) => {
             if (message === null) {
               setMutationError(null);

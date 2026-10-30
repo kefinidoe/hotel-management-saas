@@ -791,6 +791,121 @@ describe("Phase 4: Multi-Tenant Reservation & Stay Security Hardening", () => {
     });
   });
 
+  describe("Approved rate resolution (non-occupancy room-type names)", () => {
+    // The owner test hotel names its types "Standard"/"Deluxe", so no tariff is
+    // called "Single …"/"Double …". That used to make creation impossible.
+    beforeEach(() => {
+      db.roomTypes.set("rt-a-plain", {
+        id: "rt-a-plain",
+        hotelId: "hotel-a",
+        name: "Standard",
+        baseRate: 4500,
+        mealPlan: null,
+      });
+      db.rooms.set("room-a-102", {
+        id: "room-a-102",
+        hotelId: "hotel-a",
+        number: "102",
+        status: "AVAILABLE",
+        isActive: true,
+        roomTypeId: "rt-a-plain",
+      });
+      db.roomTypes.set("rt-a-deluxe", {
+        id: "rt-a-deluxe",
+        hotelId: "hotel-a",
+        name: "Deluxe Garden",
+        baseRate: 8500,
+        mealPlan: null,
+      });
+      db.roomTypes.set("rt-a-free", {
+        id: "rt-a-free",
+        hotelId: "hotel-a",
+        name: "Unpriced",
+        baseRate: 0,
+        mealPlan: null,
+      });
+      db.rooms.set("room-a-103", {
+        id: "room-a-103",
+        hotelId: "hotel-a",
+        number: "103",
+        status: "AVAILABLE",
+        isActive: true,
+        roomTypeId: "rt-a-free",
+      });
+    });
+
+    function createFor(payload: Record<string, unknown>) {
+      return createReservation(
+        new Request("http://localhost:3000/api/reservations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        })
+      );
+    }
+
+    it("creates the reservation at the room's own rate and persists it", async () => {
+      const res = await createFor({
+        guestName: "Grace Njeri",
+        guestPhone: "+254700000001",
+        checkInDate: "2026-12-01",
+        checkOutDate: "2026-12-03",
+        roomId: "room-a-102",
+        tariffId: "rt-a-plain",
+        occupancy: "DOUBLE",
+        mealPlan: "BED_ONLY",
+      });
+
+      expect(res.status).toBe(201);
+      const data = await res.json();
+      const saved = db.reservations.get(data.id);
+      expect(saved.hotelId).toBe("hotel-a");
+      // Stored rate is the room type's configured rate, not 0/undefined.
+      const link = saved.rooms.create[0];
+      expect(Number(link.rate)).toBe(4500);
+      const persisted = Array.from(db.reservationRooms.values()).find(
+        (room) => room.reservationId === data.id
+      );
+      expect(persisted).toMatchObject({ roomId: "room-a-102", hotelId: "hotel-a" });
+    });
+
+    it("refuses to sell a room whose rate was never configured", async () => {
+      const res = await createFor({
+        guestName: "Zero Rate",
+        checkInDate: "2026-12-01",
+        checkOutDate: "2026-12-03",
+        roomId: "room-a-103",
+        tariffId: "rt-a-free",
+        occupancy: "SINGLE",
+        mealPlan: "BED_ONLY",
+      });
+
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.error).toContain("no nightly rate configured");
+      // Nothing was written.
+      expect(
+        Array.from(db.reservations.values()).filter((r) => r.hotelId === "hotel-a").length
+      ).toBe(0);
+    });
+
+    it("refuses a same-hotel tariff that belongs to a different room type", async () => {
+      const res = await createFor({
+        guestName: "Cheap Rate",
+        checkInDate: "2026-12-01",
+        checkOutDate: "2026-12-03",
+        roomId: "room-a-102",
+        tariffId: "rt-a-deluxe",
+        occupancy: "SINGLE",
+        mealPlan: "BED_ONLY",
+      });
+
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.error).toContain("does not match the occupancy and meal plan");
+    });
+  });
+
   describe("Compatible Concurrency Controls", () => {
     it("uses matching per-hotel advisory lock keys across reservation and stay operations", async () => {
       // Clear recorded locks
