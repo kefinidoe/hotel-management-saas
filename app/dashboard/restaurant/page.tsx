@@ -9,7 +9,7 @@ import { getRestaurantDashboardData } from "@/lib/restaurant-dashboard";
 export const dynamic = "force-dynamic";
 
 export default async function RestaurantPage() {
-  const session = await requirePageRole(ROLE_GROUPS.RESTAURANT_POS);
+  const session = await requirePageRole(ROLE_GROUPS.RESTAURANT_POS, "RESTAURANT_POS");
 
   const [categories, dashboardData] = await Promise.all([
     prisma.menuCategory.findMany({
@@ -68,6 +68,7 @@ export default async function RestaurantPage() {
   return (
     <RestaurantClient
       menu={menu}
+      activeTenantId={session.hotelId}
       currentUserRole={session.role}
       initialFolios={dashboardData.folios}
       initialMethods={dashboardData.paymentMethods}

@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
-import { HotelStatus, MembershipStatus } from "@prisma/client";
+import { isDatabaseConfigured } from "@/lib/db-safety-guard";
 
 function validateOrigin(req: Request): boolean {
   const origin = req.headers.get("origin");
@@ -42,6 +40,17 @@ export async function POST(req: Request) {
     );
   }
 
+  if (!isDatabaseConfigured()) {
+    return NextResponse.json(
+      { error: "DATABASE_UNAVAILABLE", message: "Hotel switching is unavailable while the database is not configured." },
+      { status: 503 }
+    );
+  }
+
+  // Load database-backed session options only when the DB is configured.
+  const { authOptions } = await import("@/lib/auth");
+  const { prisma } = await import("@/lib/prisma");
+
   // 2. Authentication Check
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) {
@@ -78,7 +87,7 @@ export async function POST(req: Request) {
     include: { hotel: true },
   });
 
-  if (!membership || membership.status !== MembershipStatus.ACTIVE) {
+  if (!membership || membership.status !== "ACTIVE") {
     // Preserve existing cookie untouched on failure
     return NextResponse.json(
       { error: "NO_ACTIVE_MEMBERSHIP", message: "No active membership in target hotel" },
@@ -88,8 +97,8 @@ export async function POST(req: Request) {
 
   // 5. Authoritative Hotel Status Check
   if (
-    membership.hotel.status !== HotelStatus.ACTIVE &&
-    membership.hotel.status !== HotelStatus.TRIALING
+    membership.hotel.status !== "ACTIVE" &&
+    membership.hotel.status !== "TRIALING"
   ) {
     return NextResponse.json(
       { error: "HOTEL_SUSPENDED", message: "Target hotel workspace is currently suspended" },

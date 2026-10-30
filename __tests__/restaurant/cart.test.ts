@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   readCartRequest,
+  compareCanonicalIds,
+  computeChargeToRoomFingerprint,
+  computePosFingerprint,
   resolveCartLines,
   cartSubtotal,
   cartTotal,
@@ -122,6 +125,59 @@ describe("readCartRequest — the trust boundary", () => {
   });
 });
 
+describe("charge-to-room canonical request fingerprint", () => {
+  const base = {
+    hotelId: "hotel-a",
+    folioId: " folio-1 ",
+    tableNumber: " Table 4 ",
+  };
+
+  it("normalizes spacing, merges duplicate IDs, and ignores item ordering", () => {
+    const first = computeChargeToRoomFingerprint({
+      ...base,
+      items: [
+        { menuItemId: "burger", quantity: 1 },
+        { menuItemId: "soda", quantity: 2 },
+        { menuItemId: " burger ", quantity: 2 },
+      ],
+    });
+    const reordered = computeChargeToRoomFingerprint({
+      hotelId: " hotel-a ",
+      folioId: "folio-1",
+      tableNumber: "Table 4",
+      items: [
+        { menuItemId: "soda", quantity: 2 },
+        { menuItemId: "burger", quantity: 3 },
+      ],
+    });
+    expect(first).toBe(reordered);
+    expect(first).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("orders distinct IDs by locale-independent UTF-16 code-unit order", () => {
+    const ids = ["é", "a", "_", "2", "A", "10", "b"];
+    expect([...ids].sort(compareCanonicalIds)).toEqual(["10", "2", "A", "_", "a", "b", "é"]);
+    expect(compareCanonicalIds("A", "a")).toBeLessThan(0);
+
+    const posBase = { hotelId: "hotel-a", paymentMethodId: "cash" };
+    const order = ["é", "a", "_", "2", "A", "10", "b"].map((menuItemId) => ({ menuItemId, quantity: 1 }));
+    expect(computePosFingerprint({ ...posBase, items: order })).toBe(
+      computePosFingerprint({ ...posBase, items: [...order].reverse() }),
+    );
+  });
+
+  it("binds the key fingerprint to tenant, folio destination, table/note, item, and quantity", () => {
+    const baseline = computeChargeToRoomFingerprint({
+      ...base,
+      items: [{ menuItemId: "burger", quantity: 1 }],
+    });
+    expect(computeChargeToRoomFingerprint({ ...base, hotelId: "hotel-b", items: [{ menuItemId: "burger", quantity: 1 }] })).not.toBe(baseline);
+    expect(computeChargeToRoomFingerprint({ ...base, folioId: "folio-2", items: [{ menuItemId: "burger", quantity: 1 }] })).not.toBe(baseline);
+    expect(computeChargeToRoomFingerprint({ ...base, tableNumber: "Table 5", items: [{ menuItemId: "burger", quantity: 1 }] })).not.toBe(baseline);
+    expect(computeChargeToRoomFingerprint({ ...base, items: [{ menuItemId: "burger", quantity: 2 }] })).not.toBe(baseline);
+  });
+});
+
 describe("resolveCartLines — prices come from the database", () => {
   const TEST_HOTEL_ID = "hotel-test";
 
@@ -229,8 +285,8 @@ describe("cart totals", () => {
   });
 
   it("charges no VAT today, but keeps subtotal and total as separate concepts", () => {
-    // Axis has no restaurant VAT configured. cartTotal is deliberately a
-    // distinct function so adding tax later doesn't mean rewriting callers.
+    // No restaurant VAT is configured. cartTotal remains distinct so adding
+    // tax later doesn't mean rewriting callers.
     const lines = [line(500, 2)];
     expect(cartTotal(lines)).toBe(cartSubtotal(lines));
     expect(cartSubtotal(lines)).toBe(1000);

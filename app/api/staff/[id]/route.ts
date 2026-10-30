@@ -1,9 +1,7 @@
 import { NextResponse } from "next/server";
-import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { HotelRole, MembershipStatus } from "@prisma/client";
-import { passwordProblem } from "@/lib/password";
 
 const PERMITTED_HOTEL_ROLES = Object.values(HotelRole);
 
@@ -17,12 +15,12 @@ async function findHotelMembership(hotelId: string, idOrUserId: string) {
       OR: [{ id: idOrUserId }, { userId: idOrUserId }],
     },
     include: {
-      user: true,
+      user: { select: { id: true, name: true, email: true } },
     },
   });
 }
 
-// Edit a staff member's role, status, or department
+// Edit hotel-scoped membership attributes. Global account credentials and profile are not editable here.
 export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -33,6 +31,9 @@ export async function PATCH(
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.STAFF_ADMIN);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   const targetMembership = await findHotelMembership(tenant.hotelId, id);
   if (!targetMembership) {
@@ -48,12 +49,33 @@ export async function PATCH(
   } catch {
     return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ error: "Request body must be a JSON object." }, { status: 400 });
+  }
+
+  // A hotel administrator cannot change a global user's password. Password
+  // changes remain account-holder controlled through /api/profile/password.
+  if (Object.prototype.hasOwnProperty.call(body, "newPassword")) {
+    return NextResponse.json(
+      { error: "Staff passwords cannot be changed by a hotel administrator. The account holder must change their own password." },
+      { status: 403 }
+    );
+  }
 
   const isSelf = targetMembership.userId === tenant.userId;
   const requestedRole = body.role as HotelRole | undefined;
   const requestedActive = body.isActive as boolean | undefined;
   const requestedStatus = body.status as MembershipStatus | undefined;
-  const requestedDepartment = body.department as string | undefined;
+  let requestedDepartment: string | null | undefined;
+  if (body.department !== undefined) {
+    if (body.department !== null && typeof body.department !== "string") {
+      return NextResponse.json({ error: "Department must be a string or null." }, { status: 400 });
+    }
+    requestedDepartment = typeof body.department === "string" ? body.department.trim() || null : null;
+    if (requestedDepartment && requestedDepartment.length > 100) {
+      return NextResponse.json({ error: "Department name must be 100 characters or fewer." }, { status: 400 });
+    }
+  }
 
   // 1. Guard against self-lockout: cannot demote or deactivate yourself
   if (isSelf) {
@@ -134,17 +156,7 @@ export async function PATCH(
     }
   }
 
-  // 4. Password Reset for staff member
-  let passwordHash: string | undefined;
-  if (body.newPassword !== undefined) {
-    const problem = passwordProblem(body.newPassword);
-    if (problem) {
-      return NextResponse.json({ error: problem }, { status: 400 });
-    }
-    passwordHash = await bcrypt.hash(body.newPassword, 10);
-  }
-
-  // Execute update
+  // Execute membership-only update
   const effectiveStatus =
     requestedStatus !== undefined
       ? requestedStatus
@@ -154,58 +166,48 @@ export async function PATCH(
         : MembershipStatus.SUSPENDED
       : undefined;
 
-  // Quota enforcement: Reactivating an inactive/suspended staff member increases active staff count
-  if (
-    targetMembership.status !== MembershipStatus.ACTIVE &&
-    effectiveStatus === MembershipStatus.ACTIVE
-  ) {
-    const { checkUsageLimit } = await import("@/lib/entitlements");
-    const staffLimit = await checkUsageLimit(tenant.hotelId, "maxStaff", 1);
-    if (!staffLimit.allowed) {
-      return NextResponse.json(
-        {
-          error: staffLimit.code || "PLAN_LIMIT_EXCEEDED",
-          message: staffLimit.reason,
-        },
-        { status: 403 }
-      );
-    }
-  }
-
-  const [updatedMembership] = await prisma.$transaction([
-    prisma.hotelMembership.update({
+  const updateStaff = async (tx: any) => {
+    return tx.hotelMembership.update({
       where: { id: targetMembership.id },
       data: {
         role: requestedRole ?? undefined,
         status: effectiveStatus,
+        department: requestedDepartment,
       },
-      include: {
-        user: {
-          select: { id: true, name: true, email: true, department: true },
-        },
-      },
-    }),
-    ...(passwordHash !== undefined || requestedDepartment !== undefined
-      ? [
-          prisma.user.update({
-            where: { id: targetMembership.userId },
-            data: {
-              passwordHash,
-              department: requestedDepartment !== undefined ? requestedDepartment.trim() || null : undefined,
-            },
-          }),
-        ]
-      : []),
-  ]);
+      include: { user: { select: { id: true, name: true, email: true } } },
+    });
+  };
+
+  let updatedMembership: any;
+  if (targetMembership.status !== MembershipStatus.ACTIVE && effectiveStatus === MembershipStatus.ACTIVE) {
+    try {
+      const { withUsageLimitLock } = await import("@/lib/entitlements");
+      const quotaResult = await withUsageLimitLock(tenant.hotelId, "maxStaff", 1, updateStaff);
+      if (!quotaResult.allowed) {
+        return NextResponse.json(
+          { error: quotaResult.limit.code || "PLAN_LIMIT_EXCEEDED", message: quotaResult.limit.reason },
+          { status: quotaResult.limit.code === "SUBSCRIPTION_STATUS_UNAVAILABLE" || quotaResult.limit.code === "USAGE_LIMIT_UNAVAILABLE" ? 503 : 403 }
+        );
+      }
+      updatedMembership = quotaResult.value;
+    } catch (error: any) {
+      if (error?.code === "SUBSCRIPTION_STATUS_UNAVAILABLE" || error?.code === "USAGE_LIMIT_UNAVAILABLE") {
+        return NextResponse.json({ error: error.code, message: error.message }, { status: 503 });
+      }
+      throw error;
+    }
+  } else {
+    updatedMembership = await prisma.$transaction((tx) => updateStaff(tx));
+  }
 
   return NextResponse.json({
     id: updatedMembership.id,
     userId: updatedMembership.user.id,
     role: updatedMembership.role,
     status: updatedMembership.status,
+    department: updatedMembership.department,
     isActive: updatedMembership.status === MembershipStatus.ACTIVE,
-    passwordReset: passwordHash !== undefined,
-    message: "Staff member updated successfully.",
+    message: "Staff membership updated successfully.",
   });
 }
 
@@ -220,6 +222,9 @@ export async function DELETE(
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.STAFF_ADMIN);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   const targetMembership = await findHotelMembership(tenant.hotelId, id);
   if (!targetMembership) {

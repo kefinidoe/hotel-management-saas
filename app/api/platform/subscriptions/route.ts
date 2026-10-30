@@ -5,7 +5,6 @@ import {
   getAllPlans,
   SUBSCRIPTION_PLANS,
   getPlan,
-  SubscriptionStatus,
 } from "@/lib/plans";
 import { evaluateSubscriptionStatus } from "@/lib/entitlements";
 
@@ -35,8 +34,8 @@ export async function GET(req: Request) {
       orderBy: { createdAt: "desc" },
     });
 
-    const now = new Date();
     let trialingCount = 0;
+    let missingCount = 0;
     let activeCount = 0;
     let pastDueCount = 0;
     let suspendedCount = 0;
@@ -60,10 +59,10 @@ export async function GET(req: Request) {
             currentPeriodEndsAt: sub.currentPeriodEndsAt,
           })
         : {
-            effectiveStatus: (h.status === "SUSPENDED" ? "SUSPENDED" : "TRIALING") as any,
-            isOperational: h.status !== "SUSPENDED",
+            effectiveStatus: "MISSING" as any,
+            isOperational: false,
             isOverdue: false,
-            daysRemaining: 14,
+            daysRemaining: null,
           };
 
       const currency = (sub?.currency || h.currency || "KES").toUpperCase();
@@ -101,6 +100,8 @@ export async function GET(req: Request) {
       } else if (evalResult.effectiveStatus === "CANCELLED") {
         cancelledCount++;
         nonPayingOrTrialCount++;
+      } else if (evalResult.effectiveStatus === "MISSING") {
+        missingCount++;
       }
 
       if (evalResult.isOverdue) overdueCount++;
@@ -141,21 +142,21 @@ export async function GET(req: Request) {
               suspensionReason: sub.suspensionReason,
             }
           : {
-              id: `virtual-${h.id}`,
+              id: `missing-${h.id}`,
               planId: plan.id,
               planName: plan.name,
-              storedStatus: SubscriptionStatus.TRIALING,
+              storedStatus: "MISSING",
               effectiveStatus: evalResult.effectiveStatus,
-              isOperational: evalResult.isOperational,
-              isOverdue: evalResult.isOverdue,
-              daysRemaining: evalResult.daysRemaining,
-              trialStartsAt: h.createdAt.toISOString(),
+              isOperational: false,
+              isOverdue: false,
+              daysRemaining: null,
+              trialStartsAt: null,
               trialEndsAt: null,
-              currentPeriodStartsAt: h.createdAt.toISOString(),
+              currentPeriodStartsAt: null,
               currentPeriodEndsAt: null,
               cancelAtPeriodEnd: false,
               billingInterval: "MONTHLY",
-              amount: plan.monthlyPriceKES,
+              amount: 0,
               suspensionReason: null,
             },
         usage: {
@@ -195,6 +196,7 @@ export async function GET(req: Request) {
         pastDueCount,
         suspendedCount,
         cancelledCount,
+        missingCount,
         expiringSoonCount,
         overdueCount,
         payingCount,

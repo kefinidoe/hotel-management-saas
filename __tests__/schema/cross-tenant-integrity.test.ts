@@ -1,8 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
-import fs from "node:fs";
-import path from "node:path";
+import { applyPendingMigrations } from "./migration-runner";
 
 describe("Phase 3 Cross-Tenant Referential Integrity Test Suite", () => {
   let db: PGlite;
@@ -42,12 +41,8 @@ describe("Phase 3 Cross-Tenant Referential Integrity Test Suite", () => {
 
   beforeAll(async () => {
     db = new PGlite();
-    const migrationPath = path.join(
-      process.cwd(),
-      "prisma/migrations/20261008123000_multi_tenant_saas_init/migration.sql"
-    );
-    const sql = fs.readFileSync(migrationPath, "utf8");
-    await db.exec(sql);
+    // Establish all legacy objects and enum history before tenant-scoped schema checks.
+    await applyPendingMigrations(db);
 
     // 1. Seed Hotel Alpha & Hotel Beta
     await db.query(
@@ -199,6 +194,14 @@ describe("Phase 3 Cross-Tenant Referential Integrity Test Suite", () => {
       }
       expect(allowed).toBe(true);
     });
+
+    it("DATABASE REJECTS: ReservationRoom cannot connect a hotel A reservation to a hotel B room", async () => {
+      await expect(db.query(
+        `INSERT INTO "ReservationRoom" (id, "reservationId", "roomId", "hotelId", rate)
+         VALUES ('rr-cross-tenant', $1, $2, $3, 100.00)`,
+        [alphaReservationId, betaRoomId, alphaHotelId],
+      )).rejects.toThrow(/ReservationRoom_roomId_hotelId_fkey|foreign key/i);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -327,6 +330,15 @@ describe("Phase 3 Cross-Tenant Referential Integrity Test Suite", () => {
       }
       expect(orderAllowed).toBe(true);
     });
+
+    it("DATABASE REJECTS: OrderItem cannot reference another hotel's MenuItem", async () => {
+      await db.query(`INSERT INTO "Order" (id, "hotelId", total) VALUES ('order-alpha-integrity', $1, 15.00)`, [alphaHotelId]);
+      await expect(db.query(
+        `INSERT INTO "OrderItem" (id, "orderId", "hotelId", "menuItemId", name, "unitPrice", quantity, total)
+         VALUES ('order-item-cross-tenant', 'order-alpha-integrity', $1, $2, 'Coffee', 5.00, 1, 5.00)`,
+        [alphaHotelId, betaMenuItemId],
+      )).rejects.toThrow(/OrderItem_menuItemId_hotelId_fkey|foreign key/i);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -386,6 +398,19 @@ describe("Phase 3 Cross-Tenant Referential Integrity Test Suite", () => {
         recipeAllowed = false;
       }
       expect(recipeAllowed).toBe(true);
+    });
+
+    it("DATABASE REJECTS: RecipeIngredient cannot reference inventory from another hotel", async () => {
+      await db.query(
+        `INSERT INTO "Recipe" (id, "menuItemId", "hotelId", portions, "updatedAt")
+         VALUES ('recipe-alpha-integrity', $1, $2, 1, NOW())`,
+        [alphaMenuItemId, alphaHotelId],
+      );
+      await expect(db.query(
+        `INSERT INTO "RecipeIngredient" (id, "recipeId", "inventoryItemId", "hotelId", quantity)
+         VALUES ('recipe-ingredient-cross-tenant', 'recipe-alpha-integrity', $1, $2, 1.00)`,
+        [betaInventoryId, alphaHotelId],
+      )).rejects.toThrow(/RecipeIngredient_inventoryItemId_hotelId_fkey|foreign key/i);
     });
   });
 

@@ -7,7 +7,7 @@ import { ROLE_GROUPS } from "@/lib/permissions";
 export const dynamic = "force-dynamic";
 
 export default async function HousekeepingPage() {
-  const tenant = await requirePageRole(ROLE_GROUPS.HOUSEKEEPING);
+  const tenant = await requirePageRole(ROLE_GROUPS.HOUSEKEEPING, "HOUSEKEEPING");
 
   const [tasks, memberships] = await Promise.all([
     prisma.housekeepingTask.findMany({
@@ -17,7 +17,6 @@ export default async function HousekeepingPage() {
       },
       include: {
         room: { include: { roomType: true } },
-        assignee: true,
       },
       orderBy: { updatedAt: "desc" },
     }),
@@ -37,6 +36,8 @@ export default async function HousekeepingPage() {
     }),
   ]);
 
+  const staffNamesByUserId = new Map(memberships.map((membership) => [membership.userId, membership.user.name]));
+
   const initialTasks = tasks.map((t) => ({
     id: t.id,
     status: t.status,
@@ -44,8 +45,8 @@ export default async function HousekeepingPage() {
     roomId: t.roomId,
     roomNumber: t.room.number,
     roomTypeName: t.room.roomType.name,
-    assigneeId: t.assigneeId,
-    assigneeName: t.assignee?.name ?? null,
+    assigneeId: t.assigneeId && staffNamesByUserId.has(t.assigneeId) ? t.assigneeId : null,
+    assigneeName: t.assigneeId ? staffNamesByUserId.get(t.assigneeId) ?? null : null,
   }));
 
   const staff = memberships.map((membership) => ({

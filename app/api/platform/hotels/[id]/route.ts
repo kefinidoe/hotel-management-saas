@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getPlatformAdminFromRoute } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
+import { SubscriptionStatusUnavailableError } from "@/lib/entitlements";
 
 export const dynamic = "force-dynamic";
 
@@ -36,6 +37,7 @@ export async function GET(
             id: true,
             role: true,
             status: true,
+            department: true,
             createdAt: true,
             user: {
               select: {
@@ -43,7 +45,6 @@ export async function GET(
                 name: true,
                 email: true,
                 phone: true,
-                department: true,
                 isActive: true,
                 lastLoginAt: true,
               },
@@ -130,7 +131,7 @@ export async function GET(
           name: m.user.name,
           email: m.user.email,
           phone: m.user.phone,
-          department: m.user.department,
+          department: m.department,
           isActive: m.user.isActive,
           lastLoginAt: m.user.lastLoginAt ? m.user.lastLoginAt.toISOString() : null,
         },
@@ -147,6 +148,16 @@ export async function GET(
       })),
     });
   } catch (error) {
+    if (error instanceof SubscriptionStatusUnavailableError) {
+      return NextResponse.json(
+        {
+          error: error.code,
+          message: "Subscription status is temporarily unavailable.",
+        },
+        { status: error.statusCode }
+      );
+    }
+
     console.error("Failed to inspect hotel details:", error);
     return NextResponse.json(
       { error: "SERVER_ERROR", message: "Failed to retrieve hotel details." },

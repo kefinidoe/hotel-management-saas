@@ -193,8 +193,10 @@ let hotels: Map<string, HotelRecord>;
 let memberships: Map<string, MembershipRecord>;
 let auditLogs: AuditLogRecord[];
 let roomsCount: number = 24;
+let subscriptionStorageUnavailable = false;
 
 function resetDB() {
+  subscriptionStorageUnavailable = false;
   users = new Map();
   hotels = new Map();
   memberships = new Map();
@@ -420,6 +422,30 @@ vi.doMock("@/lib/prisma", () => ({
         return updated;
       },
     },
+    subscription: {
+      findUnique: async ({ where }: any) => {
+        if (subscriptionStorageUnavailable) throw new Error("Simulated subscription store outage");
+        const hotel = hotels.get(where.hotelId);
+        if (!hotel) return null;
+        const trialStartsAt = new Date("2026-01-01T00:00:00.000Z");
+        const trialEndsAt = new Date("2030-01-01T00:00:00.000Z");
+        return {
+          id: `subscription-${hotel.id}`,
+          hotelId: hotel.id,
+          planId: "BAND_1_10",
+          status: SubscriptionStatus.TRIALING,
+          trialStartsAt,
+          trialEndsAt,
+          currentPeriodStartsAt: trialStartsAt,
+          currentPeriodEndsAt: trialEndsAt,
+          cancelAtPeriodEnd: false,
+          suspensionReason: null,
+          billingInterval: BillingInterval.MONTHLY,
+          amount: 0,
+          currency: hotel.currency,
+        };
+      },
+    },
     hotelMembership: {
       findUnique: async ({ where }: any) => {
         if (where?.userId_hotelId) {
@@ -612,6 +638,16 @@ describe("Phase 6: Platform Administration & Hotel Lifecycle", () => {
       expect(data.memberships.length).toBe(2);
 
       // Verify no session cookie was emitted to switch workspace
+      expect(res.headers.get("set-cookie")).toBeNull();
+    });
+
+    it("fails closed with 503 when subscription storage is unavailable", async () => {
+      mockSession = { user: { id: "user-super-admin" } };
+      subscriptionStorageUnavailable = true;
+      const req = new Request("http://localhost/api/platform/hotels/hotel-alpha");
+      const res = await getHotelDetail(req, { params: Promise.resolve({ id: "hotel-alpha" }) });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({ error: "SUBSCRIPTION_STATUS_UNAVAILABLE" });
       expect(res.headers.get("set-cookie")).toBeNull();
     });
 

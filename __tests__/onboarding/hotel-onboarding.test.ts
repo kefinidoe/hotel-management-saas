@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { afterEach, describe, it, expect, vi, beforeEach } from "vitest";
 
 export const HotelRole = {
   HOTEL_OWNER: "HOTEL_OWNER",
@@ -86,6 +86,8 @@ vi.doMock("@prisma/client", () => ({
 }));
 
 let mockSession: any = null;
+let forceRegistrationUniqueConflict = false;
+let forceHotelSlugUniqueConflict = false;
 
 vi.doMock("next-auth", () => ({
   getServerSession: async () => mockSession,
@@ -147,6 +149,10 @@ vi.doMock("@/lib/prisma", () => ({
         return null;
       },
       create: async ({ data }: any) => {
+        if (forceRegistrationUniqueConflict) {
+          forceRegistrationUniqueConflict = false;
+          throw { code: "P2002", meta: { target: ["email"] } };
+        }
         const id = data.id || `user-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         const created = { id, createdAt: new Date(), updatedAt: new Date(), ...data };
         db.users.set(id, created);
@@ -211,6 +217,10 @@ vi.doMock("@/lib/prisma", () => ({
             return null;
           },
           create: async ({ data }: any) => {
+            if (forceHotelSlugUniqueConflict) {
+              forceHotelSlugUniqueConflict = false;
+              throw { code: "P2002", meta: { target: ["slug"] } };
+            }
             const id = `hotel-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
             const created = { id, createdAt: new Date(), updatedAt: new Date(), ...data };
             db.hotels.set(id, created);
@@ -242,8 +252,13 @@ let registerRoute: any = null;
 let onboardingRoute: any = null;
 
 describe("Phase 5: User Registration & Hotel Onboarding", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
   beforeEach(async () => {
+    vi.stubEnv("DATABASE_URL", "postgresql://mock:mock@localhost/mock");
     db = resetDB();
+    forceRegistrationUniqueConflict = false;
+    forceHotelSlugUniqueConflict = false;
     mockSession = { user: { id: "user-1", email: "alice@example.com" } };
     if (!registerRoute) {
       registerRoute = (await import("../../app/api/auth/register/route")).POST;
@@ -293,6 +308,37 @@ describe("Phase 5: User Registration & Hotel Onboarding", () => {
       expect(res.status).toBe(409);
       const data = await res.json();
       expect(data.error).toContain("already exists");
+    });
+
+    it("maps a database uniqueness race to 409 Conflict", async () => {
+      forceRegistrationUniqueConflict = true;
+      const req = new Request("http://localhost:3000/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "Bob Builder",
+          email: "bob@example.com",
+          password: "SecurePassword123!",
+        }),
+      });
+
+      const res = await registerRoute(req);
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toContain("already exists");
+    });
+
+    it("returns 503 without attempting persistence when no database is configured", async () => {
+      vi.stubEnv("DATABASE_URL", "");
+      const req = new Request("http://localhost:3000/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Offline User", email: "offline@example.com", password: "SecurePassword123!" }),
+      });
+
+      const res = await registerRoute(req);
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toBe("DATABASE_UNAVAILABLE");
+      expect(db.users.size).toBe(1);
     });
 
     it("rejects invalid input (short password, invalid email, missing name)", async () => {
@@ -407,6 +453,45 @@ describe("Phase 5: User Registration & Hotel Onboarding", () => {
       expect(res.status).toBe(409);
       const data = await res.json();
       expect(data.error).toBe("SLUG_ALREADY_EXISTS");
+    });
+
+    it("maps a concurrent slug uniqueness conflict to 409 Conflict", async () => {
+      forceHotelSlugUniqueConflict = true;
+      const req = new Request("http://localhost:3000/api/hotel/onboarding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Concurrent Hotel", slug: "concurrent-hotel" }),
+      });
+
+      const res = await onboardingRoute(req);
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toBe("SLUG_ALREADY_EXISTS");
+    });
+
+    it("rejects invalid IANA timezone identifiers", async () => {
+      const req = new Request("http://localhost:3000/api/hotel/onboarding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Bad Timezone Hotel", timezone: "Not/A-Timezone" }),
+      });
+
+      const res = await onboardingRoute(req);
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("INVALID_TIMEZONE");
+    });
+
+    it("returns 503 without database access when offline", async () => {
+      vi.stubEnv("DATABASE_URL", "");
+      const req = new Request("http://localhost:3000/api/hotel/onboarding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Offline Hotel" }),
+      });
+
+      const res = await onboardingRoute(req);
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toBe("DATABASE_UNAVAILABLE");
+      expect(db.hotels.size).toBe(0);
     });
 
     it("rejects unauthenticated requests with 401", async () => {

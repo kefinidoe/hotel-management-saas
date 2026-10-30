@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { X } from "lucide-react";
+import { apiErrorMessage, requestJson } from "@/lib/client-api";
 import { addDays, isoDay } from "@/lib/dates";
 import type { RoomStatus } from "@prisma/client";
 import {
@@ -31,6 +32,7 @@ function inputClass() {
 
 export default function CreateReservationModal({
   rooms,
+  roomTypes,
   defaultRoomId,
   defaultDate,
   canApplyDiscount,
@@ -39,6 +41,7 @@ export default function CreateReservationModal({
   onError,
 }: {
   rooms: Room[];
+  roomTypes: RoomTypeTariff[];
   defaultRoomId: string;
   defaultDate: Date;
   canApplyDiscount: boolean;
@@ -46,8 +49,8 @@ export default function CreateReservationModal({
   onCreated: (reservationId: string) => void;
   onError: (e: string | null) => void;
 }) {
-  // Matches Axis Hotel's paper registration card: guest identity,
-  // stay dates, and room/tariff. Actual payment is recorded at check-in.
+  // Captures the common hotel check-in details: guest identity, stay dates,
+  // and room/tariff. Actual payment is recorded at check-in.
   const [guestName, setGuestName] = useState("");
   const [guestPhone, setGuestPhone] = useState("");
   const [idNumber, setIdNumber] = useState("");
@@ -61,14 +64,8 @@ export default function CreateReservationModal({
   const [adults, setAdults] = useState("1");
   const [children, setChildren] = useState("0");
   const [discount, setDiscount] = useState("");
-  const [tariffs, setTariffs] = useState<RoomTypeTariff[]>([]);
   const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    fetch("/api/room-types")
-      .then((r) => r.json())
-      .then((t) => setTariffs(t));
-  }, []);
+  const tariffs = roomTypes;
 
   const room = rooms.find((r) => r.id === roomId);
 
@@ -107,42 +104,34 @@ export default function CreateReservationModal({
     }
     setLoading(true);
     onError(null);
-    const res = await fetch("/api/reservations", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        guestName,
-        guestPhone,
-        idNumber,
-        nationality,
-        vehicleRegistration,
-        checkInDate: new Date(checkInDate).toISOString(),
-        checkOutDate: new Date(checkOutDate).toISOString(),
-        roomId,
-        tariffId: matchedTariff.id,
-        occupancy,
-        mealPlan,
-        adults: Number(adults) || 1,
-        children: Number(children) || 0,
-        discount: canApplyDiscount && discount ? Number(discount) : null,
-      }),
-    });
-    setLoading(false);
-
-    let data: any = null;
     try {
-      data = await res.json();
-    } catch {
-      onError("Lost connection while saving. Please check your connection and try again.");
-      return;
+      const data = await requestJson<{ id: string; code: string }>("/api/reservations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          guestName,
+          guestPhone,
+          idNumber,
+          nationality,
+          vehicleRegistration,
+          checkInDate: new Date(checkInDate).toISOString(),
+          checkOutDate: new Date(checkOutDate).toISOString(),
+          roomId,
+          tariffId: matchedTariff.id,
+          occupancy,
+          mealPlan,
+          adults: Number(adults) || 1,
+          children: Number(children) || 0,
+          discount: canApplyDiscount && discount ? Number(discount) : null,
+        }),
+      });
+      onCreated(data.id);
+      onClose();
+    } catch (submitError) {
+      onError(apiErrorMessage(submitError, "Could not create reservation."));
+    } finally {
+      setLoading(false);
     }
-
-    if (!res.ok) {
-      onError(data?.error || "Could not create reservation.");
-      return;
-    }
-    onCreated(data.id);
-    onClose();
   }
 
   return (

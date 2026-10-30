@@ -11,6 +11,7 @@ function getCleanSecret(raw?: string): string | undefined {
 }
 
 export async function middleware(req: NextRequest) {
+  const { pathname, search } = req.nextUrl;
   const secret = getCleanSecret(process.env.NEXTAUTH_SECRET);
   let token = await getToken({
     req,
@@ -20,9 +21,22 @@ export async function middleware(req: NextRequest) {
   if (!token) {
     token = await getToken({ req, secret });
   }
-  if (token) return NextResponse.next();
+  if (token) {
+    if (!process.env.DATABASE_URL?.trim()) {
+      if (pathname.startsWith("/api/")) {
+        return NextResponse.json(
+          { error: "DATABASE_UNAVAILABLE", message: "Database-backed actions are unavailable in offline preview." },
+          { status: 503 }
+        );
+      }
 
-  const { pathname, search } = req.nextUrl;
+      const offlineLoginUrl = new URL("/login", req.url);
+      offlineLoginUrl.searchParams.set("error", "DATABASE_UNAVAILABLE");
+      offlineLoginUrl.searchParams.set("callbackUrl", `${pathname}${search}`);
+      return NextResponse.redirect(offlineLoginUrl);
+    }
+    return NextResponse.next();
+  }
 
   if (pathname.startsWith("/api/")) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });

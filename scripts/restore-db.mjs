@@ -9,7 +9,10 @@
  *
  * Usage:
  *   node scripts/restore-db.mjs --file backups\hms-2026-10-02T21-00-00.dump --target "postgresql://..."
- *   node scripts/restore-db.mjs --file ... --target ... --force      # allow the live URL
+ *   node scripts/restore-db.mjs --file ... --target ... --confirm-target "user@host:5432/database" --force
+ *
+ * Requires the target to match SAAS_DATABASE_IDENTIFIER and exact --confirm-target.
+ * These checks do not prove ownership or migration history; verify those independently.
  */
 
 import { spawn } from "node:child_process";
@@ -17,6 +20,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sanitiseForPgTools } from "./pg-url.mjs";
+import { assertDatabaseTarget } from "./database-target-safety.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -104,7 +108,7 @@ function findPgTool(name) {
 }
 
 async function main() {
-  const env = readEnv();
+  const env = { ...readEnv(), ...process.env };
   const file = arg("file");
   const target = arg("target");
 
@@ -128,6 +132,19 @@ async function main() {
   }
 
   const live = env.DIRECT_URL ?? env.DATABASE_URL;
+  assertDatabaseTarget({
+    environment: env.SAAS_ENVIRONMENT,
+    identifier: env.SAAS_DATABASE_IDENTIFIER,
+    databaseUrl: target,
+  });
+
+  const requiredConfirmation = identity(target);
+  if (arg("confirm-target") !== requiredConfirmation) {
+    console.error("Refusing restore. Re-run with --confirm-target set to the exact target identity shown below:");
+    console.error(`  ${requiredConfirmation}`);
+    process.exit(1);
+  }
+
   if (live && sameDatabase(live, target) && !hasFlag("force")) {
     console.error("");
     console.error("  REFUSING TO RUN.");

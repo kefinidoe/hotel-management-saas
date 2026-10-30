@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { computePosFingerprint } from "@/lib/restaurant";
 
 export const HotelRole = {
   HOTEL_OWNER: "HOTEL_OWNER",
@@ -105,6 +107,7 @@ vi.doMock("@/lib/authz", () => ({
     }
     return mockCurrentTenant;
   },
+  requireModule: async () => null,
   requireRole: (role: any, allowed: readonly string[]) => {
     if (!role || !allowed.includes(role)) {
       return CustomNextResponse.json({ error: "You don't have permission to do that." }, { status: 403 });
@@ -132,6 +135,8 @@ interface TestDB {
   folios: Map<string, any>;
   folioItems: Map<string, any>;
   payments: Map<string, any>;
+  orders: Map<string, any>;
+  orderItems: Map<string, any>;
   paymentMethods: Map<string, any>;
   menuItems: Map<string, any>;
   recipes: Map<string, any>;
@@ -140,6 +145,7 @@ interface TestDB {
   locks: string[];
   simulateP2002OnPaymentCreate?: boolean;
   simulateP2002Target?: any;
+  simulateOrderLookupMiss?: boolean;
   failRecipeStockDeduction?: boolean;
 }
 
@@ -150,6 +156,8 @@ function createFreshTestDB(): TestDB {
     folios: new Map(),
     folioItems: new Map(),
     payments: new Map(),
+    orders: new Map(),
+    orderItems: new Map(),
     paymentMethods: new Map(),
     menuItems: new Map(),
     recipes: new Map(),
@@ -227,6 +235,13 @@ function createFreshTestDB(): TestDB {
 }
 
 let db: TestDB;
+let transactionTail: Promise<void> = Promise.resolve();
+
+function buildOrderResult(order: any) {
+  const folio = db.folios.get(order.folioId) || {};
+  const guest = db.guests.get(folio.guestId) || { fullName: "Walk-in Guest" };
+  return { ...order, folio: { ...folio, guest } };
+}
 
 function buildPaymentResult(p: any) {
   const folio = db.folios.get(p.folioId) || { guestId: p.guestId };
@@ -241,6 +256,18 @@ function buildPaymentResult(p: any) {
 
 vi.doMock("@/lib/prisma", () => ({
   prisma: {
+    order: {
+      findUnique: async ({ where }: any) => {
+        const unique = where?.hotelId_idempotencyOperation_idempotencyKey;
+        if (!unique) return null;
+        for (const order of db.orders.values()) {
+          if (order.hotelId === unique.hotelId && order.idempotencyOperation === unique.idempotencyOperation && order.idempotencyKey === unique.idempotencyKey) {
+            return buildOrderResult(order);
+          }
+        }
+        return null;
+      },
+    },
     payment: {
       findUnique: async ({ where }: any) => {
         if (where?.hotelId_idempotencyKey) {
@@ -257,16 +284,55 @@ vi.doMock("@/lib/prisma", () => ({
       },
     },
     $transaction: async (fn: any) => {
+      // Serialize mock transactions to model the route's PostgreSQL advisory lock.
+      const previous = transactionTail;
+      let release!: () => void;
+      transactionTail = new Promise<void>((resolve) => { release = resolve; });
+      await previous;
       // Create backup state for atomic rollback simulation
       const snapshot = {
         folios: new Map(db.folios),
         folioItems: new Map(db.folioItems),
         payments: new Map(db.payments),
+        orders: new Map(db.orders),
+        orderItems: new Map(db.orderItems),
         inventoryItems: new Map(Array.from(db.inventoryItems.entries()).map(([k, v]) => [k, { ...v }])),
         stockMovements: [...db.stockMovements],
       };
 
       const tx = {
+        order: {
+          findUnique: async ({ where }: any) => {
+            if (db.simulateOrderLookupMiss) return null;
+            const unique = where?.hotelId_idempotencyOperation_idempotencyKey;
+            if (!unique) return null;
+            for (const order of db.orders.values()) {
+              if (order.hotelId === unique.hotelId && order.idempotencyOperation === unique.idempotencyOperation && order.idempotencyKey === unique.idempotencyKey) {
+                return buildOrderResult(order);
+              }
+            }
+            return null;
+          },
+          create: async ({ data }: any) => {
+            for (const order of db.orders.values()) {
+              if (order.hotelId === data.hotelId && order.idempotencyOperation === data.idempotencyOperation && order.idempotencyKey === data.idempotencyKey) {
+                throw new MockPrismaClientKnownRequestError("Unique constraint failed", "P2002", { target: ["hotelId", "idempotencyOperation", "idempotencyKey"] });
+              }
+            }
+            const id = `order-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+            const created = { id, createdAt: new Date(), ...data };
+            db.orders.set(id, created);
+            return created;
+          },
+        },
+        orderItem: {
+          create: async ({ data }: any) => {
+            const id = `oi-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+            const created = { id, ...data };
+            db.orderItems.set(id, created);
+            return created;
+          },
+        },
         $queryRaw: async (query: any, ...values: any[]) => {
           const parts = Array.isArray(query) ? query : [query];
           const rendered = parts.map((p: any, i: number) => `${p}${values[i] !== undefined ? values[i] : ""}`).join("");
@@ -382,6 +448,7 @@ vi.doMock("@/lib/prisma", () => ({
         },
         stockMovement: {
           create: async ({ data }: any) => {
+            if (db.failRecipeStockDeduction) throw new Error("Simulated stock movement failure");
             db.stockMovements.push(data);
             return data;
           },
@@ -403,6 +470,14 @@ vi.doMock("@/lib/prisma", () => ({
           },
         },
         folio: {
+          findUnique: async ({ where }: any) => {
+            const unique = where?.id_hotelId;
+            if (!unique) return null;
+            const folio = db.folios.get(unique.id);
+            if (!folio || folio.hotelId !== unique.hotelId) return null;
+            const guest = db.guests.get(folio.guestId) || { fullName: "Walk-in Guest" };
+            return { ...folio, guest };
+          },
           create: async ({ data }: any) => {
             const id = `folio-${Date.now()}-${Math.random().toString(36).substring(7)}`;
             const created = { id, ...data };
@@ -427,20 +502,77 @@ vi.doMock("@/lib/prisma", () => ({
         db.folios = snapshot.folios;
         db.folioItems = snapshot.folioItems;
         db.payments = snapshot.payments;
+        db.orders = snapshot.orders;
+        db.orderItems = snapshot.orderItems;
         db.inventoryItems = snapshot.inventoryItems;
         db.stockMovements = snapshot.stockMovements;
         throw err;
+      } finally {
+        release();
       }
     },
   },
 }));
 
 let payNowRoute: any = null;
+let chargeToRoomRoute: any = null;
 let paymentStatusRoute: any = null;
 
 describe("Phase 4B: Restaurant POS Pay-Now Idempotency & Concurrency Hardening", () => {
+  it("keeps Payment on the established hotel-and-key contract in schema, migrations, and selectors", () => {
+    const schema = readFileSync("prisma/schema.prisma", "utf8");
+    const paymentModel = schema.match(/model Payment \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    const paymentKeyMigration = readFileSync(
+      "prisma/migrations/20261012063000_add_payment_idempotency_key/migration.sql",
+      "utf8",
+    );
+    const paymentRoute = readFileSync("app/api/payments/route.ts", "utf8");
+    const payNowRouteSource = readFileSync("app/api/restaurant/pay-now/route.ts", "utf8");
+    const statusRouteSource = readFileSync("app/api/restaurant/payments/status/route.ts", "utf8");
+
+    expect(paymentModel).toContain("idempotencyKey  String?");
+    expect(paymentModel).toContain("requestFingerprint String?");
+    expect(paymentModel).toContain("@@unique([hotelId, idempotencyKey])");
+    expect(paymentModel).not.toContain("idempotencyOperation");
+    expect(paymentKeyMigration).toContain('ADD COLUMN "idempotencyKey" TEXT;');
+    expect(paymentKeyMigration).toContain('CREATE UNIQUE INDEX "Payment_hotelId_idempotencyKey_key"');
+    for (const source of [paymentRoute, payNowRouteSource, statusRouteSource]) {
+      expect(source).toContain("hotelId_idempotencyKey");
+    }
+  });
+
+  it("treats a same-hotel key from another Payment operation as a conflict, not a second Payment", async () => {
+    const sharedKey = "shared-operation-key";
+    db.payments.set("existing-payment", {
+      id: "existing-payment",
+      hotelId: "hotel-a",
+      folioId: "folio-a-open",
+      paymentMethodId: "pm-a-cash",
+      amount: 125,
+      idempotencyKey: sharedKey,
+      requestFingerprint: "accommodation-payment-fingerprint",
+      status: "COMPLETED",
+      cashierId: "user-cashier-a",
+      createdAt: new Date(),
+    });
+    const request = new Request("http://localhost:3000/api/restaurant/pay-now", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Idempotency-Key": sharedKey },
+      body: JSON.stringify({
+        paymentMethodId: "pm-a-cash",
+        items: [{ menuItemId: "item-a-burger", quantity: 1 }],
+      }),
+    });
+
+    const response = await payNowRoute(request);
+    expect(response.status).toBe(409);
+    expect((await response.json()).outcome).toBe("CONFLICT");
+    expect(db.payments.size).toBe(1);
+  });
+
   beforeEach(async () => {
     db = createFreshTestDB();
+    transactionTail = Promise.resolve();
     mockCurrentTenant = {
       hotelId: "hotel-a",
       userId: "user-cashier-a",
@@ -450,9 +582,52 @@ describe("Phase 4B: Restaurant POS Pay-Now Idempotency & Concurrency Hardening",
     if (!payNowRoute) {
       payNowRoute = (await import("@/app/api/restaurant/pay-now/route")).POST;
     }
+    if (!chargeToRoomRoute) {
+      chargeToRoomRoute = (await import("@/app/api/restaurant/charge-to-room/route")).POST;
+    }
     if (!paymentStatusRoute) {
       paymentStatusRoute = (await import("@/app/api/restaurant/payments/status/route")).GET;
     }
+  });
+
+  it("rejects stale expected-tenant headers without consulting another tenant's records", async () => {
+    const payNow = new Request("http://localhost:3000/api/restaurant/pay-now", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": "stale-tenant-paynow-key",
+        "X-Expected-Hotel-Id": "hotel-b",
+      },
+      body: JSON.stringify({
+        paymentMethodId: "pm-a-cash",
+        tableNumber: "5",
+        items: [{ menuItemId: "item-a-burger", quantity: 1 }],
+      }),
+    });
+    const payResponse = await payNowRoute(payNow);
+    expect(payResponse.status).toBe(409);
+    expect((await payResponse.json()).outcome).toBe("UNKNOWN");
+
+    const statusResponse = await paymentStatusRoute(new Request(
+      "http://localhost:3000/api/restaurant/payments/status?key=stale-tenant-key",
+      { headers: { "X-Expected-Hotel-Id": "hotel-b" } },
+    ));
+    expect(statusResponse.status).toBe(409);
+    expect((await statusResponse.json()).outcome).toBe("UNKNOWN");
+
+    const chargeResponse = await chargeToRoomRoute(new Request("http://localhost:3000/api/restaurant/charge-to-room", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": "stale-tenant-room-key",
+        "X-Expected-Hotel-Id": "hotel-b",
+      },
+      body: JSON.stringify({ folioId: "folio-a-open", tableNumber: "5", items: [{ menuItemId: "item-a-burger", quantity: 1 }] }),
+    }));
+    expect(chargeResponse.status).toBe(409);
+    expect((await chargeResponse.json()).outcome).toBe("UNKNOWN");
+    expect(db.payments.size).toBe(0);
+    expect(db.orders.size).toBe(0);
   });
 
   it("1. Normal POS payment succeeds and deducts inventory atomically", async () => {
@@ -771,12 +946,34 @@ describe("Phase 4B: Restaurant POS Pay-Now Idempotency & Concurrency Hardening",
 
     const res = await payNowRoute(req);
     expect(res.status).toBe(400);
+    expect((await res.json()).outcome).toBe("NOT_COMMITTED");
 
     // Atomicity check: everything rolled back
     expect(db.folios.size).toBe(initialFolioCount);
     expect(db.payments.size).toBe(initialPaymentCount);
     expect(db.inventoryItems.get("inv-a-patty").currentStock).toBe(initialStock);
     expect(db.stockMovements.length).toBe(initialMovements);
+  });
+
+  it("keeps Pay-now recovery on UNKNOWN when a post-write transaction failure has no proven outcome", async () => {
+    db.failRecipeStockDeduction = true;
+    try {
+      const response = await payNowRoute(new Request("http://localhost:3000/api/restaurant/pay-now", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Idempotency-Key": "ambiguous-stock-failure-key",
+        },
+        body: JSON.stringify({
+          paymentMethodId: "pm-a-cash",
+          items: [{ menuItemId: "item-a-burger", quantity: 1 }],
+        }),
+      }));
+      expect(response.status).toBe(500);
+      expect((await response.json()).outcome).toBe("UNKNOWN");
+    } finally {
+      db.failRecipeStockDeduction = false;
+    }
   });
 
   it("9. Cross-hotel keys and menu items cannot cross tenant boundaries", async () => {
@@ -978,14 +1175,25 @@ describe("Phase 4B: Restaurant POS Pay-Now Idempotency & Concurrency Hardening",
     });
     const payRes = await payNowRoute(payReq);
     expect(payRes.status).toBe(201);
+    const payData = await payRes.json();
 
-    // Query status
-    const statusReq = new Request("http://localhost:3000/api/restaurant/payments/status?key=status-check-key-1");
+    // Query status with the precise request identity from the committed response.
+    const statusQuery = new URLSearchParams({
+      key: "status-check-key-1",
+      operation: "PAY_NOW",
+      fingerprint: payData.requestFingerprint,
+    });
+    const statusReq = new Request(`http://localhost:3000/api/restaurant/payments/status?${statusQuery}`);
     const statusRes = await paymentStatusRoute(statusReq);
     expect(statusRes.status).toBe(200);
     const data = await statusRes.json();
     expect(data.found).toBe(true);
     expect(data.status).toBe("COMPLETED");
+    expect(data.hotelId).toBe("hotel-a");
+    expect(data.operation).toBe("PAY_NOW");
+    expect(data.idempotencyKey).toBe("status-check-key-1");
+    expect(data.requestFingerprint).toBe(payData.requestFingerprint);
+    expect(data.matchesFingerprint).toBe(true);
     expect(data.total).toBe(850);
     expect(data.method).toBe("Cash");
   });
@@ -1006,18 +1214,72 @@ describe("Phase 4B: Restaurant POS Pay-Now Idempotency & Concurrency Hardening",
     expect(payRes.status).toBe(201);
 
     // Query status with a foreign/mismatched fingerprint
-    const statusReq = new Request(
-      "http://localhost:3000/api/restaurant/payments/status?key=status-check-key-2&fingerprint=mismatched-fp-123"
-    );
+    const statusQuery = new URLSearchParams({
+      key: "status-check-key-2",
+      operation: "PAY_NOW",
+      fingerprint: "f".repeat(64),
+    });
+    const statusReq = new Request(`http://localhost:3000/api/restaurant/payments/status?${statusQuery}`);
     const statusRes = await paymentStatusRoute(statusReq);
     expect(statusRes.status).toBe(200);
     const data = await statusRes.json();
     expect(data.found).toBe(true);
+    expect(data.operation).toBeNull();
     expect(data.matchesFingerprint).toBe(false);
   });
 
+  it("rejects missing fingerprints and non-Pay-now operation status inquiries", async () => {
+    const missingFingerprint = await paymentStatusRoute(new Request(
+      "http://localhost:3000/api/restaurant/payments/status?key=status-invalid-fingerprint&operation=PAY_NOW",
+    ));
+    expect(missingFingerprint.status).toBe(400);
+    expect((await missingFingerprint.json()).code).toBe("INVALID_REQUEST_FINGERPRINT");
+
+    const wrongOperation = await paymentStatusRoute(new Request(
+      `http://localhost:3000/api/restaurant/payments/status?${new URLSearchParams({ key: "status-invalid-operation", operation: "CHARGE_TO_ROOM", fingerprint: "a".repeat(64) })}`,
+    ));
+    expect(wrongOperation.status).toBe(400);
+    expect((await wrongOperation.json()).code).toBe("INVALID_OPERATION");
+  });
+
+  it("returns failed payment state without reclassifying it as Pay-now success", async () => {
+    const idempotencyKey = "failed-status-key";
+    const fingerprint = computePosFingerprint({
+      hotelId: "hotel-a",
+      items: [{ menuItemId: "item-a-burger", quantity: 1 }],
+      paymentMethodId: "pm-a-cash",
+      customerName: "",
+      customerPhone: "",
+      tableNumber: "",
+      reference: "",
+    });
+    db.payments.set("failed-status-payment", {
+      id: "failed-status-payment",
+      hotelId: "hotel-a",
+      folioId: "folio-a-failed",
+      paymentMethodId: "pm-a-cash",
+      amount: 850,
+      idempotencyKey,
+      requestFingerprint: fingerprint,
+      status: "FAILED",
+      cashierId: "user-cashier-a",
+      createdAt: new Date(),
+    });
+    const query = new URLSearchParams({ key: idempotencyKey, operation: "PAY_NOW", fingerprint });
+    const response = await paymentStatusRoute(new Request(
+      `http://localhost:3000/api/restaurant/payments/status?${query}`,
+    ));
+    expect(response.status).toBe(200);
+    const data = await response.json();
+    expect(data.found).toBe(true);
+    expect(data.operation).toBe("PAY_NOW");
+    expect(data.matchesFingerprint).toBe(true);
+    expect(data.status).toBe("FAILED");
+  });
+
   it("16. Server status inquiry endpoint returns found: false when key does not exist", async () => {
-    const statusReq = new Request("http://localhost:3000/api/restaurant/payments/status?key=non-existent-key-999");
+    const statusQuery = new URLSearchParams({ key: "non-existent-key-999", operation: "PAY_NOW", fingerprint: "a".repeat(64) });
+    const statusReq = new Request(`http://localhost:3000/api/restaurant/payments/status?${statusQuery}`);
     const statusRes = await paymentStatusRoute(statusReq);
     expect(statusRes.status).toBe(200);
     const data = await statusRes.json();
@@ -1041,14 +1303,172 @@ describe("Phase 4B: Restaurant POS Pay-Now Idempotency & Concurrency Hardening",
     });
 
     // Hotel A queries for that key
-    const statusReq = new Request(
-      "http://localhost:3000/api/restaurant/payments/status?key=cross-tenant-status-key"
-    );
+    const statusQuery = new URLSearchParams({ key: "cross-tenant-status-key", operation: "PAY_NOW", fingerprint: "a".repeat(64) });
+    const statusReq = new Request(`http://localhost:3000/api/restaurant/payments/status?${statusQuery}`);
     const statusRes = await paymentStatusRoute(statusReq);
     expect(statusRes.status).toBe(200);
     const data = await statusRes.json();
     // Must return found: false because key belongs to Hotel B
     expect(data.found).toBe(false);
+  });
+
+  function seedRoomFolio(hotelId = "hotel-a", folioId = "folio-a-open") {
+    const guestId = `${hotelId}-guest`;
+    db.guests.set(guestId, { id: guestId, hotelId, fullName: hotelId === "hotel-a" ? "Alice Guest" : "Bravo Guest" });
+    db.folios.set(folioId, { id: folioId, hotelId, guestId, isClosed: false });
+    return folioId;
+  }
+
+  function roomChargeRequest(key: string | undefined, body: any) {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (key !== undefined) headers["X-Idempotency-Key"] = key;
+    return new Request("http://localhost:3000/api/restaurant/charge-to-room", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("room charge replays the original Order without duplicate folio or stock writes", async () => {
+    const folioId = seedRoomFolio();
+    const body = {
+      folioId,
+      tableNumber: "4",
+      items: [{ menuItemId: "item-a-burger", quantity: 2 }],
+    };
+    const first = await chargeToRoomRoute(roomChargeRequest("room-key-replay-1", body));
+    expect(first.status).toBe(201);
+    const firstResult = await first.json();
+    expect(firstResult.ok).toBe(true);
+    expect(firstResult.operation).toBe("CHARGE_TO_ROOM");
+    expect(firstResult.orderId).toBeTruthy();
+    expect(firstResult.total).toBe(1700);
+    expect(db.orders.size).toBe(1);
+    expect(db.orderItems.size).toBe(1);
+    expect(db.folioItems.size).toBe(1);
+    expect(db.inventoryItems.get("inv-a-patty").currentStock).toBe(98);
+    expect(db.stockMovements).toHaveLength(1);
+
+    const replay = await chargeToRoomRoute(roomChargeRequest("room-key-replay-1", body));
+    const replayResult = await replay.json();
+    expect(replay.status).toBe(201);
+    expect(replayResult.isIdempotentReplay).toBe(true);
+    expect(replayResult.orderId).toBe(firstResult.orderId);
+    expect(db.orders.size).toBe(1);
+    expect(db.orderItems.size).toBe(1);
+    expect(db.folioItems.size).toBe(1);
+    expect(db.inventoryItems.get("inv-a-patty").currentStock).toBe(98);
+    expect(db.stockMovements).toHaveLength(1);
+  });
+
+  it("resolves a unique-index race by reading the committed winner after rollback", async () => {
+    const folioId = seedRoomFolio();
+    const body = { folioId, tableNumber: "3", items: [{ menuItemId: "item-a-burger", quantity: 1 }] };
+    const first = await chargeToRoomRoute(roomChargeRequest("room-key-race-winner", body));
+    const firstResult = await first.json();
+    expect(first.status).toBe(201);
+
+    // Simulate a stale transaction lookup: INSERT sees the competing winner's
+    // unique key, the transaction rolls back, and the post-rollback read finds it.
+    db.simulateOrderLookupMiss = true;
+    const raced = await chargeToRoomRoute(roomChargeRequest("room-key-race-winner", body));
+    const raceResult = await raced.json();
+    expect(raced.status).toBe(201);
+    expect(raceResult.orderId).toBe(firstResult.orderId);
+    expect(raceResult.isIdempotentReplay).toBe(true);
+    expect(db.orders.size).toBe(1);
+    expect(db.folioItems.size).toBe(1);
+    expect(db.stockMovements).toHaveLength(1);
+  });
+
+  it("same room-charge key with a changed payload conflicts without confirming or writing again", async () => {
+    const folioId = seedRoomFolio();
+    const firstBody = { folioId, tableNumber: "4", items: [{ menuItemId: "item-a-burger", quantity: 1 }] };
+    const first = await chargeToRoomRoute(roomChargeRequest("room-key-conflict-1", firstBody));
+    expect(first.status).toBe(201);
+    const otherFolioId = seedRoomFolio("hotel-a", "folio-a-other");
+    const changed = await chargeToRoomRoute(roomChargeRequest("room-key-conflict-1", {
+      ...firstBody,
+      tableNumber: "8",
+    }));
+    const changedDestination = await chargeToRoomRoute(roomChargeRequest("room-key-conflict-1", {
+      ...firstBody,
+      folioId: otherFolioId,
+    }));
+    const result = await changed.json();
+    const destinationResult = await changedDestination.json();
+    expect(changed.status).toBe(409);
+    expect(result.outcome).toBe("CONFLICT");
+    expect(result.ok).toBeUndefined();
+    expect(changedDestination.status).toBe(409);
+    expect(destinationResult.outcome).toBe("CONFLICT");
+    expect(destinationResult.ok).toBeUndefined();
+    expect(db.orders.size).toBe(1);
+    expect(db.folioItems.size).toBe(1);
+    expect(db.stockMovements).toHaveLength(1);
+  });
+
+  it("concurrent duplicate room-charge submissions return one committed result", async () => {
+    const folioId = seedRoomFolio();
+    const body = { folioId, tableNumber: "2", items: [{ menuItemId: "item-a-burger", quantity: 1 }] };
+    const [resA, resB] = await Promise.all([
+      chargeToRoomRoute(roomChargeRequest("room-key-concurrent-1", body)),
+      chargeToRoomRoute(roomChargeRequest("room-key-concurrent-1", body)),
+    ]);
+    const [a, b] = await Promise.all([resA.json(), resB.json()]);
+    expect([resA.status, resB.status]).toEqual([201, 201]);
+    expect([a.orderId, b.orderId][0]).toBe([a.orderId, b.orderId][1]);
+    expect([a.isIdempotentReplay, b.isIdempotentReplay].filter(Boolean)).toHaveLength(1);
+    expect(db.orders.size).toBe(1);
+    expect(db.folioItems.size).toBe(1);
+    expect(db.stockMovements).toHaveLength(1);
+    expect(db.inventoryItems.get("inv-a-patty").currentStock).toBe(99);
+  });
+
+  it("rejects a folio belonging to another tenant and does not commit", async () => {
+    const foreignFolio = seedRoomFolio("hotel-b", "folio-b-open");
+    const res = await chargeToRoomRoute(roomChargeRequest("room-key-tenant-1", {
+      folioId: foreignFolio,
+      items: [{ menuItemId: "item-a-burger", quantity: 1 }],
+    }));
+    const result = await res.json();
+    expect(res.status).toBe(400);
+    expect(result.outcome).toBe("NOT_COMMITTED");
+    expect(db.orders.size).toBe(0);
+    expect(db.folioItems.size).toBe(0);
+    expect(db.stockMovements).toHaveLength(0);
+  });
+
+  it("rolls back order, folio, and stock changes when inventory movement fails", async () => {
+    const folioId = seedRoomFolio();
+    db.failRecipeStockDeduction = true;
+    const res = await chargeToRoomRoute(roomChargeRequest("room-key-rollback-1", {
+      folioId,
+      items: [{ menuItemId: "item-a-burger", quantity: 1 }],
+    }));
+    const result = await res.json();
+    expect(res.status).toBe(400);
+    expect(result.outcome).toBe("NOT_COMMITTED");
+    expect(db.orders.size).toBe(0);
+    expect(db.orderItems.size).toBe(0);
+    expect(db.folioItems.size).toBe(0);
+    expect(db.inventoryItems.get("inv-a-patty").currentStock).toBe(100);
+    expect(db.stockMovements).toHaveLength(0);
+  });
+
+  it("requires a valid room-charge key before opening a transaction", async () => {
+    const folioId = seedRoomFolio();
+    for (const key of [undefined, "ab", "x".repeat(129)]) {
+      const res = await chargeToRoomRoute(roomChargeRequest(key, {
+        folioId,
+        items: [{ menuItemId: "item-a-burger", quantity: 1 }],
+      }));
+      const result = await res.json();
+      expect(res.status).toBe(400);
+      expect(result.outcome).toBe("NOT_COMMITTED");
+    }
+    expect(db.orders.size).toBe(0);
+    expect(db.locks).toHaveLength(0);
   });
 
   it("18. Server status inquiry rejects invalid or missing idempotency key with 400", async () => {

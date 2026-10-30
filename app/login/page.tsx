@@ -1,9 +1,11 @@
 "use client";
 
-import { useState } from "react";
-import Image from "next/image";
+import { useEffect, useState } from "react";
+import Link from "next/link";
 import { signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
+import HotelFlowBrand from "@/components/HotelFlowBrand";
+import { PRODUCT_NAME } from "@/lib/brand";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -12,41 +14,51 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("error") === "DATABASE_UNAVAILABLE") {
+      setError("Sign-in and dashboard features are unavailable in offline preview because no database is configured.");
+    }
+  }, []);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setLoading(true);
 
-    const result = await signIn("credentials", {
-      email,
-      password,
-      redirect: false,
-    });
+    try {
+      const result = await signIn("credentials", {
+        email,
+        password,
+        redirect: false,
+      });
 
-    setLoading(false);
-
-    if (result?.error) {
-      setError("Incorrect email or password. Please try again.");
-      return;
+      if (result?.error) {
+        setError(
+          result.error === "Configuration" || result.error === "DATABASE_UNAVAILABLE"
+            ? "Sign-in is unavailable because the database is not configured."
+            : "Incorrect email or password. Please try again."
+        );
+        return;
+      }
+      router.push("/dashboard");
+      router.refresh();
+    } catch {
+      setError("Could not reach the sign-in service. Please try again when it is available.");
+    } finally {
+      setLoading(false);
     }
-    router.push("/dashboard");
-    router.refresh();
   }
 
   return (
     <main className="min-h-screen bg-bg flex items-center justify-center p-4">
       <div className="card w-full max-w-sm">
-        <Image
-          src="/axis-hotel-logo.png"
-          alt="Axis Hotel Nakuru"
-          width={302}
-          height={312}
-          priority
-          className="w-36 h-auto mx-auto mb-4 rounded-xl"
-        />
+        <div className="mb-6 flex justify-center">
+          <HotelFlowBrand />
+        </div>
         <h1 className="mb-1 text-center">Welcome back</h1>
         <p className="text-text-secondary text-sm mb-6 text-center">
-          Sign in to Axis Hotel management.
+          Sign in to your hotel management workspace.
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -92,10 +104,10 @@ export default function LoginPage() {
         </form>
 
         <div className="mt-6 text-center text-xs text-text-secondary border-t border-border pt-4">
-          Registering a new hotel?{" "}
-          <a href="/register" className="text-primary-600 hover:underline font-medium">
-            Create an owner account
-          </a>
+          New to {PRODUCT_NAME}?{" "}
+          <Link href="/register" className="text-primary-600 hover:underline font-medium">
+            Create your hotel account.
+          </Link>
         </div>
       </div>
     </main>

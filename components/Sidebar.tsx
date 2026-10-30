@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import Image from "next/image";
 import Link from "next/link";
+import HotelFlowBrand from "@/components/HotelFlowBrand";
+import { PRODUCT_NAME } from "@/lib/brand";
 import { usePathname } from "next/navigation";
 import type { HotelRole } from "@prisma/client";
 import {
@@ -107,19 +108,17 @@ export default function Sidebar({
       >
         <Link
           href="/dashboard"
-          className="flex w-full items-center justify-center"
-          aria-label="Axis Hotel dashboard"
+          className={clsx(
+            "flex w-full items-center justify-center",
+            collapsed ? "px-1" : "px-2"
+          )}
+          aria-label={`${PRODUCT_NAME} dashboard`}
         >
-          <Image
-            src="/axis-hotel-mark.png"
-            alt="Axis Hotel Nakuru"
-            width={302}
-            height={312}
-            priority
-            className={clsx(
-              "h-auto shrink-0 object-contain",
-              collapsed ? "w-14" : "w-24"
-            )}
+          <HotelFlowBrand
+            iconOnly={collapsed}
+            className={collapsed ? "justify-center" : "justify-start"}
+            iconClassName={clsx(collapsed ? "h-11 w-11" : "h-10 w-10", "rounded-lg")}
+            light
           />
         </Link>
       </div>

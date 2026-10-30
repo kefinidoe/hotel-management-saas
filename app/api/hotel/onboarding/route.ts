@@ -2,10 +2,32 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { isDatabaseConfigured } from "@/lib/db-safety-guard";
 import { HotelRole, MembershipStatus } from "@prisma/client";
 
 const SLUG_REGEX = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SUPPORTED_CURRENCIES = ["KES", "USD", "EUR", "GBP", "TZS", "UGX", "RWF", "ZAR", "AED"];
+
+function isValidTimeZone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isSlugUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("code" in error) || error.code !== "P2002") {
+    return false;
+  }
+
+  const target = "meta" in error && error.meta && typeof error.meta === "object" && "target" in error.meta
+    ? error.meta.target
+    : undefined;
+  if (Array.isArray(target)) return target.some((field) => String(field).toLowerCase().includes("slug"));
+  return typeof target === "string" && target.toLowerCase().includes("slug");
+}
 
 function slugify(text: string): string {
   return text
@@ -27,6 +49,13 @@ export async function POST(req: Request) {
   }
 
   const userId = session.user.id;
+
+  if (!isDatabaseConfigured()) {
+    return NextResponse.json(
+      { error: "DATABASE_UNAVAILABLE", message: "Hotel setup is unavailable while the database is not configured." },
+      { status: 503 }
+    );
+  }
 
   // Verify user is active in database
   const user = await prisma.user.findUnique({
@@ -91,9 +120,9 @@ export async function POST(req: Request) {
     );
   }
 
-  if (timezone.length < 2 || timezone.length > 60) {
+  if (timezone.length < 2 || timezone.length > 60 || !isValidTimeZone(timezone)) {
     return NextResponse.json(
-      { error: "INVALID_TIMEZONE", message: "A valid timezone identifier is required." },
+      { error: "INVALID_TIMEZONE", message: "A valid IANA timezone identifier is required." },
       { status: 400 }
     );
   }
@@ -179,7 +208,7 @@ export async function POST(req: Request) {
 
     return response;
   } catch (error: any) {
-    if (error?.message === "SLUG_ALREADY_EXISTS") {
+    if (error?.message === "SLUG_ALREADY_EXISTS" || isSlugUniqueViolation(error)) {
       return NextResponse.json(
         {
           error: "SLUG_ALREADY_EXISTS",

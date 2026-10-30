@@ -14,6 +14,14 @@
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { generatePassword, passwordProblem } from "../lib/password";
+import { assertDatabaseSafety } from "../lib/db-safety-guard";
+
+const initialArgs = process.argv.slice(2);
+if (initialArgs.length > 0 && initialArgs[0] !== "--help" && initialArgs[0] !== "-h") {
+  // This standalone Prisma client bypasses lib/prisma.ts, so enforce the same
+  // fail-closed target check before any account lookup or password write.
+  assertDatabaseSafety();
+}
 
 const prisma = new PrismaClient();
 

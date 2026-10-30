@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll } from "vitest";
 import { readFileSync } from "fs";
+import { tenantPOSStorageKey } from "@/lib/pos-checkout-ownership";
 import { join } from "path";
 
 vi.doMock("clsx", () => ({
@@ -30,6 +31,8 @@ vi.doMock("@/lib/permissions", () => ({
 vi.doMock("@/lib/menu-categories", () => ({
   isRequiredMenuCategory: () => false,
 }));
+
+const TEST_POS_STORAGE_KEY = tenantPOSStorageKey("hotel-a");
 
 let validatePendingSnapshot: any;
 let POS_SNAPSHOT_TTL_MS: number;
@@ -72,17 +75,19 @@ describe("Phase 4B.7: Restaurant POS Frontend Source & Safety Audit", () => {
     expect(source).toContain("Payment status is uncertain. Do not clear the order until this attempt is verified.");
   });
 
-  it("Task 1.5: Persists pending checkouts durably in localStorage with sessionStorage fallback", () => {
-    expect(source).toContain("hms_pos_pending_attempt_v1");
-    expect(source).toContain("localStorage.setItem");
-    expect(source).toContain("localStorage.getItem");
-    expect(source).toContain("sessionStorage.setItem");
+  it("Task 1.5: Claims pending checkouts durably in shared localStorage with a tab-local session mirror", () => {
+    expect(source).toContain("tenantPOSStorageKey(activeTenantId)");
+    expect(source).toContain("const pendingStorageKey = tenantPOSStorageKey(activeTenantId)");
+    expect(source).toContain("attempts.readRaw(POS_LEGACY_STORAGE_KEY)");
+    expect(source).toContain("window.sessionStorage?.setItem(storageKey, JSON.stringify(snapshot))");
+    expect(source).toContain("await withCurrentPOSOwnership(async (attempts)");
+    expect(source).toContain("attempts.claim(activeSnapshot, validateCurrentTenantSnapshot, samePendingRequest)");
   });
 
-  it("Task 1.6: Preserves recovery storage on IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD", () => {
-    expect(source).toContain('data?.code === "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD"');
-    // Does NOT clear storage on payload mismatch:
-    expect(source).not.toMatch(/IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD[\s\S]{1,100}clearPendingAttemptStorage/);
+  it("Task 1.6: Preserves the exact room attempt on conflict and clears only under ownership", () => {
+    expect(source).toContain('activeSnapshot.status = response?.outcome === "CONFLICT" ? "PAYLOAD_MISMATCH" : "UNCERTAIN"');
+    expect(source).toContain("attempts.clearIfOwned(attempt, validatePendingSnapshot, samePendingRequest)");
+    expect(source).not.toContain("clearPendingAttemptStorage();");
   });
 
   it("Task 1.7: Provides server reconciliation endpoint integration", () => {
@@ -91,15 +96,21 @@ describe("Phase 4B.7: Restaurant POS Frontend Source & Safety Audit", () => {
     expect(source).toContain("Check Server Status");
   });
 
-  it("Task 1.8: Implements multi-tab cross-tab synchronization and Web Locks guard", () => {
+  it("Task 1.8: Implements protected storage events and mandatory Web Locks coordination", () => {
+    const ownershipSource = readFileSync(join(__dirname, "..", "..", "lib", "pos-checkout-ownership.ts"), "utf8");
     expect(source).toContain("window.addEventListener(\"storage\"");
+    expect(source).toContain("This tab will not replace or submit over it.");
     expect(source).toContain("BroadcastChannel");
-    expect(source).toContain("hms_pos_checkout_lock");
+    expect(ownershipSource).toContain("hms_pos_checkout_lock");
+    expect(ownershipSource).toContain("POS_CHECKOUT_LOCK_NAME");
+    expect(ownershipSource).toContain("POS_TENANT_LOCK_PREFIX");
   });
 });
 
 describe("Phase 4B.7: validatePendingSnapshot Validation & Expiry Rules", () => {
   const validSnapshot = {
+    hotelId: "hotel-a",
+    operation: "PAY_NOW" as const,
     idempotencyKey: "123e4567-e89b-12d3-a456-426614174000",
     items: [{ menuItemId: "item-1", name: "Burger", unitPrice: 500, quantity: 2 }],
     paymentMethodId: "pm-cash",
@@ -219,9 +230,9 @@ describe("Phase 4B.7: Multi-Tab Safety, Reconciliation, and Conflict Simulator",
       this.pendingAttempt = null;
       this.cart = [];
 
-      let stored = this.localStorage.getItem("hms_pos_pending_attempt_v1");
+      let stored = this.localStorage.getItem(TEST_POS_STORAGE_KEY);
       if (!stored) {
-        stored = this.sessionStorage.getItem("hms_pos_pending_attempt_v1");
+        stored = this.sessionStorage.getItem(TEST_POS_STORAGE_KEY);
       }
 
       if (stored) {
@@ -249,8 +260,8 @@ describe("Phase 4B.7: Multi-Tab Safety, Reconciliation, and Conflict Simulator",
       const res = await mockStatusApi(this.pendingAttempt.idempotencyKey);
       if (res.ok && res.data.found) {
         this.checkoutState = "CONFIRMED_SUCCESS";
-        this.localStorage.removeItem("hms_pos_pending_attempt_v1");
-        this.sessionStorage.removeItem("hms_pos_pending_attempt_v1");
+        this.localStorage.removeItem(TEST_POS_STORAGE_KEY);
+        this.sessionStorage.removeItem(TEST_POS_STORAGE_KEY);
         this.pendingAttempt = null;
         this.cart = [];
         this.checkoutState = "READY";
@@ -263,8 +274,8 @@ describe("Phase 4B.7: Multi-Tab Safety, Reconciliation, and Conflict Simulator",
     }
 
     dismissVerifiedFailure() {
-      this.localStorage.removeItem("hms_pos_pending_attempt_v1");
-      this.sessionStorage.removeItem("hms_pos_pending_attempt_v1");
+      this.localStorage.removeItem(TEST_POS_STORAGE_KEY);
+      this.sessionStorage.removeItem(TEST_POS_STORAGE_KEY);
       this.pendingAttempt = null;
       this.cart = [];
       this.checkoutState = "READY";
@@ -277,7 +288,7 @@ describe("Phase 4B.7: Multi-Tab Safety, Reconciliation, and Conflict Simulator",
 
       // Terminal-wide multi-tab check: Ensure no other checkout is active
       if (!this.pendingAttempt) {
-        const existingRaw = this.localStorage.getItem("hms_pos_pending_attempt_v1");
+        const existingRaw = this.localStorage.getItem(TEST_POS_STORAGE_KEY);
         if (existingRaw) {
           const validated = validatePendingSnapshot(JSON.parse(existingRaw));
           if (validated) {
@@ -297,6 +308,8 @@ describe("Phase 4B.7: Multi-Tab Safety, Reconciliation, and Conflict Simulator",
       let activeSnapshot = this.pendingAttempt;
       if (!activeSnapshot) {
         activeSnapshot = {
+          hotelId: "hotel-a",
+          operation: "PAY_NOW" as const,
           idempotencyKey: crypto.randomUUID(),
           items: [...this.cart],
           paymentMethodId: this.methodId,
@@ -307,8 +320,8 @@ describe("Phase 4B.7: Multi-Tab Safety, Reconciliation, and Conflict Simulator",
         };
         this.pendingAttempt = activeSnapshot;
         const serialized = JSON.stringify(activeSnapshot);
-        this.localStorage.setItem("hms_pos_pending_attempt_v1", serialized);
-        this.sessionStorage.setItem("hms_pos_pending_attempt_v1", serialized);
+        this.localStorage.setItem(TEST_POS_STORAGE_KEY, serialized);
+        this.sessionStorage.setItem(TEST_POS_STORAGE_KEY, serialized);
       }
 
       this.requestsMade.push({
@@ -321,8 +334,8 @@ describe("Phase 4B.7: Multi-Tab Safety, Reconciliation, and Conflict Simulator",
 
         if (res.ok) {
           this.checkoutState = "CONFIRMED_SUCCESS";
-          this.localStorage.removeItem("hms_pos_pending_attempt_v1");
-          this.sessionStorage.removeItem("hms_pos_pending_attempt_v1");
+          this.localStorage.removeItem(TEST_POS_STORAGE_KEY);
+          this.sessionStorage.removeItem(TEST_POS_STORAGE_KEY);
           this.pendingAttempt = null;
           this.cart = [];
           this.checkoutState = "READY";
@@ -331,8 +344,8 @@ describe("Phase 4B.7: Multi-Tab Safety, Reconciliation, and Conflict Simulator",
 
         if (res.status === 400 || res.status === 403) {
           this.checkoutState = "CONFIRMED_FAILURE";
-          this.localStorage.removeItem("hms_pos_pending_attempt_v1");
-          this.sessionStorage.removeItem("hms_pos_pending_attempt_v1");
+          this.localStorage.removeItem(TEST_POS_STORAGE_KEY);
+          this.sessionStorage.removeItem(TEST_POS_STORAGE_KEY);
           this.pendingAttempt = null;
           this.checkoutState = "READY";
           return { error: res.body?.error || "Validation failure" };
@@ -346,15 +359,15 @@ describe("Phase 4B.7: Multi-Tab Safety, Reconciliation, and Conflict Simulator",
             // Task 1.2: Do NOT clear storage! Preserve attempt in PENDING_VERIFICATION
             this.checkoutState = "PENDING_VERIFICATION";
             activeSnapshot.status = "PAYLOAD_MISMATCH";
-            this.localStorage.setItem("hms_pos_pending_attempt_v1", JSON.stringify(activeSnapshot));
+            this.localStorage.setItem(TEST_POS_STORAGE_KEY, JSON.stringify(activeSnapshot));
             return { error: res.body.error, preserved: true };
           }
 
           if (res.body?.code === "DATABASE_UNIQUE_CONSTRAINT_CONFLICT") {
             // Unrelated unique constraint violation: definitive rollback
             this.checkoutState = "CONFIRMED_FAILURE";
-            this.localStorage.removeItem("hms_pos_pending_attempt_v1");
-            this.sessionStorage.removeItem("hms_pos_pending_attempt_v1");
+            this.localStorage.removeItem(TEST_POS_STORAGE_KEY);
+            this.sessionStorage.removeItem(TEST_POS_STORAGE_KEY);
             this.pendingAttempt = null;
             this.checkoutState = "READY";
             return { error: res.body?.error || "Database unique constraint conflict" };
@@ -385,9 +398,9 @@ describe("Phase 4B.7: Multi-Tab Safety, Reconciliation, and Conflict Simulator",
     expect(pos.checkoutState).toBe("PENDING_VERIFICATION");
 
     // Manually backdate snapshot timestamp to 26 hours ago (expired)
-    const stored = JSON.parse(pos.localStorage.getItem("hms_pos_pending_attempt_v1")!);
+    const stored = JSON.parse(pos.localStorage.getItem(TEST_POS_STORAGE_KEY)!);
     stored.timestamp = Date.now() - (26 * 60 * 60 * 1000);
-    pos.localStorage.setItem("hms_pos_pending_attempt_v1", JSON.stringify(stored));
+    pos.localStorage.setItem(TEST_POS_STORAGE_KEY, JSON.stringify(stored));
 
     // Reload 1 (e.g. next morning)
     pos.reloadTerminal();
@@ -428,7 +441,7 @@ describe("Phase 4B.7: Multi-Tab Safety, Reconciliation, and Conflict Simulator",
     expect(pos.checkoutState).toBe("PENDING_VERIFICATION");
     expect(pos.pendingAttempt).not.toBeNull();
     expect(pos.pendingAttempt.idempotencyKey).toBe(key);
-    expect(pos.localStorage.getItem("hms_pos_pending_attempt_v1")).not.toBeNull();
+    expect(pos.localStorage.getItem(TEST_POS_STORAGE_KEY)).not.toBeNull();
     expect(() => pos.addItem("item-2", "Soda", 100)).toThrow("MUTATION_BLOCKED");
   });
 
@@ -456,7 +469,7 @@ describe("Phase 4B.7: Multi-Tab Safety, Reconciliation, and Conflict Simulator",
     expect(tab2Res.rejected).toBe("ANOTHER_TAB_PENDING_ON_TERMINAL");
     expect(tab2.checkoutState).toBe("PENDING_VERIFICATION");
     // Tab 1's snapshot in shared storage was NOT overwritten!
-    const activeStored = JSON.parse(sharedStorage.getItem("hms_pos_pending_attempt_v1")!);
+    const activeStored = JSON.parse(sharedStorage.getItem(TEST_POS_STORAGE_KEY)!);
     expect(activeStored.items[0].name).toBe("Burger");
   });
 
@@ -485,7 +498,7 @@ describe("Phase 4B.7: Multi-Tab Safety, Reconciliation, and Conflict Simulator",
     expect(reconRes?.reconciled).toBe(true);
     expect(pos.checkoutState).toBe("READY");
     expect(pos.pendingAttempt).toBeNull();
-    expect(pos.localStorage.getItem("hms_pos_pending_attempt_v1")).toBeNull();
+    expect(pos.localStorage.getItem(TEST_POS_STORAGE_KEY)).toBeNull();
   });
 
   it("5. Server reconciliation confirms payment was NOT recorded: allows safe cashier dismissal", async () => {
@@ -510,7 +523,7 @@ describe("Phase 4B.7: Multi-Tab Safety, Reconciliation, and Conflict Simulator",
     pos.dismissVerifiedFailure();
     expect(pos.checkoutState).toBe("READY");
     expect(pos.pendingAttempt).toBeNull();
-    expect(pos.localStorage.getItem("hms_pos_pending_attempt_v1")).toBeNull();
+    expect(pos.localStorage.getItem(TEST_POS_STORAGE_KEY)).toBeNull();
   });
 
   it("6. Unrelated database unique constraint violation clears storage and unlocks without false success", async () => {
@@ -528,7 +541,7 @@ describe("Phase 4B.7: Multi-Tab Safety, Reconciliation, and Conflict Simulator",
 
     expect(pos.checkoutState).toBe("READY");
     expect(pos.pendingAttempt).toBeNull();
-    expect(pos.localStorage.getItem("hms_pos_pending_attempt_v1")).toBeNull();
+    expect(pos.localStorage.getItem(TEST_POS_STORAGE_KEY)).toBeNull();
     expect(res.error).toContain("unique record constraint violation");
     expect(() => pos.addItem("item-2", "Soda", 100)).not.toThrow();
   });

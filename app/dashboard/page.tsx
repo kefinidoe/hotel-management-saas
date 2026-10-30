@@ -1,5 +1,6 @@
-import { getTenantContext } from "@/lib/tenant-context";
 import { prisma } from "@/lib/prisma";
+import { requirePageRole } from "@/lib/page-auth";
+import { hasRole, ROLE_GROUPS } from "@/lib/permissions";
 import Link from "next/link";
 import {
   BedDouble,
@@ -25,7 +26,8 @@ function endOfToday() {
 }
 
 export default async function DashboardPage() {
-  const context = await getTenantContext();
+  const context = await requirePageRole(ROLE_GROUPS.ALL_STAFF, "RESERVATIONS");
+  const canViewFinancials = hasRole(context.role, ROLE_GROUPS.FINANCIAL_REPORTS);
   const hotelId = context.hotelId;
   const currencySymbol = context.hotel.currency || "KES";
 
@@ -61,22 +63,28 @@ export default async function DashboardPage() {
         status: "CHECKED_IN",
       },
     }),
-    prisma.payment.aggregate({
-      _sum: { amount: true },
-      where: {
-        hotelId,
-        createdAt: { gte: todayStart, lt: todayEnd },
-        status: "COMPLETED",
-      },
-    }),
-    prisma.folioItem.aggregate({
-      _sum: { total: true },
-      where: { folio: { hotelId } },
-    }),
-    prisma.payment.aggregate({
-      _sum: { amount: true },
-      where: { hotelId, status: "COMPLETED" },
-    }),
+    canViewFinancials
+      ? prisma.payment.aggregate({
+          _sum: { amount: true },
+          where: {
+            hotelId,
+            createdAt: { gte: todayStart, lt: todayEnd },
+            status: "COMPLETED",
+          },
+        })
+      : Promise.resolve({ _sum: { amount: null } }),
+    canViewFinancials
+      ? prisma.folioItem.aggregate({
+          _sum: { total: true },
+          where: { folio: { hotelId } },
+        })
+      : Promise.resolve({ _sum: { total: null } }),
+    canViewFinancials
+      ? prisma.payment.aggregate({
+          _sum: { amount: true },
+          where: { hotelId, status: "COMPLETED" },
+        })
+      : Promise.resolve({ _sum: { amount: null } }),
     prisma.hotelMembership.count({
       where: { hotelId, status: "ACTIVE" },
     }),
@@ -94,11 +102,19 @@ export default async function DashboardPage() {
 
   const kpis = [
     { label: "Occupancy", value: `${occupancyPct}%`, sub: `${occupiedRooms} of ${totalRooms} rooms occupied` },
-    { label: "Today's Revenue", value: `${currencySymbol} ${todaysRevenue.toLocaleString()}`, sub: "Payments received today" },
+    ...(canViewFinancials
+      ? [
+          { label: "Today's Revenue", value: `${currencySymbol} ${todaysRevenue.toLocaleString()}`, sub: "Payments received today" },
+        ]
+      : []),
     { label: "Available Rooms", value: String(availableRooms), sub: `of ${totalRooms} total` },
     { label: "Arrivals", value: String(arrivalsToday), sub: "expected today" },
     { label: "Departures", value: String(departuresToday), sub: "expected today" },
-    { label: "Outstanding Balance", value: `${currencySymbol} ${outstandingBalance.toLocaleString()}`, sub: "across all unpaid folios" },
+    ...(canViewFinancials
+      ? [
+          { label: "Outstanding Balance", value: `${currencySymbol} ${outstandingBalance.toLocaleString()}`, sub: "across all unpaid folios" },
+        ]
+      : []),
   ];
 
   return (
