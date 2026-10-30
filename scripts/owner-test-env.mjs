@@ -304,6 +304,11 @@ async function commandApp() {
         SAAS_DATABASE_IDENTIFIER: DATABASE,
         NEXTAUTH_URL: baseUrl,
         NEXTAUTH_SECRET: process.env.NEXTAUTH_SECRET ?? randomIntSecret(),
+        // The demo may be reached through a tunnel/preview host that is not
+        // NEXTAUTH_URL. Without this the app answers its own fetch() calls with
+        // 403 and hotel switching looks broken. It is a demo-only setting and is
+        // not set by the production checklist.
+        SAAS_ALLOW_REQUEST_HOST_ORIGIN: "true",
       },
     }
   );

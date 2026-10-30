@@ -33,6 +33,7 @@ shape; none of the values belong in Git.
 | `DIRECT_URL` | yes | Direct (non-pooled) URL, used by migrations |
 | `NEXTAUTH_SECRET` | yes | 32+ random bytes. Rotating it signs everybody out |
 | `NEXTAUTH_URL` | yes | Exact public origin, `https://…`, no trailing slash. The CSRF guard compares against it |
+| `SAAS_ALLOW_REQUEST_HOST_ORIGIN` | **never in production** | Leave unset. It exists for hosted previews whose URL differs from `NEXTAUTH_URL`; setting it makes the guard trust the request's own `Host` as the origin |
 | `SAAS_ENVIRONMENT` | yes | `saas` in production (`local` only for the demo seeder) |
 | `SAAS_DATABASE_IDENTIFIER` | yes | Must match the real database name; the safety guard compares it to `DATABASE_URL` |
 | `NODE_ENV` | yes | `production` |

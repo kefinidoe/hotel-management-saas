@@ -1,40 +1,40 @@
 {
   "target": "http://127.0.0.1:3101",
-  "startedAt": "2026-10-30T18:49:59.252Z",
-  "finishedAt": "2026-10-30T18:51:21.276Z",
+  "startedAt": "2026-10-30T18:55:52.285Z",
+  "finishedAt": "2026-10-30T18:57:15.616Z",
   "browser": "HeadlessChrome/153.0.8010.0",
   "databaseAssertions": "enabled (psql)",
   "fixtures": {
-    "hotelA": "Aurora Lodge 1793386199252",
-    "hotelB": "Bayside Inn 1793386199252",
+    "hotelA": "Aurora Lodge 1793386552285",
+    "hotelB": "Bayside Inn 1793386552285",
     "ownerA": {
       "name": "Amina Owner",
-      "email": "owner-a-1793386199252@example.test",
+      "email": "owner-a-1793386552285@example.test",
       "password": "OwnerPass123!"
     },
     "ownerB": {
       "name": "Bram Owner",
-      "email": "owner-b-1793386199252@example.test",
+      "email": "owner-b-1793386552285@example.test",
       "password": "OwnerPass123!"
     },
     "receptionist": {
       "name": "Ruth Reception",
-      "email": "reception-a-1793386199252@example.test",
+      "email": "reception-a-1793386552285@example.test",
       "password": "Reception123!"
     },
     "guest": {
-      "name": "Grace Guest 1793386199252",
+      "name": "Grace Guest 1793386552285",
       "phone": "+254711000111"
     },
     "futureGuest": {
-      "name": "Felix Future 1793386199252",
+      "name": "Felix Future 1793386552285",
       "phone": "+254711000222"
     },
     "roomNumber": "101",
-    "menuItem": "Mandazi 99252",
-    "menuCategory": "Counter 99252",
-    "inventoryItem": "Maize Flour 99252",
-    "ticket": "Shower leaking 99252"
+    "menuItem": "Mandazi 52285",
+    "menuCategory": "Counter 52285",
+    "inventoryItem": "Maize Flour 52285",
+    "ticket": "Shower leaking 52285"
   },
   "totals": {
     "steps": 33,
@@ -42,271 +42,271 @@
     "failed": 0
   },
   "screenshots": [
-    "/tmp/browser-shots/01-hotel-a-register.png",
-    "/tmp/browser-shots/02-hotel-a-dashboard.png",
-    "/tmp/browser-shots/03-rooms-create-type.png",
-    "/tmp/browser-shots/04-rooms-create-room.png",
-    "/tmp/browser-shots/05-staff-add-new-account.png",
-    "/tmp/browser-shots/06-hotel-b-register.png",
-    "/tmp/browser-shots/07-tenant-isolation-a.png",
-    "/tmp/browser-shots/08-invitation-sent.png",
-    "/tmp/browser-shots/09-invitation-not-yet-access.png",
-    "/tmp/browser-shots/10-invitation-accepted.png",
-    "/tmp/browser-shots/11-hotel-switch.png",
-    "/tmp/browser-shots/12-role-sign-in.png",
-    "/tmp/browser-shots/13-role-navigation.png",
-    "/tmp/browser-shots/14-role-direct-url-denied.png",
-    "/tmp/browser-shots/15-reservation-create.png",
-    "/tmp/browser-shots/16-check-in.png",
-    "/tmp/browser-shots/17-folio-payment-checkout.png",
-    "/tmp/browser-shots/18-housekeeping-task.png",
-    "/tmp/browser-shots/19-maintenance-ticket.png",
-    "/tmp/browser-shots/20-inventory-item.png",
-    "/tmp/browser-shots/21-pos-sale.png",
-    "/tmp/browser-shots/22-reservation-create-future.png",
-    "/tmp/browser-shots/23-reservation-cancel.png",
-    "/tmp/browser-shots/24-inventory-recipe.png",
-    "/tmp/browser-shots/25-staff-suspend-and-reactivate.png",
-    "/tmp/browser-shots/26-notifications-bell.png",
-    "/tmp/browser-shots/27-audit-trail.png",
-    "/tmp/browser-shots/28-inventory-purchase-and-movement.png",
-    "/tmp/browser-shots/29-inventory-wastage.png",
-    "/tmp/browser-shots/30-reports-render.png",
-    "/tmp/browser-shots/31-subscription-render.png",
-    "/tmp/browser-shots/32-tenant-isolation-b.png",
-    "/tmp/browser-shots/33-sign-out.png"
+    "/tmp/shots2/01-hotel-a-register.png",
+    "/tmp/shots2/02-hotel-a-dashboard.png",
+    "/tmp/shots2/03-rooms-create-type.png",
+    "/tmp/shots2/04-rooms-create-room.png",
+    "/tmp/shots2/05-staff-add-new-account.png",
+    "/tmp/shots2/06-hotel-b-register.png",
+    "/tmp/shots2/07-tenant-isolation-a.png",
+    "/tmp/shots2/08-invitation-sent.png",
+    "/tmp/shots2/09-invitation-not-yet-access.png",
+    "/tmp/shots2/10-invitation-accepted.png",
+    "/tmp/shots2/11-hotel-switch.png",
+    "/tmp/shots2/12-role-sign-in.png",
+    "/tmp/shots2/13-role-navigation.png",
+    "/tmp/shots2/14-role-direct-url-denied.png",
+    "/tmp/shots2/15-reservation-create.png",
+    "/tmp/shots2/16-check-in.png",
+    "/tmp/shots2/17-folio-payment-checkout.png",
+    "/tmp/shots2/18-housekeeping-task.png",
+    "/tmp/shots2/19-maintenance-ticket.png",
+    "/tmp/shots2/20-inventory-item.png",
+    "/tmp/shots2/21-pos-sale.png",
+    "/tmp/shots2/22-reservation-create-future.png",
+    "/tmp/shots2/23-reservation-cancel.png",
+    "/tmp/shots2/24-inventory-recipe.png",
+    "/tmp/shots2/25-staff-suspend-and-reactivate.png",
+    "/tmp/shots2/26-notifications-bell.png",
+    "/tmp/shots2/27-audit-trail.png",
+    "/tmp/shots2/28-inventory-purchase-and-movement.png",
+    "/tmp/shots2/29-inventory-wastage.png",
+    "/tmp/shots2/30-reports-render.png",
+    "/tmp/shots2/31-subscription-render.png",
+    "/tmp/shots2/32-tenant-isolation-b.png",
+    "/tmp/shots2/33-sign-out.png"
   ],
   "steps": [
     {
       "id": "hotel-a-register",
       "description": "register Hotel A's owner and create the workspace through the UI",
       "status": "PASS",
-      "ms": 2854,
-      "screenshot": "/tmp/browser-shots/01-hotel-a-register.png"
+      "ms": 2978,
+      "screenshot": "/tmp/shots2/01-hotel-a-register.png"
     },
     {
       "id": "hotel-a-dashboard",
       "description": "the dashboard shows the hotel, the owner and the setup checklist",
       "status": "PASS",
-      "ms": 463,
-      "screenshot": "/tmp/browser-shots/02-hotel-a-dashboard.png"
+      "ms": 402,
+      "screenshot": "/tmp/shots2/02-hotel-a-dashboard.png"
     },
     {
       "id": "rooms-create-type",
       "description": "create a room type from the Rooms page",
       "status": "PASS",
-      "ms": 1362,
-      "screenshot": "/tmp/browser-shots/03-rooms-create-type.png"
+      "ms": 1807,
+      "screenshot": "/tmp/shots2/03-rooms-create-type.png"
     },
     {
       "id": "rooms-create-room",
       "description": "create room 101 of that type and see it listed",
       "status": "PASS",
-      "ms": 2214,
-      "screenshot": "/tmp/browser-shots/04-rooms-create-room.png"
+      "ms": 1834,
+      "screenshot": "/tmp/shots2/04-rooms-create-room.png"
     },
     {
       "id": "staff-add-new-account",
       "description": "add a receptionist who has no account yet",
       "status": "PASS",
-      "ms": 1723,
-      "screenshot": "/tmp/browser-shots/05-staff-add-new-account.png"
+      "ms": 1867,
+      "screenshot": "/tmp/shots2/05-staff-add-new-account.png"
     },
     {
       "id": "hotel-b-register",
       "description": "a second hotel is created by a different owner in a separate browser",
       "status": "PASS",
-      "ms": 2783,
-      "screenshot": "/tmp/browser-shots/06-hotel-b-register.png"
+      "ms": 2908,
+      "screenshot": "/tmp/shots2/06-hotel-b-register.png"
     },
     {
       "id": "tenant-isolation-a",
       "description": "Hotel A's owner sees no trace of Hotel B",
       "status": "PASS",
-      "ms": 1957,
-      "screenshot": "/tmp/browser-shots/07-tenant-isolation-a.png"
+      "ms": 2308,
+      "screenshot": "/tmp/shots2/07-tenant-isolation-a.png"
     },
     {
       "id": "invitation-sent",
       "description": "Hotel A invites an existing account from the Staff page",
       "status": "PASS",
-      "ms": 1656,
-      "screenshot": "/tmp/browser-shots/08-invitation-sent.png"
+      "ms": 1738,
+      "screenshot": "/tmp/shots2/08-invitation-sent.png"
     },
     {
       "id": "invitation-not-yet-access",
       "description": "the invitee is offered the invitation but not the workspace",
       "status": "PASS",
-      "ms": 781,
-      "screenshot": "/tmp/browser-shots/09-invitation-not-yet-access.png"
+      "ms": 1179,
+      "screenshot": "/tmp/shots2/09-invitation-not-yet-access.png"
     },
     {
       "id": "invitation-accepted",
       "description": "the invitee accepts from /select-hotel",
       "status": "PASS",
-      "ms": 219,
-      "screenshot": "/tmp/browser-shots/10-invitation-accepted.png"
+      "ms": 173,
+      "screenshot": "/tmp/shots2/10-invitation-accepted.png"
     },
     {
       "id": "hotel-switch",
       "description": "the invitee switches into Hotel A and back to Hotel B",
       "status": "PASS",
-      "ms": 2760,
-      "screenshot": "/tmp/browser-shots/11-hotel-switch.png"
+      "ms": 2248,
+      "screenshot": "/tmp/shots2/11-hotel-switch.png"
     },
     {
       "id": "role-sign-in",
       "description": "the receptionist signs in and sees their hotel",
       "status": "PASS",
-      "ms": 1912,
-      "screenshot": "/tmp/browser-shots/12-role-sign-in.png"
+      "ms": 1931,
+      "screenshot": "/tmp/shots2/12-role-sign-in.png"
     },
     {
       "id": "role-navigation",
       "description": "the receptionist's navigation hides administration pages",
       "status": "PASS",
-      "ms": 135,
-      "screenshot": "/tmp/browser-shots/13-role-navigation.png"
+      "ms": 141,
+      "screenshot": "/tmp/shots2/13-role-navigation.png"
     },
     {
       "id": "role-direct-url-denied",
       "description": "typing the admin URL directly is refused, not merely hidden",
       "status": "PASS",
-      "ms": 1194,
-      "screenshot": "/tmp/browser-shots/14-role-direct-url-denied.png"
+      "ms": 1159,
+      "screenshot": "/tmp/shots2/14-role-direct-url-denied.png"
     },
     {
       "id": "reservation-create",
       "description": "the owner books a guest into room 101 through the UI",
       "status": "PASS",
-      "ms": 1761,
-      "screenshot": "/tmp/browser-shots/15-reservation-create.png"
+      "ms": 1915,
+      "screenshot": "/tmp/shots2/15-reservation-create.png"
     },
     {
       "id": "check-in",
       "description": "front desk checks the guest in and opens the folio",
       "status": "PASS",
-      "ms": 1422,
-      "screenshot": "/tmp/browser-shots/16-check-in.png"
+      "ms": 1852,
+      "screenshot": "/tmp/shots2/16-check-in.png"
     },
     {
       "id": "folio-payment-checkout",
       "description": "settle the folio and check the guest out",
       "status": "PASS",
-      "ms": 2956,
-      "screenshot": "/tmp/browser-shots/17-folio-payment-checkout.png"
+      "ms": 3108,
+      "screenshot": "/tmp/shots2/17-folio-payment-checkout.png"
     },
     {
       "id": "housekeeping-task",
       "description": "the checked-out room appears in housekeeping and can be moved along",
       "status": "PASS",
-      "ms": 11692,
-      "screenshot": "/tmp/browser-shots/18-housekeeping-task.png"
+      "ms": 11955,
+      "screenshot": "/tmp/shots2/18-housekeeping-task.png"
     },
     {
       "id": "maintenance-ticket",
       "description": "raise a maintenance ticket and see it under Open",
       "status": "PASS",
-      "ms": 1260,
-      "screenshot": "/tmp/browser-shots/19-maintenance-ticket.png"
+      "ms": 1362,
+      "screenshot": "/tmp/shots2/19-maintenance-ticket.png"
     },
     {
       "id": "inventory-item",
       "description": "add an inventory item and see its stock",
       "status": "PASS",
-      "ms": 1721,
-      "screenshot": "/tmp/browser-shots/20-inventory-item.png"
+      "ms": 1751,
+      "screenshot": "/tmp/shots2/20-inventory-item.png"
     },
     {
       "id": "pos-sale",
       "description": "add a menu item and take a counter payment in the restaurant POS",
       "status": "PASS",
-      "ms": 7744,
-      "screenshot": "/tmp/browser-shots/21-pos-sale.png"
+      "ms": 7039,
+      "screenshot": "/tmp/shots2/21-pos-sale.png"
     },
     {
       "id": "reservation-create-future",
       "description": "a second, future-dated booking is created for the cancellation test",
       "status": "PASS",
-      "ms": 3722,
-      "screenshot": "/tmp/browser-shots/22-reservation-create-future.png"
+      "ms": 3116,
+      "screenshot": "/tmp/shots2/22-reservation-create-future.png"
     },
     {
       "id": "reservation-cancel",
       "description": "cancelling a reservation releases the room and records the cancellation",
       "status": "PASS",
-      "ms": 4464,
-      "screenshot": "/tmp/browser-shots/23-reservation-cancel.png"
+      "ms": 4580,
+      "screenshot": "/tmp/shots2/23-reservation-cancel.png"
     },
     {
       "id": "inventory-recipe",
       "description": "creating a recipe from stock links the menu item to its ingredients",
       "status": "PASS",
-      "ms": 2914,
-      "screenshot": "/tmp/browser-shots/24-inventory-recipe.png"
+      "ms": 4009,
+      "screenshot": "/tmp/shots2/24-inventory-recipe.png"
     },
     {
       "id": "staff-suspend-and-reactivate",
       "description": "suspending a staff member and reactivating them persists",
       "status": "PASS",
-      "ms": 1787,
-      "screenshot": "/tmp/browser-shots/25-staff-suspend-and-reactivate.png"
+      "ms": 1952,
+      "screenshot": "/tmp/shots2/25-staff-suspend-and-reactivate.png"
     },
     {
       "id": "notifications-bell",
       "description": "raising a maintenance ticket raises a notification the owner can read and dismiss",
       "status": "PASS",
-      "ms": 1409,
-      "screenshot": "/tmp/browser-shots/26-notifications-bell.png"
+      "ms": 1683,
+      "screenshot": "/tmp/shots2/26-notifications-bell.png"
     },
     {
       "id": "audit-trail",
       "description": "the owner's audit trail shows the payment and check-out recorded earlier",
       "status": "PASS",
-      "ms": 1616,
-      "screenshot": "/tmp/browser-shots/27-audit-trail.png"
+      "ms": 1586,
+      "screenshot": "/tmp/shots2/27-audit-trail.png"
     },
     {
       "id": "inventory-purchase-and-movement",
       "description": "recording a purchase raises the stock and writes a stock movement",
       "status": "PASS",
-      "ms": 3834,
-      "screenshot": "/tmp/browser-shots/28-inventory-purchase-and-movement.png"
+      "ms": 3975,
+      "screenshot": "/tmp/shots2/28-inventory-purchase-and-movement.png"
     },
     {
       "id": "inventory-wastage",
       "description": "logging wastage reduces stock, records the reason and writes a movement",
       "status": "PASS",
-      "ms": 4258,
-      "screenshot": "/tmp/browser-shots/29-inventory-wastage.png"
+      "ms": 4252,
+      "screenshot": "/tmp/shots2/29-inventory-wastage.png"
     },
     {
       "id": "reports-render",
       "description": "the reports page renders revenue and collection panels",
       "status": "PASS",
-      "ms": 1476,
-      "screenshot": "/tmp/browser-shots/30-reports-render.png"
+      "ms": 1601,
+      "screenshot": "/tmp/shots2/30-reports-render.png"
     },
     {
       "id": "subscription-render",
       "description": "the subscription page shows the plan band and its limits",
       "status": "PASS",
-      "ms": 1545,
-      "screenshot": "/tmp/browser-shots/31-subscription-render.png"
+      "ms": 1776,
+      "screenshot": "/tmp/shots2/31-subscription-render.png"
     },
     {
       "id": "tenant-isolation-b",
       "description": "the second owner's workspace shows its own data only",
       "status": "PASS",
-      "ms": 1395,
-      "screenshot": "/tmp/browser-shots/32-tenant-isolation-b.png"
+      "ms": 1428,
+      "screenshot": "/tmp/shots2/32-tenant-isolation-b.png"
     },
     {
       "id": "sign-out",
       "description": "signing out ends the session and protects the dashboard",
       "status": "PASS",
-      "ms": 1142,
-      "screenshot": "/tmp/browser-shots/33-sign-out.png"
+      "ms": 975,
+      "screenshot": "/tmp/shots2/33-sign-out.png"
     }
   ]
 }
