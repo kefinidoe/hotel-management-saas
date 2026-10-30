@@ -102,8 +102,10 @@ There are 19 reviewed migrations, checksum-pinned in `prisma/migration-release-m
   For a disposable local database only, `SAAS_ENVIRONMENT=rehearsal` is accepted and requires a
   loopback host.
 - **Restore rehearsal:** `npm run migration:restore-rehearsal -- --dump <archive> --expect-sha256 <hex>`
-  checks the archive's digest *before* connecting, restores into a scratch database it creates,
-  fingerprints the result read-only, and drops the database again (`--keep` keeps it). It refuses a
+  checks the archive's digest *before* connecting, parses its table of contents with `pg_restore --list`
+  before creating anything, restores into a scratch database it creates, fingerprints the result
+  read-only, and drops the database again (`--keep` keeps it). The archive is real guest data: keep it
+  outside the repository (`*.dump` is ignored, so it cannot be committed by accident). It refuses a
   non-loopback `--base-url` unless `--allow-remote-target` is passed. Never point it at the live
   database.
 

@@ -100,6 +100,15 @@ describe("scripts/target-check.mjs — refusals before any connection", () => {
   });
 });
 
+// The preflight parses the archive with pg_restore before any database is
+// created. Proving that needs the real client, so these two skip where the
+// PostgreSQL client tools are not installed (as in CI).
+const pgToolsAvailable = (() => {
+  const psql = spawnSync("psql", ["--version"], { encoding: "utf8" });
+  const pgRestore = spawnSync("pg_restore", ["--version"], { encoding: "utf8" });
+  return psql.status === 0 && pgRestore.status === 0;
+})();
+
 describe("scripts/restore-rehearsal.mjs — refusals before the server is contacted", () => {
   it("prints usage and exits 0 for --help", () => {
     const { status, stdout } = run("restore-rehearsal.mjs", ["--help"]);
@@ -137,6 +146,26 @@ describe("scripts/restore-rehearsal.mjs — refusals before the server is contac
     expect(status).toBe(1);
     expect(stderr).toContain("does not match the recorded value");
     expect(stderr).toContain(scratchDump.digest);
+  });
+
+  it.skipIf(!pgToolsAvailable)("rejects a corrupt archive before creating any database", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "restore-rehearsal-corrupt-"));
+    const file = path.join(dir, "truncated.dump");
+    // Custom-format magic, then nothing: pg_restore's --list cannot parse it.
+    writeFileSync(file, Buffer.concat([Buffer.from("PGDMP", "latin1"), Buffer.from("truncated body")]));
+    const digest = createHash("sha256").update(readFileSync(file)).digest("hex");
+
+    const { status, stderr } = run("restore-rehearsal.mjs", [
+      "--dump",
+      file,
+      "--expect-sha256",
+      digest,
+      "--base-url",
+      "postgresql://postgres@127.0.0.1:5432",
+    ]);
+    expect(status).toBe(1);
+    expect(stderr).toContain("could not be read by pg_restore");
+    expect(stderr).toContain("no database was created");
   });
 
   it("rejects a malformed --expect-sha256", () => {
