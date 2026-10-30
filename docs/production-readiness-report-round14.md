@@ -229,3 +229,22 @@ npm run test:browser -- --base http://127.0.0.1:3000 --out docs/evidence/browser
 npm run db:integrity -- --json
 npm run native-engine:verify -- --json
 ```
+
+## Handover update (owner acceptance)
+
+After the round closed, the environment was rebuilt for the owner and re-seeded from scratch:
+
+* The shared demo password was retired. **Every account now has its own password**, issued by the
+  seeder and written to the git-ignored `.owner-test/CREDENTIALS.md` (mode 0600); `owner:env reset`
+  rotates all of them.
+* The owner account now holds memberships in **both** hotels, so hotel switching can be tested from a
+  single login. A two-hotel owner is asked to choose a workspace on first sign-in.
+* `owner:env` gained a `credentials` command, a database-name guard (with tests) that keeps `reset`
+  off any database not named `hotel_saas_demo_*`, a stable session secret written at setup, and an
+  offline build fallback for machines that cannot download Prisma engines.
+* `scripts/owner-test/verify-handover.mjs` drives the running demo: all 19 accounts sign in with their
+  own password, the per-role page matrix is recorded, the owner switches hotel and back, and a temporary
+  receptionist is created and then removed to prove revocation. **69/69 checks**, evidence in
+  `docs/evidence/handover/owner-handover-verification.txt`.
+* `reset` was exercised end to end: only `hotel_saas_demo_owner` is dropped and re-created (the cluster
+  holds no other database), then the handover check passed again on the fresh data.

@@ -15,12 +15,23 @@ customer or financial data.
 **Option A — the hosted preview (nothing to install).**
 
 ```
-https://3100-ilwxtdget5jfcl1k2xd0q.e2b.app
+https://3100-i7p2zy0ehr3jxqmk6adh0.e2b.app
 ```
 
-The preview runs while this workspace is running. That hostname contains the sandbox id, so it
-changes whenever the workspace is restarted — use whatever link the workspace shows you. If it does
-not load, use option B.
+The preview runs while this workspace is running, and stays up for the whole testing period. That
+hostname contains the sandbox id, so it changes whenever the workspace is restarted — always use the
+link the workspace shows you.
+
+**If the preview stops responding** (a blank page, or "connection refused"), the database and the app
+have to be started again. Ask for it to be restarted, or on the machine that runs the workspace:
+
+```bash
+node scripts/owner-test-env.mjs start     # start the demo database (data is kept)
+node scripts/owner-test-env.mjs app       # build if needed, then serve on :3000
+```
+
+`app` also serves on `0.0.0.0`, so a tunnel or preview URL pointed at the port works. Nothing is lost
+when the app restarts; only `reset` (section 8) replaces the demo data.
 
 **Option B — run it on your own machine.**
 
@@ -44,7 +55,7 @@ Two hotels, each with a staff account for every role, plus a platform administra
 
 | Hotel | Role | Name | Email |
 |---|---|---|---|
-| Riverside Grand Hotel | Owner | Grace Wanjiku | `owner@riverside-grand.demo` |
+| Riverside Grand Hotel + Lakeview Lodge | Owner (both hotels) | Grace Wanjiku | `owner@riverside-grand.demo` |
 | Riverside Grand Hotel | Administrator | Peter Kariuki | `admin@riverside-grand.demo` |
 | Riverside Grand Hotel | Manager | Naomi Chebet | `manager@riverside-grand.demo` |
 | Riverside Grand Hotel | Receptionist | Brian Otieno | `receptionist@riverside-grand.demo` |
@@ -64,24 +75,37 @@ Two hotels, each with a staff account for every role, plus a platform administra
 | Lakeview Lodge | Technician | Peter Omondi | `technician@lakeview-lodge.demo` |
 | *(platform)* | Super admin | Demo Platform Admin | `platform@demo.test` |
 
-**The password is not written in this document on purpose** — this file is committed to a public
-repository. It is in the chat message that delivered this build, and on the machine you run it on it is
-in `.owner-test/CREDENTIALS.md` (file mode 600, Git-ignored). One password covers every demo account,
-generated per environment; if you reset the environment, a new one is issued and the old one stops
-working.
+**Every account has its own password.** Passwords are not written in this document, which is committed
+to a public repository. They are delivered with this handover, and on the machine that runs the demo
+they are in `.owner-test/CREDENTIALS.md` (file mode 600, Git-ignored):
+
+```bash
+node scripts/owner-test-env.mjs credentials     # prints the account / password table
+```
+
+The password that was shared in the previous handover has been revoked: this environment was re-seeded
+from scratch, so every account now has a password that has never been used before. Resetting the data
+(section 8) issues a fresh password for every account and retires the current ones — that is the way to
+revoke a set that has been shared too widely.
 
 ---
 
-## 3. Switching between the two hotels
+## 3. Choosing and switching between the two hotels
+
+The owner account, `owner@riverside-grand.demo` (Grace Wanjiku), owns **both** hotels. That is the
+account to use for testing switching.
 
 1. Sign in as `owner@riverside-grand.demo`.
-2. Click the **building icon** in the top bar (next to the notification bell) — or go to `/select-hotel`.
-3. You see a card per workspace. Click **Enter** on *Lakeview Lodge*.
+2. Because the account has two workspaces, the app asks you to choose one. Both cards are listed —
+   *Riverside Grand Hotel* and *Lakeview Lodge*. Click **Enter** on Riverside.
+3. To switch, click the **building icon** in the top bar (next to the notification bell), or go to
+   `/select-hotel`, and choose *Lakeview Lodge*.
 4. The sidebar, dashboard, guests, rooms, reservations and reports are now Lakeview's. Nothing from
    Riverside is visible.
+5. Switch back and confirm Riverside's numbers return unchanged.
 
-The demo owner accounts belong to one hotel each. To test switching *within one account*, accept an
-invitation: see §5, which invites `receptionist@riverside-grand.demo` into Lakeview as well.
+All other accounts belong to one hotel each, which is what makes the isolation checks in section L
+meaningful.
 
 To see the platform console, sign in as `platform@demo.test` and open the shield icon in the top bar. The
 console lists a third hotel, **Legacy Hotel** — it is a fixture created by a database migration with no
@@ -193,6 +217,7 @@ number — that is the bug report reference.
 | J6 | Suspend a staff member from the staff table | They can no longer sign in (`MembershipSuspended`), and the row says *Suspended* |
 | J7 | Remove a staff member, then sign in as them | Sign-in fails; their old password does not work |
 | J8 | Sign in as the receptionist and open `/dashboard/audit` by typing the URL | Redirected — the audit trail is owner/admin only |
+| J9 | Keep that removed person's session open in a second window and click Guests | Refused immediately (403) — removal does not wait for the next sign-in. Already verified for you: `docs/evidence/handover/owner-handover-verification.txt` |
 
 ### K. Subscription, limits and plans
 
@@ -275,7 +300,16 @@ node scripts/owner-test-env.mjs reset
 ```
 
 That drops only `hotel_saas_demo_owner`, re-applies the 19 migrations and re-seeds both hotels with a
-fresh password (written to `.owner-test/CREDENTIALS.md`).
+**fresh password for every account** (written to `.owner-test/CREDENTIALS.md`; print them with
+`node scripts/owner-test-env.mjs credentials`).
+
+It cannot reach production:
+
+* The demo database lives in its own PostgreSQL cluster inside `.owner-test/pgdata`, on port 55433,
+  listening on loopback only. It is not the cluster of any other environment and holds no real data.
+* The command refuses any database name that does not start with `hotel_saas_demo_`, so a stray
+  `OWNER_TEST_DB` cannot point it at a real database. That guard has its own automated test.
+* The seeder itself refuses a non-loopback host or a database with any other name.
 
 Useful companions:
 
@@ -315,8 +349,12 @@ Before reporting, check these — they are design decisions, not bugs:
 
 These are covered by the automated suite, so you do not have to re-test them — but you are welcome to:
 
-* 833 unit/integration tests, 55 HTTP end-to-end checks and 33 browser steps across two hotels and
+* 841 unit/integration tests, 55 HTTP end-to-end checks and 33 browser steps across two hotels and
   every role, all green on this build (see `docs/production-readiness-report-round14.md`).
+* A handover check that signs in as all 19 demo accounts with their own passwords, records which pages
+  each role can open, switches the owner between the two hotels and proves that removing a staff member
+  revokes access (`scripts/owner-test/verify-handover.mjs`,
+  evidence in `docs/evidence/handover/owner-handover-verification.txt`).
 * Sign-up, onboarding, invitations, acceptance, hotel switching, role denial by direct URL.
 * A reservation driven from creation through check-in, partial payment, settlement and check-out.
 * Cancellation, purchases, stock movements, recipes, wastage, notifications, the audit trail.

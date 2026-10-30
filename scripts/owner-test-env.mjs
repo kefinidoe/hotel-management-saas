@@ -14,6 +14,8 @@
  *   node scripts/owner-test-env.mjs status    # is it running, what is in it
  *   node scripts/owner-test-env.mjs stop      # stop PostgreSQL
  *   node scripts/owner-test-env.mjs url       # print DATABASE_URL for manual use
+ *   node scripts/owner-test-env.mjs credentials  # print the demo logins (0600 file)
+ *   node scripts/owner-test-env.mjs app       # build if needed, then serve
  *
  * `npm run owner:env -- <command>` does the same thing.
  *
@@ -35,7 +37,17 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const STATE = join(ROOT, ".owner-test");
 const PG_VERSION = "17.11.0";
 const PORT = Number(process.env.OWNER_TEST_PG_PORT ?? 55433);
-const DATABASE = process.env.OWNER_TEST_DB ?? "hotel_saas_demo_owner";
+const DATABASE = (() => {
+  const name = process.env.OWNER_TEST_DB ?? "hotel_saas_demo_owner";
+  // "reset" drops this database. Refuse anything that is not a demo database by
+  // name, so a stray OWNER_TEST_DB cannot point the destructive commands at a
+  // real one. The cluster itself only listens on 127.0.0.1.
+  if (!/^hotel_saas_demo_[a-z0-9][a-z0-9_-]*$/i.test(name)) {
+    process.stderr.write(`\nRefusing to use database "${name}": the owner demo environment only manages databases named hotel_saas_demo_*\n`);
+    process.exit(1);
+  }
+  return name;
+})();
 const URL = `postgresql://postgres@127.0.0.1:${PORT}/${DATABASE}`;
 
 function log(message) {
@@ -211,6 +223,7 @@ async function commandSetup() {
   } else {
     log(`Database ${DATABASE} already exists; leaving its data alone. Use "reset" to re-seed.`);
   }
+  randomIntSecret(); // stable session secret for every restart of this environment
   printSummary();
 }
 
@@ -218,6 +231,7 @@ async function commandReset() {
   const pgRoot = await ensurePostgresBinaries();
   ensureCluster(pgRoot);
   resetDatabase(pgRoot);
+  randomIntSecret(); // sessions survive a reset if the secret is unchanged
   printSummary();
 }
 
@@ -263,7 +277,8 @@ function printSummary() {
   log("");
   log("─".repeat(64));
   log(`Database URL : ${URL}`);
-  log(`Credentials  : ${join(STATE, "credentials.json")}`);
+  log(`Credentials  : ${join(STATE, "credentials.json")} (one password per account)`);
+  log(`Print them   : node scripts/owner-test-env.mjs credentials`);
   log("");
   log("Start the app against this environment with:");
   log(`  DATABASE_URL="${URL}" \\`);
@@ -282,11 +297,7 @@ async function commandApp() {
 
   const baseUrl = process.env.OWNER_TEST_BASE_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3000}`;
   if (!existsSync(join(ROOT, ".next", "BUILD_ID"))) {
-    log("No production build found; running `npm run build` first…");
-    run("npm", ["run", "build"], {
-      DATABASE_URL: URL,
-      DIRECT_URL: URL,
-    });
+    build();
   }
 
   log(`Starting the app on ${baseUrl} …`);
@@ -315,6 +326,33 @@ async function commandApp() {
   process.exitCode = child.status ?? 0;
 }
 
+/**
+ * Build the production bundle. `npm run build` runs `prisma generate`, which
+ * downloads the native query engine; on an offline workstation that download
+ * fails. The fallback generates the client against the WASM runtime shim (fine
+ * for testing, never for production) and builds directly, which is what the
+ * verification runs in this repository use.
+ */
+function build() {
+  log("No production build found; building first…");
+  const full = run("npm", ["run", "build"], { DATABASE_URL: URL, DIRECT_URL: URL }, { allowFailure: true });
+  if (full.status === 0) return;
+  log("The full build could not fetch Prisma engines; falling back to the offline build path…");
+  run("node", ["scripts/wasm-runtime-shim.mjs"], { DATABASE_URL: URL, DIRECT_URL: URL });
+  run("npx", ["next", "build"], {
+    DATABASE_URL: URL,
+    DIRECT_URL: URL,
+    SAAS_ENVIRONMENT: "saas",
+    SAAS_DATABASE_IDENTIFIER: DATABASE,
+  });
+}
+
+function commandCredentials() {
+  const file = join(STATE, "CREDENTIALS.md");
+  if (!existsSync(file)) fail(`No credentials yet. Run "setup" or "reset" first.`);
+  process.stdout.write(readFileSync(file, "utf8"));
+}
+
 function randomIntSecret() {
   // A stable secret per environment keeps sessions valid across restarts.
   const file = join(STATE, "nextauth-secret");
@@ -332,6 +370,7 @@ const commands = {
   stop: commandStop,
   status: commandStatus,
   app: commandApp,
+  credentials: commandCredentials,
   url: async () => log(URL),
 };
 
