@@ -1,0 +1,1522 @@
+{
+  "target": "127.0.0.1/hotel_saas_demo_owner",
+  "results": [
+    {
+      "id": "tables.present",
+      "kind": "list",
+      "description": "every expected application table exists",
+      "sql": "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name",
+      "expected": [
+        "AuditLog",
+        "Expense",
+        "Folio",
+        "FolioItem",
+        "Guest",
+        "Hotel",
+        "HotelMembership",
+        "HousekeepingTask",
+        "InventoryItem",
+        "MaintenanceTicket",
+        "MenuCategory",
+        "MenuItem",
+        "Notification",
+        "Order",
+        "OrderItem",
+        "Payment",
+        "PaymentMethod",
+        "Purchase",
+        "Recipe",
+        "RecipeIngredient",
+        "Reservation",
+        "ReservationRoom",
+        "Room",
+        "RoomType",
+        "StockMovement",
+        "Subscription",
+        "User",
+        "Wastage"
+      ],
+      "rows": [
+        {
+          "table_name": "AuditLog"
+        },
+        {
+          "table_name": "Expense"
+        },
+        {
+          "table_name": "Folio"
+        },
+        {
+          "table_name": "FolioItem"
+        },
+        {
+          "table_name": "Guest"
+        },
+        {
+          "table_name": "Hotel"
+        },
+        {
+          "table_name": "HotelMembership"
+        },
+        {
+          "table_name": "HousekeepingTask"
+        },
+        {
+          "table_name": "InventoryItem"
+        },
+        {
+          "table_name": "MaintenanceTicket"
+        },
+        {
+          "table_name": "MenuCategory"
+        },
+        {
+          "table_name": "MenuItem"
+        },
+        {
+          "table_name": "Notification"
+        },
+        {
+          "table_name": "Order"
+        },
+        {
+          "table_name": "OrderItem"
+        },
+        {
+          "table_name": "Payment"
+        },
+        {
+          "table_name": "PaymentMethod"
+        },
+        {
+          "table_name": "Purchase"
+        },
+        {
+          "table_name": "Recipe"
+        },
+        {
+          "table_name": "RecipeIngredient"
+        },
+        {
+          "table_name": "Reservation"
+        },
+        {
+          "table_name": "ReservationRoom"
+        },
+        {
+          "table_name": "Room"
+        },
+        {
+          "table_name": "RoomType"
+        },
+        {
+          "table_name": "StockMovement"
+        },
+        {
+          "table_name": "Subscription"
+        },
+        {
+          "table_name": "User"
+        },
+        {
+          "table_name": "Wastage"
+        }
+      ]
+    },
+    {
+      "id": "hotel.orphans",
+      "kind": "count",
+      "description": "tenant-scoped rows whose hotel no longer exists",
+      "sql": "SELECT 'Subscription' AS table_name, count(*)::bigint AS violations FROM \"Subscription\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'HotelMembership' AS table_name, count(*)::bigint AS violations FROM \"HotelMembership\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'RoomType' AS table_name, count(*)::bigint AS violations FROM \"RoomType\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'Room' AS table_name, count(*)::bigint AS violations FROM \"Room\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'Guest' AS table_name, count(*)::bigint AS violations FROM \"Guest\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'Reservation' AS table_name, count(*)::bigint AS violations FROM \"Reservation\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'ReservationRoom' AS table_name, count(*)::bigint AS violations FROM \"ReservationRoom\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'Folio' AS table_name, count(*)::bigint AS violations FROM \"Folio\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'PaymentMethod' AS table_name, count(*)::bigint AS violations FROM \"PaymentMethod\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'Payment' AS table_name, count(*)::bigint AS violations FROM \"Payment\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'HousekeepingTask' AS table_name, count(*)::bigint AS violations FROM \"HousekeepingTask\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'MaintenanceTicket' AS table_name, count(*)::bigint AS violations FROM \"MaintenanceTicket\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'MenuCategory' AS table_name, count(*)::bigint AS violations FROM \"MenuCategory\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'MenuItem' AS table_name, count(*)::bigint AS violations FROM \"MenuItem\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'Order' AS table_name, count(*)::bigint AS violations FROM \"Order\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'OrderItem' AS table_name, count(*)::bigint AS violations FROM \"OrderItem\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'InventoryItem' AS table_name, count(*)::bigint AS violations FROM \"InventoryItem\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'Recipe' AS table_name, count(*)::bigint AS violations FROM \"Recipe\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'RecipeIngredient' AS table_name, count(*)::bigint AS violations FROM \"RecipeIngredient\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'StockMovement' AS table_name, count(*)::bigint AS violations FROM \"StockMovement\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'Purchase' AS table_name, count(*)::bigint AS violations FROM \"Purchase\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'Wastage' AS table_name, count(*)::bigint AS violations FROM \"Wastage\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'Expense' AS table_name, count(*)::bigint AS violations FROM \"Expense\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\") UNION ALL SELECT 'Notification' AS table_name, count(*)::bigint AS violations FROM \"Notification\" t WHERE NOT EXISTS (SELECT 1 FROM \"Hotel\" h WHERE h.id = t.\"hotelId\")",
+      "unioned": true,
+      "rows": [
+        {
+          "table_name": "Subscription",
+          "violations": 0
+        },
+        {
+          "table_name": "HotelMembership",
+          "violations": 0
+        },
+        {
+          "table_name": "RoomType",
+          "violations": 0
+        },
+        {
+          "table_name": "Room",
+          "violations": 0
+        },
+        {
+          "table_name": "Guest",
+          "violations": 0
+        },
+        {
+          "table_name": "Reservation",
+          "violations": 0
+        },
+        {
+          "table_name": "ReservationRoom",
+          "violations": 0
+        },
+        {
+          "table_name": "Folio",
+          "violations": 0
+        },
+        {
+          "table_name": "PaymentMethod",
+          "violations": 0
+        },
+        {
+          "table_name": "Payment",
+          "violations": 0
+        },
+        {
+          "table_name": "HousekeepingTask",
+          "violations": 0
+        },
+        {
+          "table_name": "MaintenanceTicket",
+          "violations": 0
+        },
+        {
+          "table_name": "MenuCategory",
+          "violations": 0
+        },
+        {
+          "table_name": "MenuItem",
+          "violations": 0
+        },
+        {
+          "table_name": "Order",
+          "violations": 0
+        },
+        {
+          "table_name": "OrderItem",
+          "violations": 0
+        },
+        {
+          "table_name": "InventoryItem",
+          "violations": 0
+        },
+        {
+          "table_name": "Recipe",
+          "violations": 0
+        },
+        {
+          "table_name": "RecipeIngredient",
+          "violations": 0
+        },
+        {
+          "table_name": "StockMovement",
+          "violations": 0
+        },
+        {
+          "table_name": "Purchase",
+          "violations": 0
+        },
+        {
+          "table_name": "Wastage",
+          "violations": 0
+        },
+        {
+          "table_name": "Expense",
+          "violations": 0
+        },
+        {
+          "table_name": "Notification",
+          "violations": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:Subscription",
+      "kind": "count",
+      "description": "Subscription rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Subscription\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:HotelMembership",
+      "kind": "count",
+      "description": "HotelMembership rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"HotelMembership\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:RoomType",
+      "kind": "count",
+      "description": "RoomType rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"RoomType\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:Room",
+      "kind": "count",
+      "description": "Room rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Room\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:Guest",
+      "kind": "count",
+      "description": "Guest rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Guest\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:Reservation",
+      "kind": "count",
+      "description": "Reservation rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Reservation\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:ReservationRoom",
+      "kind": "count",
+      "description": "ReservationRoom rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"ReservationRoom\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:Folio",
+      "kind": "count",
+      "description": "Folio rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Folio\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:PaymentMethod",
+      "kind": "count",
+      "description": "PaymentMethod rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"PaymentMethod\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:Payment",
+      "kind": "count",
+      "description": "Payment rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Payment\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:HousekeepingTask",
+      "kind": "count",
+      "description": "HousekeepingTask rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"HousekeepingTask\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:MaintenanceTicket",
+      "kind": "count",
+      "description": "MaintenanceTicket rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"MaintenanceTicket\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:MenuCategory",
+      "kind": "count",
+      "description": "MenuCategory rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"MenuCategory\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:MenuItem",
+      "kind": "count",
+      "description": "MenuItem rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"MenuItem\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:Order",
+      "kind": "count",
+      "description": "Order rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Order\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:OrderItem",
+      "kind": "count",
+      "description": "OrderItem rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"OrderItem\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:InventoryItem",
+      "kind": "count",
+      "description": "InventoryItem rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"InventoryItem\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:Recipe",
+      "kind": "count",
+      "description": "Recipe rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Recipe\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:RecipeIngredient",
+      "kind": "count",
+      "description": "RecipeIngredient rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"RecipeIngredient\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:StockMovement",
+      "kind": "count",
+      "description": "StockMovement rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"StockMovement\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:Purchase",
+      "kind": "count",
+      "description": "Purchase rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Purchase\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:Wastage",
+      "kind": "count",
+      "description": "Wastage rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Wastage\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:Expense",
+      "kind": "count",
+      "description": "Expense rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Expense\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "hotel.null:Notification",
+      "kind": "count",
+      "description": "Notification rows without a hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Notification\" WHERE \"hotelId\" IS NULL",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:Room.roomTypeId",
+      "kind": "count",
+      "description": "Room.roomTypeId points at a RoomType in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Room\" c JOIN \"RoomType\" p ON p.id = c.\"roomTypeId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:Reservation.guestId",
+      "kind": "count",
+      "description": "Reservation.guestId points at a Guest in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Reservation\" c JOIN \"Guest\" p ON p.id = c.\"guestId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:ReservationRoom.reservationId",
+      "kind": "count",
+      "description": "ReservationRoom.reservationId points at a Reservation in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"ReservationRoom\" c JOIN \"Reservation\" p ON p.id = c.\"reservationId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:ReservationRoom.roomId",
+      "kind": "count",
+      "description": "ReservationRoom.roomId points at a Room in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"ReservationRoom\" c JOIN \"Room\" p ON p.id = c.\"roomId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:Folio.guestId",
+      "kind": "count",
+      "description": "Folio.guestId points at a Guest in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Folio\" c JOIN \"Guest\" p ON p.id = c.\"guestId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:Folio.reservationId",
+      "kind": "count",
+      "description": "Folio.reservationId points at a Reservation in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Folio\" c JOIN \"Reservation\" p ON p.id = c.\"reservationId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:Payment.folioId",
+      "kind": "count",
+      "description": "Payment.folioId points at a Folio in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Payment\" c JOIN \"Folio\" p ON p.id = c.\"folioId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:Payment.paymentMethodId",
+      "kind": "count",
+      "description": "Payment.paymentMethodId points at a PaymentMethod in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Payment\" c JOIN \"PaymentMethod\" p ON p.id = c.\"paymentMethodId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:HousekeepingTask.roomId",
+      "kind": "count",
+      "description": "HousekeepingTask.roomId points at a Room in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"HousekeepingTask\" c JOIN \"Room\" p ON p.id = c.\"roomId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:MaintenanceTicket.roomId",
+      "kind": "count",
+      "description": "MaintenanceTicket.roomId points at a Room in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"MaintenanceTicket\" c JOIN \"Room\" p ON p.id = c.\"roomId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:MenuItem.categoryId",
+      "kind": "count",
+      "description": "MenuItem.categoryId points at a MenuCategory in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"MenuItem\" c JOIN \"MenuCategory\" p ON p.id = c.\"categoryId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:OrderItem.orderId",
+      "kind": "count",
+      "description": "OrderItem.orderId points at a Order in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"OrderItem\" c JOIN \"Order\" p ON p.id = c.\"orderId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:OrderItem.menuItemId",
+      "kind": "count",
+      "description": "OrderItem.menuItemId points at a MenuItem in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"OrderItem\" c JOIN \"MenuItem\" p ON p.id = c.\"menuItemId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:Recipe.menuItemId",
+      "kind": "count",
+      "description": "Recipe.menuItemId points at a MenuItem in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Recipe\" c JOIN \"MenuItem\" p ON p.id = c.\"menuItemId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:RecipeIngredient.recipeId",
+      "kind": "count",
+      "description": "RecipeIngredient.recipeId points at a Recipe in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"RecipeIngredient\" c JOIN \"Recipe\" p ON p.id = c.\"recipeId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:RecipeIngredient.inventoryItemId",
+      "kind": "count",
+      "description": "RecipeIngredient.inventoryItemId points at a InventoryItem in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"RecipeIngredient\" c JOIN \"InventoryItem\" p ON p.id = c.\"inventoryItemId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:StockMovement.inventoryItemId",
+      "kind": "count",
+      "description": "StockMovement.inventoryItemId points at a InventoryItem in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"StockMovement\" c JOIN \"InventoryItem\" p ON p.id = c.\"inventoryItemId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:Purchase.inventoryItemId",
+      "kind": "count",
+      "description": "Purchase.inventoryItemId points at a InventoryItem in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Purchase\" c JOIN \"InventoryItem\" p ON p.id = c.\"inventoryItemId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:Wastage.inventoryItemId",
+      "kind": "count",
+      "description": "Wastage.inventoryItemId points at a InventoryItem in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Wastage\" c JOIN \"InventoryItem\" p ON p.id = c.\"inventoryItemId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "tenant.mismatch:Order.folioId",
+      "kind": "count",
+      "description": "Order.folioId points at a Folio in another hotel",
+      "sql": "SELECT count(*)::bigint FROM \"Order\" c JOIN \"Folio\" p ON p.id = c.\"folioId\" WHERE c.\"hotelId\" <> p.\"hotelId\"",
+      "rows": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "constraints.tenant-fk",
+      "kind": "list",
+      "description": "every tenant relation is enforced by a foreign key",
+      "sql": "SELECT DISTINCT c.conrelid::regclass::text AS child, a.attname AS column FROM pg_constraint c JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey) WHERE c.contype = 'f'",
+      "rows": [
+        {
+          "child": "\"AuditLog\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"AuditLog\"",
+          "column": "userId"
+        },
+        {
+          "child": "\"Expense\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"Expense\"",
+          "column": "requestedById"
+        },
+        {
+          "child": "\"Folio\"",
+          "column": "guestId"
+        },
+        {
+          "child": "\"Folio\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"Folio\"",
+          "column": "reservationId"
+        },
+        {
+          "child": "\"FolioItem\"",
+          "column": "folioId"
+        },
+        {
+          "child": "\"Guest\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"HotelMembership\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"HotelMembership\"",
+          "column": "userId"
+        },
+        {
+          "child": "\"HousekeepingTask\"",
+          "column": "assigneeId"
+        },
+        {
+          "child": "\"HousekeepingTask\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"HousekeepingTask\"",
+          "column": "roomId"
+        },
+        {
+          "child": "\"InventoryItem\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"MaintenanceTicket\"",
+          "column": "assigneeId"
+        },
+        {
+          "child": "\"MaintenanceTicket\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"MaintenanceTicket\"",
+          "column": "roomId"
+        },
+        {
+          "child": "\"MenuCategory\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"MenuItem\"",
+          "column": "categoryId"
+        },
+        {
+          "child": "\"MenuItem\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"Notification\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"Notification\"",
+          "column": "userId"
+        },
+        {
+          "child": "\"Order\"",
+          "column": "folioId"
+        },
+        {
+          "child": "\"Order\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"Order\"",
+          "column": "paymentMethodId"
+        },
+        {
+          "child": "\"OrderItem\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"OrderItem\"",
+          "column": "menuItemId"
+        },
+        {
+          "child": "\"OrderItem\"",
+          "column": "orderId"
+        },
+        {
+          "child": "\"Payment\"",
+          "column": "cashierId"
+        },
+        {
+          "child": "\"Payment\"",
+          "column": "folioId"
+        },
+        {
+          "child": "\"Payment\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"Payment\"",
+          "column": "paymentMethodId"
+        },
+        {
+          "child": "\"PaymentMethod\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"Purchase\"",
+          "column": "createdById"
+        },
+        {
+          "child": "\"Purchase\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"Purchase\"",
+          "column": "inventoryItemId"
+        },
+        {
+          "child": "\"Recipe\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"Recipe\"",
+          "column": "menuItemId"
+        },
+        {
+          "child": "\"RecipeIngredient\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"RecipeIngredient\"",
+          "column": "inventoryItemId"
+        },
+        {
+          "child": "\"RecipeIngredient\"",
+          "column": "recipeId"
+        },
+        {
+          "child": "\"Reservation\"",
+          "column": "createdById"
+        },
+        {
+          "child": "\"Reservation\"",
+          "column": "guestId"
+        },
+        {
+          "child": "\"Reservation\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"ReservationRoom\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"ReservationRoom\"",
+          "column": "reservationId"
+        },
+        {
+          "child": "\"ReservationRoom\"",
+          "column": "roomId"
+        },
+        {
+          "child": "\"Room\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"Room\"",
+          "column": "roomTypeId"
+        },
+        {
+          "child": "\"RoomType\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"StockMovement\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"StockMovement\"",
+          "column": "inventoryItemId"
+        },
+        {
+          "child": "\"StockMovement\"",
+          "column": "userId"
+        },
+        {
+          "child": "\"Subscription\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"Wastage\"",
+          "column": "accountableUserId"
+        },
+        {
+          "child": "\"Wastage\"",
+          "column": "hotelId"
+        },
+        {
+          "child": "\"Wastage\"",
+          "column": "inventoryItemId"
+        },
+        {
+          "child": "\"Wastage\"",
+          "column": "recordedById"
+        }
+      ]
+    },
+    {
+      "id": "indexes.hotelId",
+      "kind": "list",
+      "description": "hotel-scoped tables have an index that covers hotelId",
+      "sql": "SELECT tablename, indexdef FROM pg_indexes WHERE schemaname = 'public'",
+      "rows": [
+        {
+          "tablename": "User",
+          "indexdef": "CREATE UNIQUE INDEX \"User_pkey\" ON public.\"User\" USING btree (id)"
+        },
+        {
+          "tablename": "RoomType",
+          "indexdef": "CREATE UNIQUE INDEX \"RoomType_pkey\" ON public.\"RoomType\" USING btree (id)"
+        },
+        {
+          "tablename": "Room",
+          "indexdef": "CREATE UNIQUE INDEX \"Room_pkey\" ON public.\"Room\" USING btree (id)"
+        },
+        {
+          "tablename": "Guest",
+          "indexdef": "CREATE UNIQUE INDEX \"Guest_pkey\" ON public.\"Guest\" USING btree (id)"
+        },
+        {
+          "tablename": "Reservation",
+          "indexdef": "CREATE UNIQUE INDEX \"Reservation_pkey\" ON public.\"Reservation\" USING btree (id)"
+        },
+        {
+          "tablename": "ReservationRoom",
+          "indexdef": "CREATE UNIQUE INDEX \"ReservationRoom_pkey\" ON public.\"ReservationRoom\" USING btree (id)"
+        },
+        {
+          "tablename": "Folio",
+          "indexdef": "CREATE UNIQUE INDEX \"Folio_pkey\" ON public.\"Folio\" USING btree (id)"
+        },
+        {
+          "tablename": "FolioItem",
+          "indexdef": "CREATE UNIQUE INDEX \"FolioItem_pkey\" ON public.\"FolioItem\" USING btree (id)"
+        },
+        {
+          "tablename": "PaymentMethod",
+          "indexdef": "CREATE UNIQUE INDEX \"PaymentMethod_pkey\" ON public.\"PaymentMethod\" USING btree (id)"
+        },
+        {
+          "tablename": "Payment",
+          "indexdef": "CREATE UNIQUE INDEX \"Payment_pkey\" ON public.\"Payment\" USING btree (id)"
+        },
+        {
+          "tablename": "HousekeepingTask",
+          "indexdef": "CREATE UNIQUE INDEX \"HousekeepingTask_pkey\" ON public.\"HousekeepingTask\" USING btree (id)"
+        },
+        {
+          "tablename": "MaintenanceTicket",
+          "indexdef": "CREATE UNIQUE INDEX \"MaintenanceTicket_pkey\" ON public.\"MaintenanceTicket\" USING btree (id)"
+        },
+        {
+          "tablename": "MenuCategory",
+          "indexdef": "CREATE UNIQUE INDEX \"MenuCategory_pkey\" ON public.\"MenuCategory\" USING btree (id)"
+        },
+        {
+          "tablename": "MenuItem",
+          "indexdef": "CREATE UNIQUE INDEX \"MenuItem_pkey\" ON public.\"MenuItem\" USING btree (id)"
+        },
+        {
+          "tablename": "Order",
+          "indexdef": "CREATE UNIQUE INDEX \"Order_pkey\" ON public.\"Order\" USING btree (id)"
+        },
+        {
+          "tablename": "OrderItem",
+          "indexdef": "CREATE UNIQUE INDEX \"OrderItem_pkey\" ON public.\"OrderItem\" USING btree (id)"
+        },
+        {
+          "tablename": "InventoryItem",
+          "indexdef": "CREATE UNIQUE INDEX \"InventoryItem_pkey\" ON public.\"InventoryItem\" USING btree (id)"
+        },
+        {
+          "tablename": "Expense",
+          "indexdef": "CREATE UNIQUE INDEX \"Expense_pkey\" ON public.\"Expense\" USING btree (id)"
+        },
+        {
+          "tablename": "Notification",
+          "indexdef": "CREATE UNIQUE INDEX \"Notification_pkey\" ON public.\"Notification\" USING btree (id)"
+        },
+        {
+          "tablename": "AuditLog",
+          "indexdef": "CREATE UNIQUE INDEX \"AuditLog_pkey\" ON public.\"AuditLog\" USING btree (id)"
+        },
+        {
+          "tablename": "User",
+          "indexdef": "CREATE UNIQUE INDEX \"User_email_key\" ON public.\"User\" USING btree (email)"
+        },
+        {
+          "tablename": "ReservationRoom",
+          "indexdef": "CREATE UNIQUE INDEX \"ReservationRoom_reservationId_roomId_key\" ON public.\"ReservationRoom\" USING btree (\"reservationId\", \"roomId\")"
+        },
+        {
+          "tablename": "Recipe",
+          "indexdef": "CREATE UNIQUE INDEX \"Recipe_pkey\" ON public.\"Recipe\" USING btree (id)"
+        },
+        {
+          "tablename": "RecipeIngredient",
+          "indexdef": "CREATE UNIQUE INDEX \"RecipeIngredient_pkey\" ON public.\"RecipeIngredient\" USING btree (id)"
+        },
+        {
+          "tablename": "StockMovement",
+          "indexdef": "CREATE UNIQUE INDEX \"StockMovement_pkey\" ON public.\"StockMovement\" USING btree (id)"
+        },
+        {
+          "tablename": "Purchase",
+          "indexdef": "CREATE UNIQUE INDEX \"Purchase_pkey\" ON public.\"Purchase\" USING btree (id)"
+        },
+        {
+          "tablename": "Wastage",
+          "indexdef": "CREATE UNIQUE INDEX \"Wastage_pkey\" ON public.\"Wastage\" USING btree (id)"
+        },
+        {
+          "tablename": "Recipe",
+          "indexdef": "CREATE UNIQUE INDEX \"Recipe_menuItemId_key\" ON public.\"Recipe\" USING btree (\"menuItemId\")"
+        },
+        {
+          "tablename": "RecipeIngredient",
+          "indexdef": "CREATE UNIQUE INDEX \"RecipeIngredient_recipeId_inventoryItemId_key\" ON public.\"RecipeIngredient\" USING btree (\"recipeId\", \"inventoryItemId\")"
+        },
+        {
+          "tablename": "Wastage",
+          "indexdef": "CREATE INDEX \"Wastage_accountableUserId_idx\" ON public.\"Wastage\" USING btree (\"accountableUserId\")"
+        },
+        {
+          "tablename": "FolioItem",
+          "indexdef": "CREATE INDEX \"FolioItem_type_createdAt_idx\" ON public.\"FolioItem\" USING btree (type, \"createdAt\")"
+        },
+        {
+          "tablename": "Hotel",
+          "indexdef": "CREATE UNIQUE INDEX \"Hotel_pkey\" ON public.\"Hotel\" USING btree (id)"
+        },
+        {
+          "tablename": "HotelMembership",
+          "indexdef": "CREATE UNIQUE INDEX \"HotelMembership_pkey\" ON public.\"HotelMembership\" USING btree (id)"
+        },
+        {
+          "tablename": "Hotel",
+          "indexdef": "CREATE UNIQUE INDEX \"Hotel_slug_key\" ON public.\"Hotel\" USING btree (slug)"
+        },
+        {
+          "tablename": "Hotel",
+          "indexdef": "CREATE INDEX \"Hotel_status_idx\" ON public.\"Hotel\" USING btree (status)"
+        },
+        {
+          "tablename": "HotelMembership",
+          "indexdef": "CREATE UNIQUE INDEX \"HotelMembership_userId_hotelId_key\" ON public.\"HotelMembership\" USING btree (\"userId\", \"hotelId\")"
+        },
+        {
+          "tablename": "HotelMembership",
+          "indexdef": "CREATE INDEX \"HotelMembership_hotelId_role_idx\" ON public.\"HotelMembership\" USING btree (\"hotelId\", role)"
+        },
+        {
+          "tablename": "HotelMembership",
+          "indexdef": "CREATE INDEX \"HotelMembership_userId_status_idx\" ON public.\"HotelMembership\" USING btree (\"userId\", status)"
+        },
+        {
+          "tablename": "RoomType",
+          "indexdef": "CREATE UNIQUE INDEX \"RoomType_id_hotelId_key\" ON public.\"RoomType\" USING btree (id, \"hotelId\")"
+        },
+        {
+          "tablename": "Room",
+          "indexdef": "CREATE UNIQUE INDEX \"Room_id_hotelId_key\" ON public.\"Room\" USING btree (id, \"hotelId\")"
+        },
+        {
+          "tablename": "Room",
+          "indexdef": "CREATE UNIQUE INDEX \"Room_hotelId_number_key\" ON public.\"Room\" USING btree (\"hotelId\", number)"
+        },
+        {
+          "tablename": "Guest",
+          "indexdef": "CREATE UNIQUE INDEX \"Guest_id_hotelId_key\" ON public.\"Guest\" USING btree (id, \"hotelId\")"
+        },
+        {
+          "tablename": "Reservation",
+          "indexdef": "CREATE UNIQUE INDEX \"Reservation_hotelId_code_key\" ON public.\"Reservation\" USING btree (\"hotelId\", code)"
+        },
+        {
+          "tablename": "Reservation",
+          "indexdef": "CREATE UNIQUE INDEX \"Reservation_id_hotelId_key\" ON public.\"Reservation\" USING btree (id, \"hotelId\")"
+        },
+        {
+          "tablename": "Folio",
+          "indexdef": "CREATE UNIQUE INDEX \"Folio_id_hotelId_key\" ON public.\"Folio\" USING btree (id, \"hotelId\")"
+        },
+        {
+          "tablename": "PaymentMethod",
+          "indexdef": "CREATE UNIQUE INDEX \"PaymentMethod_hotelId_name_key\" ON public.\"PaymentMethod\" USING btree (\"hotelId\", name)"
+        },
+        {
+          "tablename": "PaymentMethod",
+          "indexdef": "CREATE UNIQUE INDEX \"PaymentMethod_id_hotelId_key\" ON public.\"PaymentMethod\" USING btree (id, \"hotelId\")"
+        },
+        {
+          "tablename": "Payment",
+          "indexdef": "CREATE UNIQUE INDEX \"Payment_id_hotelId_key\" ON public.\"Payment\" USING btree (id, \"hotelId\")"
+        },
+        {
+          "tablename": "MenuCategory",
+          "indexdef": "CREATE UNIQUE INDEX \"MenuCategory_hotelId_name_key\" ON public.\"MenuCategory\" USING btree (\"hotelId\", name)"
+        },
+        {
+          "tablename": "MenuCategory",
+          "indexdef": "CREATE UNIQUE INDEX \"MenuCategory_id_hotelId_key\" ON public.\"MenuCategory\" USING btree (id, \"hotelId\")"
+        },
+        {
+          "tablename": "MenuItem",
+          "indexdef": "CREATE UNIQUE INDEX \"MenuItem_id_hotelId_key\" ON public.\"MenuItem\" USING btree (id, \"hotelId\")"
+        },
+        {
+          "tablename": "Order",
+          "indexdef": "CREATE UNIQUE INDEX \"Order_id_hotelId_key\" ON public.\"Order\" USING btree (id, \"hotelId\")"
+        },
+        {
+          "tablename": "InventoryItem",
+          "indexdef": "CREATE UNIQUE INDEX \"InventoryItem_hotelId_sku_key\" ON public.\"InventoryItem\" USING btree (\"hotelId\", sku)"
+        },
+        {
+          "tablename": "InventoryItem",
+          "indexdef": "CREATE UNIQUE INDEX \"InventoryItem_id_hotelId_key\" ON public.\"InventoryItem\" USING btree (id, \"hotelId\")"
+        },
+        {
+          "tablename": "RoomType",
+          "indexdef": "CREATE INDEX \"RoomType_hotelId_idx\" ON public.\"RoomType\" USING btree (\"hotelId\")"
+        },
+        {
+          "tablename": "Room",
+          "indexdef": "CREATE INDEX \"Room_hotelId_status_idx\" ON public.\"Room\" USING btree (\"hotelId\", status)"
+        },
+        {
+          "tablename": "Room",
+          "indexdef": "CREATE INDEX \"Room_hotelId_isActive_idx\" ON public.\"Room\" USING btree (\"hotelId\", \"isActive\")"
+        },
+        {
+          "tablename": "Guest",
+          "indexdef": "CREATE INDEX \"Guest_hotelId_fullName_idx\" ON public.\"Guest\" USING btree (\"hotelId\", \"fullName\")"
+        },
+        {
+          "tablename": "Guest",
+          "indexdef": "CREATE INDEX \"Guest_hotelId_isArchived_idx\" ON public.\"Guest\" USING btree (\"hotelId\", \"isArchived\")"
+        },
+        {
+          "tablename": "Reservation",
+          "indexdef": "CREATE INDEX \"Reservation_hotelId_checkInDate_idx\" ON public.\"Reservation\" USING btree (\"hotelId\", \"checkInDate\")"
+        },
+        {
+          "tablename": "Reservation",
+          "indexdef": "CREATE INDEX \"Reservation_hotelId_checkOutDate_idx\" ON public.\"Reservation\" USING btree (\"hotelId\", \"checkOutDate\")"
+        },
+        {
+          "tablename": "Reservation",
+          "indexdef": "CREATE INDEX \"Reservation_hotelId_status_idx\" ON public.\"Reservation\" USING btree (\"hotelId\", status)"
+        },
+        {
+          "tablename": "Folio",
+          "indexdef": "CREATE INDEX \"Folio_hotelId_isClosed_idx\" ON public.\"Folio\" USING btree (\"hotelId\", \"isClosed\")"
+        },
+        {
+          "tablename": "Folio",
+          "indexdef": "CREATE INDEX \"Folio_hotelId_reservationId_idx\" ON public.\"Folio\" USING btree (\"hotelId\", \"reservationId\")"
+        },
+        {
+          "tablename": "FolioItem",
+          "indexdef": "CREATE INDEX \"FolioItem_folioId_type_idx\" ON public.\"FolioItem\" USING btree (\"folioId\", type)"
+        },
+        {
+          "tablename": "PaymentMethod",
+          "indexdef": "CREATE INDEX \"PaymentMethod_hotelId_isActive_idx\" ON public.\"PaymentMethod\" USING btree (\"hotelId\", \"isActive\")"
+        },
+        {
+          "tablename": "Payment",
+          "indexdef": "CREATE INDEX \"Payment_hotelId_createdAt_idx\" ON public.\"Payment\" USING btree (\"hotelId\", \"createdAt\")"
+        },
+        {
+          "tablename": "Payment",
+          "indexdef": "CREATE INDEX \"Payment_hotelId_folioId_idx\" ON public.\"Payment\" USING btree (\"hotelId\", \"folioId\")"
+        },
+        {
+          "tablename": "HousekeepingTask",
+          "indexdef": "CREATE INDEX \"HousekeepingTask_hotelId_status_idx\" ON public.\"HousekeepingTask\" USING btree (\"hotelId\", status)"
+        },
+        {
+          "tablename": "HousekeepingTask",
+          "indexdef": "CREATE INDEX \"HousekeepingTask_hotelId_roomId_idx\" ON public.\"HousekeepingTask\" USING btree (\"hotelId\", \"roomId\")"
+        },
+        {
+          "tablename": "MaintenanceTicket",
+          "indexdef": "CREATE INDEX \"MaintenanceTicket_hotelId_status_idx\" ON public.\"MaintenanceTicket\" USING btree (\"hotelId\", status)"
+        },
+        {
+          "tablename": "MaintenanceTicket",
+          "indexdef": "CREATE INDEX \"MaintenanceTicket_hotelId_roomId_idx\" ON public.\"MaintenanceTicket\" USING btree (\"hotelId\", \"roomId\")"
+        },
+        {
+          "tablename": "MenuCategory",
+          "indexdef": "CREATE INDEX \"MenuCategory_hotelId_idx\" ON public.\"MenuCategory\" USING btree (\"hotelId\")"
+        },
+        {
+          "tablename": "MenuItem",
+          "indexdef": "CREATE INDEX \"MenuItem_hotelId_categoryId_isActive_idx\" ON public.\"MenuItem\" USING btree (\"hotelId\", \"categoryId\", \"isActive\")"
+        },
+        {
+          "tablename": "MenuItem",
+          "indexdef": "CREATE INDEX \"MenuItem_hotelId_isActive_idx\" ON public.\"MenuItem\" USING btree (\"hotelId\", \"isActive\")"
+        },
+        {
+          "tablename": "Order",
+          "indexdef": "CREATE INDEX \"Order_hotelId_createdAt_idx\" ON public.\"Order\" USING btree (\"hotelId\", \"createdAt\")"
+        },
+        {
+          "tablename": "Order",
+          "indexdef": "CREATE INDEX \"Order_hotelId_folioId_idx\" ON public.\"Order\" USING btree (\"hotelId\", \"folioId\")"
+        },
+        {
+          "tablename": "OrderItem",
+          "indexdef": "CREATE INDEX \"OrderItem_orderId_idx\" ON public.\"OrderItem\" USING btree (\"orderId\")"
+        },
+        {
+          "tablename": "InventoryItem",
+          "indexdef": "CREATE INDEX \"InventoryItem_hotelId_category_idx\" ON public.\"InventoryItem\" USING btree (\"hotelId\", category)"
+        },
+        {
+          "tablename": "InventoryItem",
+          "indexdef": "CREATE INDEX \"InventoryItem_hotelId_isActive_idx\" ON public.\"InventoryItem\" USING btree (\"hotelId\", \"isActive\")"
+        },
+        {
+          "tablename": "StockMovement",
+          "indexdef": "CREATE INDEX \"StockMovement_hotelId_createdAt_idx\" ON public.\"StockMovement\" USING btree (\"hotelId\", \"createdAt\")"
+        },
+        {
+          "tablename": "StockMovement",
+          "indexdef": "CREATE INDEX \"StockMovement_hotelId_inventoryItemId_idx\" ON public.\"StockMovement\" USING btree (\"hotelId\", \"inventoryItemId\")"
+        },
+        {
+          "tablename": "Purchase",
+          "indexdef": "CREATE INDEX \"Purchase_hotelId_purchaseDate_idx\" ON public.\"Purchase\" USING btree (\"hotelId\", \"purchaseDate\")"
+        },
+        {
+          "tablename": "Purchase",
+          "indexdef": "CREATE INDEX \"Purchase_hotelId_inventoryItemId_idx\" ON public.\"Purchase\" USING btree (\"hotelId\", \"inventoryItemId\")"
+        },
+        {
+          "tablename": "Wastage",
+          "indexdef": "CREATE INDEX \"Wastage_hotelId_createdAt_idx\" ON public.\"Wastage\" USING btree (\"hotelId\", \"createdAt\")"
+        },
+        {
+          "tablename": "Wastage",
+          "indexdef": "CREATE INDEX \"Wastage_hotelId_inventoryItemId_idx\" ON public.\"Wastage\" USING btree (\"hotelId\", \"inventoryItemId\")"
+        },
+        {
+          "tablename": "Expense",
+          "indexdef": "CREATE INDEX \"Expense_hotelId_createdAt_idx\" ON public.\"Expense\" USING btree (\"hotelId\", \"createdAt\")"
+        },
+        {
+          "tablename": "Expense",
+          "indexdef": "CREATE INDEX \"Expense_hotelId_status_idx\" ON public.\"Expense\" USING btree (\"hotelId\", status)"
+        },
+        {
+          "tablename": "Notification",
+          "indexdef": "CREATE INDEX \"Notification_hotelId_isRead_idx\" ON public.\"Notification\" USING btree (\"hotelId\", \"isRead\")"
+        },
+        {
+          "tablename": "Notification",
+          "indexdef": "CREATE INDEX \"Notification_hotelId_userId_isRead_idx\" ON public.\"Notification\" USING btree (\"hotelId\", \"userId\", \"isRead\")"
+        },
+        {
+          "tablename": "Notification",
+          "indexdef": "CREATE INDEX \"Notification_hotelId_createdAt_idx\" ON public.\"Notification\" USING btree (\"hotelId\", \"createdAt\")"
+        },
+        {
+          "tablename": "AuditLog",
+          "indexdef": "CREATE INDEX \"AuditLog_hotelId_createdAt_idx\" ON public.\"AuditLog\" USING btree (\"hotelId\", \"createdAt\")"
+        },
+        {
+          "tablename": "AuditLog",
+          "indexdef": "CREATE INDEX \"AuditLog_hotelId_entity_entityId_idx\" ON public.\"AuditLog\" USING btree (\"hotelId\", entity, \"entityId\")"
+        },
+        {
+          "tablename": "Payment",
+          "indexdef": "CREATE UNIQUE INDEX \"Payment_hotelId_idempotencyKey_key\" ON public.\"Payment\" USING btree (\"hotelId\", \"idempotencyKey\")"
+        },
+        {
+          "tablename": "Subscription",
+          "indexdef": "CREATE UNIQUE INDEX \"Subscription_pkey\" ON public.\"Subscription\" USING btree (id)"
+        },
+        {
+          "tablename": "Subscription",
+          "indexdef": "CREATE UNIQUE INDEX \"Subscription_hotelId_key\" ON public.\"Subscription\" USING btree (\"hotelId\")"
+        },
+        {
+          "tablename": "Subscription",
+          "indexdef": "CREATE INDEX \"Subscription_status_idx\" ON public.\"Subscription\" USING btree (status)"
+        },
+        {
+          "tablename": "Subscription",
+          "indexdef": "CREATE INDEX \"Subscription_planId_idx\" ON public.\"Subscription\" USING btree (\"planId\")"
+        },
+        {
+          "tablename": "Subscription",
+          "indexdef": "CREATE INDEX \"Subscription_trialEndsAt_idx\" ON public.\"Subscription\" USING btree (\"trialEndsAt\")"
+        },
+        {
+          "tablename": "Subscription",
+          "indexdef": "CREATE INDEX \"Subscription_currentPeriodEndsAt_idx\" ON public.\"Subscription\" USING btree (\"currentPeriodEndsAt\")"
+        },
+        {
+          "tablename": "Order",
+          "indexdef": "CREATE UNIQUE INDEX \"Order_hotelId_idempotencyOperation_idempotencyKey_key\" ON public.\"Order\" USING btree (\"hotelId\", \"idempotencyOperation\", \"idempotencyKey\")"
+        },
+        {
+          "tablename": "ReservationRoom",
+          "indexdef": "CREATE INDEX \"ReservationRoom_hotelId_idx\" ON public.\"ReservationRoom\" USING btree (\"hotelId\")"
+        },
+        {
+          "tablename": "ReservationRoom",
+          "indexdef": "CREATE INDEX \"ReservationRoom_roomId_hotelId_idx\" ON public.\"ReservationRoom\" USING btree (\"roomId\", \"hotelId\")"
+        },
+        {
+          "tablename": "Recipe",
+          "indexdef": "CREATE UNIQUE INDEX \"Recipe_id_hotelId_key\" ON public.\"Recipe\" USING btree (id, \"hotelId\")"
+        },
+        {
+          "tablename": "Recipe",
+          "indexdef": "CREATE UNIQUE INDEX \"Recipe_menuItemId_hotelId_key\" ON public.\"Recipe\" USING btree (\"menuItemId\", \"hotelId\")"
+        },
+        {
+          "tablename": "RecipeIngredient",
+          "indexdef": "CREATE INDEX \"RecipeIngredient_inventoryItemId_hotelId_idx\" ON public.\"RecipeIngredient\" USING btree (\"inventoryItemId\", \"hotelId\")"
+        },
+        {
+          "tablename": "OrderItem",
+          "indexdef": "CREATE INDEX \"OrderItem_menuItemId_hotelId_idx\" ON public.\"OrderItem\" USING btree (\"menuItemId\", \"hotelId\")"
+        }
+      ]
+    },
+    {
+      "id": "row.counts",
+      "kind": "list",
+      "description": "row counts per application table",
+      "sql": "SELECT 'AuditLog' AS table_name, count(*)::bigint AS rows FROM \"AuditLog\" UNION ALL SELECT 'Expense' AS table_name, count(*)::bigint AS rows FROM \"Expense\" UNION ALL SELECT 'Folio' AS table_name, count(*)::bigint AS rows FROM \"Folio\" UNION ALL SELECT 'FolioItem' AS table_name, count(*)::bigint AS rows FROM \"FolioItem\" UNION ALL SELECT 'Guest' AS table_name, count(*)::bigint AS rows FROM \"Guest\" UNION ALL SELECT 'Hotel' AS table_name, count(*)::bigint AS rows FROM \"Hotel\" UNION ALL SELECT 'HotelMembership' AS table_name, count(*)::bigint AS rows FROM \"HotelMembership\" UNION ALL SELECT 'HousekeepingTask' AS table_name, count(*)::bigint AS rows FROM \"HousekeepingTask\" UNION ALL SELECT 'InventoryItem' AS table_name, count(*)::bigint AS rows FROM \"InventoryItem\" UNION ALL SELECT 'MaintenanceTicket' AS table_name, count(*)::bigint AS rows FROM \"MaintenanceTicket\" UNION ALL SELECT 'MenuCategory' AS table_name, count(*)::bigint AS rows FROM \"MenuCategory\" UNION ALL SELECT 'MenuItem' AS table_name, count(*)::bigint AS rows FROM \"MenuItem\" UNION ALL SELECT 'Notification' AS table_name, count(*)::bigint AS rows FROM \"Notification\" UNION ALL SELECT 'Order' AS table_name, count(*)::bigint AS rows FROM \"Order\" UNION ALL SELECT 'OrderItem' AS table_name, count(*)::bigint AS rows FROM \"OrderItem\" UNION ALL SELECT 'Payment' AS table_name, count(*)::bigint AS rows FROM \"Payment\" UNION ALL SELECT 'PaymentMethod' AS table_name, count(*)::bigint AS rows FROM \"PaymentMethod\" UNION ALL SELECT 'Purchase' AS table_name, count(*)::bigint AS rows FROM \"Purchase\" UNION ALL SELECT 'Recipe' AS table_name, count(*)::bigint AS rows FROM \"Recipe\" UNION ALL SELECT 'RecipeIngredient' AS table_name, count(*)::bigint AS rows FROM \"RecipeIngredient\" UNION ALL SELECT 'Reservation' AS table_name, count(*)::bigint AS rows FROM \"Reservation\" UNION ALL SELECT 'ReservationRoom' AS table_name, count(*)::bigint AS rows FROM \"ReservationRoom\" UNION ALL SELECT 'Room' AS table_name, count(*)::bigint AS rows FROM \"Room\" UNION ALL SELECT 'RoomType' AS table_name, count(*)::bigint AS rows FROM \"RoomType\" UNION ALL SELECT 'StockMovement' AS table_name, count(*)::bigint AS rows FROM \"StockMovement\" UNION ALL SELECT 'Subscription' AS table_name, count(*)::bigint AS rows FROM \"Subscription\" UNION ALL SELECT 'User' AS table_name, count(*)::bigint AS rows FROM \"User\" UNION ALL SELECT 'Wastage' AS table_name, count(*)::bigint AS rows FROM \"Wastage\"",
+      "rows": [
+        {
+          "table_name": "AuditLog",
+          "rows": 32
+        },
+        {
+          "table_name": "Expense",
+          "rows": 2
+        },
+        {
+          "table_name": "Folio",
+          "rows": 26
+        },
+        {
+          "table_name": "FolioItem",
+          "rows": 30
+        },
+        {
+          "table_name": "Guest",
+          "rows": 33
+        },
+        {
+          "table_name": "Hotel",
+          "rows": 20
+        },
+        {
+          "table_name": "HotelMembership",
+          "rows": 45
+        },
+        {
+          "table_name": "HousekeepingTask",
+          "rows": 9
+        },
+        {
+          "table_name": "InventoryItem",
+          "rows": 22
+        },
+        {
+          "table_name": "MaintenanceTicket",
+          "rows": 8
+        },
+        {
+          "table_name": "MenuCategory",
+          "rows": 19
+        },
+        {
+          "table_name": "MenuItem",
+          "rows": 23
+        },
+        {
+          "table_name": "Notification",
+          "rows": 12
+        },
+        {
+          "table_name": "Order",
+          "rows": 4
+        },
+        {
+          "table_name": "OrderItem",
+          "rows": 4
+        },
+        {
+          "table_name": "Payment",
+          "rows": 22
+        },
+        {
+          "table_name": "PaymentMethod",
+          "rows": 74
+        },
+        {
+          "table_name": "Purchase",
+          "rows": 7
+        },
+        {
+          "table_name": "Recipe",
+          "rows": 6
+        },
+        {
+          "table_name": "RecipeIngredient",
+          "rows": 6
+        },
+        {
+          "table_name": "Reservation",
+          "rows": 22
+        },
+        {
+          "table_name": "ReservationRoom",
+          "rows": 22
+        },
+        {
+          "table_name": "Room",
+          "rows": 24
+        },
+        {
+          "table_name": "RoomType",
+          "rows": 21
+        },
+        {
+          "table_name": "StockMovement",
+          "rows": 25
+        },
+        {
+          "table_name": "Subscription",
+          "rows": 19
+        },
+        {
+          "table_name": "User",
+          "rows": 41
+        },
+        {
+          "table_name": "Wastage",
+          "rows": 6
+        }
+      ]
+    }
+  ],
+  "verdict": {
+    "ok": true,
+    "failures": [],
+    "warnings": [],
+    "checked": 49
+  }
+}

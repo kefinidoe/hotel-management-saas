@@ -149,9 +149,12 @@ export async function POST(req: Request) {
         menuItemId: menuItem.id,
         hotelId: tenant.hotelId,
         portions: portionCount,
+        // `hotelId` is deliberately absent: RecipeIngredient's tenant column is
+        // part of its foreign key to the parent recipe, so Prisma fills it in
+        // from the recipe. Passing it explicitly is rejected as an unknown
+        // argument, which turned every recipe creation into a 400.
         ingredients: {
           create: ingredients.map((ingredient) => ({
-            hotelId: tenant.hotelId,
             inventoryItemId: ingredient.inventoryItemId,
             quantity: ingredient.quantity,
           })),

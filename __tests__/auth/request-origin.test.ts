@@ -53,6 +53,17 @@ describe("isSameOriginRequest", () => {
     expect(isSameOriginRequest(request({ origin: "http://127.0.0.1:3101" }))).toBe(false);
   });
 
+  it("accepts a request with neither header when it is addressed to this host", () => {
+    // Some proxies and non-browser clients drop the fetch metadata entirely.
+    // The Host header still has to be ours, and no browser sends a cross-site
+    // POST without Origin, so this cannot be a forged cross-site request.
+    expect(isSameOriginRequest(request({ host: "127.0.0.1:3100" }))).toBe(true);
+  });
+
+  it("rejects a request with neither header addressed to another host", () => {
+    expect(isSameOriginRequest(request({ host: "attacker.example" }))).toBe(false);
+  });
+
   it("fails closed when neither signal is present", () => {
     expect(isSameOriginRequest(request({}))).toBe(false);
   });

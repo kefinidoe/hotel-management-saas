@@ -120,6 +120,7 @@ const fixtures = {
   ownerB: { name: "Bram Owner", email: `owner-b-${stamp}@example.test`, password: "OwnerPass123!" },
   receptionist: { name: "Ruth Reception", email: `reception-a-${stamp}@example.test`, password: "Reception123!" },
   guest: { name: `Grace Guest ${stamp}`, phone: "+254711000111" },
+  futureGuest: { name: `Felix Future ${stamp}`, phone: "+254711000222" },
   roomNumber: "101",
   menuItem: `Mandazi ${String(stamp).slice(-5)}`,
   menuCategory: `Counter ${String(stamp).slice(-5)}`,
@@ -728,7 +729,7 @@ async function run() {
       await clickInModal(session, "Create Reservation");
       await waitForText(session, fixtures.guest.name, 25_000);
       expectDb(
-        `SELECT count(*) FROM "Reservation" r JOIN "Hotel" h ON h.id = r."hotelId" JOIN "Guest" g ON g.id = r."guestId" WHERE h.name = '${fixtures.hotelA}' AND g.name = '${fixtures.guest.name}'`,
+        `SELECT count(*) FROM "Reservation" r JOIN "Hotel" h ON h.id = r."hotelId" JOIN "Guest" g ON g.id = r."guestId" WHERE h.name = '${fixtures.hotelA}' AND g.\"fullName\" = '${fixtures.guest.name}'`,
         "1",
         "reservation row"
       );
@@ -752,7 +753,7 @@ async function run() {
       // once settled it offers "Complete Checkout".
       await waitForAnyText(session, ["Collect Payment", "Complete Checkout"]);
       expectDb(
-        `SELECT r.status FROM "Reservation" r JOIN "Hotel" h ON h.id = r."hotelId" JOIN "Guest" g ON g.id = r."guestId" WHERE h.name = '${fixtures.hotelA}' AND g.name = '${fixtures.guest.name}'`,
+        `SELECT r.status FROM "Reservation" r JOIN "Hotel" h ON h.id = r."hotelId" JOIN "Guest" g ON g.id = r."guestId" WHERE h.name = '${fixtures.hotelA}' AND g.\"fullName\" = '${fixtures.guest.name}'`,
         "CHECKED_IN",
         "reservation status after check-in"
       );
@@ -780,7 +781,7 @@ async function run() {
       const text = await pageText(session);
       if (/still due|outstanding balance/i.test(text)) throw new Error(`Check-out refused: ${text.replace(/\s+/g, " ").slice(0, 300)}`);
       expectDb(
-        `SELECT r.status FROM "Reservation" r JOIN "Hotel" h ON h.id = r."hotelId" JOIN "Guest" g ON g.id = r."guestId" WHERE h.name = '${fixtures.hotelA}' AND g.name = '${fixtures.guest.name}'`,
+        `SELECT r.status FROM "Reservation" r JOIN "Hotel" h ON h.id = r."hotelId" JOIN "Guest" g ON g.id = r."guestId" WHERE h.name = '${fixtures.hotelA}' AND g.\"fullName\" = '${fixtures.guest.name}'`,
         "CHECKED_OUT",
         "reservation status after check-out"
       );
@@ -885,6 +886,316 @@ async function run() {
         `SELECT count(*) FROM "Payment" p JOIN "Hotel" h ON h.id = p."hotelId" WHERE h.name = '${fixtures.hotelA}' AND p.amount = 250`
       );
       if (payments !== null && Number(payments) < 1) throw new Error("No 250-unit POS payment row in the database");
+    })
+  );
+
+  await step(
+    "reservation-create-future",
+    "a second, future-dated booking is created for the cancellation test",
+    using(ownerA, async (session) => {
+      await session.page.goto(`${BASE}/dashboard/reservations`, { waitUntil: "networkidle0" });
+      await waitForText(session, fixtures.roomNumber, 25_000);
+      // Next week: the current week is already occupied by today's booking, and
+      // the calendar only renders one week at a time.
+      await session.page.click('button[aria-label="Next week"]');
+      await sleep(1200);
+      const cells = await session.page.$$('[role="gridcell"]');
+      const usable = [];
+      for (const cell of cells) {
+        const label = await cell.evaluate((element) => element.getAttribute("aria-label") || "");
+        if (label.startsWith(`Room ${fixtures.roomNumber}`)) usable.push(cell);
+      }
+      if (usable.length === 0) throw new Error(`No grid cell for room ${fixtures.roomNumber} next week`);
+      await usable[0].click();
+      await waitForText(session, "New Reservation");
+      await fillField(session, "Full Name", fixtures.futureGuest.name);
+      await fillField(session, "Phone", fixtures.futureGuest.phone);
+      await clickInModal(session, "Create Reservation");
+      await waitForText(session, fixtures.futureGuest.name, 25_000);
+    })
+  );
+
+  await step(
+    "reservation-cancel",
+    "cancelling a reservation releases the room and records the cancellation",
+    using(ownerA, async (session) => {
+      await session.page.goto(`${BASE}/dashboard/reservations`, { waitUntil: "networkidle0" });
+      await session.page.click('button[aria-label="Next week"]');
+      await sleep(1200);
+      await waitForText(session, fixtures.futureGuest.name, 25_000);
+
+      // A pending/confirmed booking is cancelled by clicking its bar in the grid,
+      // and the app asks for confirmation first.
+      session.page.once("dialog", (dialog) => void dialog.accept());
+      const clicked = await session.page.evaluate((guest) => {
+        const bars = [...document.querySelectorAll("div[title]")];
+        const bar = bars.find(
+          (candidate) =>
+            (candidate.textContent || "").trim() === guest && /click to cancel/i.test(candidate.getAttribute("title") || "")
+        );
+        if (!bar) return false;
+        bar.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        return true;
+      }, fixtures.futureGuest.name);
+      if (!clicked) throw new Error(`No cancellable booking bar for ${fixtures.futureGuest.name}`);
+      await sleep(2000);
+      expectDb(
+        `SELECT r.status FROM "Reservation" r JOIN "Guest" g ON g.id = r."guestId" WHERE g."fullName" = '${fixtures.futureGuest.name}'`,
+        "CANCELLED",
+        "reservation status after cancel"
+      );
+      // The cancelled stay must not keep the room blocked for those dates.
+      expectDb(
+        `SELECT count(*) FROM "ReservationRoom" rr
+         JOIN "Reservation" r ON r.id = rr."reservationId"
+         JOIN "Guest" g ON g.id = r."guestId"
+         WHERE g."fullName" = '${fixtures.futureGuest.name}' AND r.status IN ('PENDING','CONFIRMED','CHECKED_IN')`,
+        "0",
+        "active room allocations after cancel"
+      );
+    })
+  );
+
+  await step(
+    "inventory-recipe",
+    "creating a recipe from stock links the menu item to its ingredients",
+    using(ownerA, async (session) => {
+      await session.page.goto(`${BASE}/dashboard/inventory`, { waitUntil: "networkidle0" });
+      await clickText(session, "Recipes");
+      await clickText(session, "Create Recipe");
+      await session.page.waitForSelector("div.fixed.inset-0 select", { timeout: 15_000 });
+
+      // The menu list is fetched when the dialog opens, so wait for it before
+      // choosing an item; selecting from an empty list submits nothing.
+      await session.page.waitForFunction(
+        () => {
+          const select = document.querySelector("div.fixed.inset-0 select");
+          return !!select && [...select.options].some((option) => option.value);
+        },
+        { timeout: 20_000 }
+      );
+      await session.page.select("div.fixed.inset-0 select", (
+        await session.page.$$eval("div.fixed.inset-0 select option", (options) =>
+          options.find((option) => option.value)?.value ?? ""
+        )
+      ));
+      await session.page.waitForFunction(
+        () => {
+          const selects = [...document.querySelectorAll("div.fixed.inset-0 select")];
+          return selects.length > 1;
+        },
+        { timeout: 10_000 }
+      );
+      const selects = await session.page.$$("div.fixed.inset-0 select");
+      const ingredientSelect = selects[selects.length - 1];
+      const ingredientValue = await ingredientSelect.evaluate((select) =>
+        [...select.options].find((option) => option.value)?.value ?? ""
+      );
+      await ingredientSelect.select(ingredientValue);
+      await session.page.evaluate(() => {
+        const input = [...document.querySelectorAll("div.fixed.inset-0 input[type=number]")].find(
+          (element) => element.getAttribute("step") === "0.01"
+        );
+        if (input) {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+          setter.call(input, "150");
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      });
+      await sleep(300);
+      await clickInModal(session, "Create Recipe");
+      await sleep(1500);
+      expectDb(
+        `SELECT count(*) FROM "Recipe" r JOIN "Hotel" h ON h.id = r."hotelId" WHERE h.name = '${fixtures.hotelA}'`,
+        "1",
+        "recipe row"
+      );
+      expectDb(
+        `SELECT count(*) FROM "RecipeIngredient" ri JOIN "Hotel" h ON h.id = ri."hotelId" WHERE h.name = '${fixtures.hotelA}'`,
+        "1",
+        "recipe ingredient row"
+      );
+    })
+  );
+
+  await step(
+    "staff-suspend-and-reactivate",
+    "suspending a staff member and reactivating them persists",
+    using(ownerA, async (session) => {
+      await session.page.goto(`${BASE}/dashboard/staff`, { waitUntil: "networkidle0" });
+      await waitForText(session, fixtures.receptionist.name);
+
+      // The status pill is a button only for editable members; click the one in
+      // the receptionist's row, not the first row on the page.
+      const suspended = await session.page.evaluate((name) => {
+        const rows = [...document.querySelectorAll("tr")];
+        const row = rows.find((candidate) => (candidate.textContent || "").includes(name));
+        const button = row?.querySelector("button");
+        if (!button) return false;
+        if (!/active/i.test(button.textContent || "")) return false;
+        button.click();
+        return true;
+      }, fixtures.receptionist.name);
+      if (!suspended) throw new Error("Could not find the suspend control for the receptionist");
+
+      await session.page.waitForFunction(
+        (name) => {
+          const rows = [...document.querySelectorAll("tr")];
+          const row = rows.find((candidate) => (candidate.textContent || "").includes(name));
+          return !!row && /suspended/i.test(row.textContent || "");
+        },
+        { timeout: 20_000 },
+        fixtures.receptionist.name
+      );
+      expectDb(
+        `SELECT m.status FROM "HotelMembership" m JOIN "User" u ON u.id = m."userId" JOIN "Hotel" h ON h.id = m."hotelId"
+         WHERE h.name = '${fixtures.hotelA}' AND u.email = '${fixtures.receptionist.email}'`,
+        "SUSPENDED",
+        "membership status after suspend"
+      );
+
+      await session.page.evaluate((name) => {
+        const rows = [...document.querySelectorAll("tr")];
+        const row = rows.find((candidate) => (candidate.textContent || "").includes(name));
+        row?.querySelector("button")?.click();
+      }, fixtures.receptionist.name);
+      await session.page.waitForFunction(
+        (name) => {
+          const rows = [...document.querySelectorAll("tr")];
+          const row = rows.find((candidate) => (candidate.textContent || "").includes(name));
+          return !!row && /active/i.test(row.textContent || "") && !/suspended/i.test(row.textContent || "");
+        },
+        { timeout: 20_000 },
+        fixtures.receptionist.name
+      );
+      expectDb(
+        `SELECT m.status FROM "HotelMembership" m JOIN "User" u ON u.id = m."userId" JOIN "Hotel" h ON h.id = m."hotelId"
+         WHERE h.name = '${fixtures.hotelA}' AND u.email = '${fixtures.receptionist.email}'`,
+        "ACTIVE",
+        "membership status after reactivate"
+      );
+    })
+  );
+
+  await step(
+    "notifications-bell",
+    "raising a maintenance ticket raises a notification the owner can read and dismiss",
+    using(ownerA, async (session) => {
+      await session.page.goto(`${BASE}/dashboard`, { waitUntil: "networkidle0" });
+      // The maintenance step above ran as this owner, so a MAINTENANCE
+      // notification exists by now.
+      await session.page.waitForSelector('[data-testid="notification-badge"]', { timeout: 20_000 });
+      await session.page.click('[title="Notifications"]');
+      await waitForText(session, "Notifications");
+      await waitForText(session, fixtures.ticket, 20_000);
+      await clickText(session, "Mark all read", { exact: false });
+      await session.page.waitForFunction(
+        () => !document.querySelector('[data-testid="notification-badge"]'),
+        { timeout: 20_000 }
+      );
+      expectDb(
+        `SELECT count(*) FROM "Notification" n JOIN "Hotel" h ON h.id = n."hotelId"
+         WHERE h.name = '${fixtures.hotelA}' AND n."isRead" = false`,
+        "0",
+        "unread notifications after marking all read"
+      );
+    })
+  );
+
+  await step(
+    "audit-trail",
+    "the owner's audit trail shows the payment and check-out recorded earlier",
+    using(ownerA, async (session) => {
+      await session.page.goto(`${BASE}/dashboard/audit`, { waitUntil: "networkidle0" });
+      await waitForText(session, "Audit trail");
+      await waitForAnyText(
+        session,
+        ["Payment recorded", "Guest checked out", "Checked out with a balance"],
+        25_000
+      );
+      const rows = await session.page.$$eval("tbody tr", (trs) => trs.length);
+      if (rows < 1) throw new Error("Audit trail rendered no rows after a payment");
+    })
+  );
+
+  await step(
+    "inventory-purchase-and-movement",
+    "recording a purchase raises the stock and writes a stock movement",
+    using(ownerA, async (session) => {
+      await session.page.goto(`${BASE}/dashboard/inventory`, { waitUntil: "networkidle0" });
+      await clickText(session, "Purchases");
+      await clickText(session, "Record Purchase");
+      await session.page.waitForSelector("div.fixed.inset-0 select", { timeout: 15_000 });
+      await session.page.select("div.fixed.inset-0 select", (
+        await session.page.$$eval("div.fixed.inset-0 select option", (options) =>
+          options.find((option) => (option.textContent || "").includes("Maize"))?.value ?? options[2]?.value
+        )
+      ));
+      await fillField(session, "Supplier", "Nakuru Millers");
+      await fillField(session, "Quantity", "25");
+      await fillField(session, "Unit Cost (KSh)", "70");
+      await clickInModal(session, "Record Purchase");
+      await sleep(1500);
+      expectDb(
+        `SELECT count(*) FROM "Purchase" p JOIN "Hotel" h ON h.id = p."hotelId" WHERE h.name = '${fixtures.hotelA}'`,
+        "1",
+        "purchase row"
+      );
+      await clickText(session, "Stock Movements");
+      await waitForText(session, "PURCHASE", 20_000);
+    })
+  );
+
+  await step(
+    "inventory-wastage",
+    "logging wastage reduces stock, records the reason and writes a movement",
+    using(ownerA, async (session) => {
+      await session.page.goto(`${BASE}/dashboard/inventory`, { waitUntil: "networkidle0" });
+      await clickText(session, "Wastage");
+      await clickText(session, "Record Wastage");
+      await session.page.waitForSelector("div.fixed.inset-0 select", { timeout: 15_000 });
+
+      // Item select.
+      await session.page.select("div.fixed.inset-0 select", (
+        await session.page.$$eval("div.fixed.inset-0 select option", (options) =>
+          options.find((option) => (option.textContent || "").includes("Maize"))?.value ?? options[2]?.value
+        )
+      ));
+      await fillField(session, "Quantity", "2");
+
+      // "Person accountable" is required and is populated from the staff list.
+      // Wait for that list, then drive the select through Puppeteer so React's
+      // onChange runs exactly as it would for a real click.
+      await session.page.waitForFunction(
+        () => {
+          const selects = [...document.querySelectorAll("div.fixed.inset-0 select")];
+          const accountable = selects.find((select) =>
+            [...select.options].some((option) => /Select staff member/.test(option.textContent || ""))
+          );
+          return !!accountable && [...accountable.options].some((option) => option.value);
+        },
+        { timeout: 20_000 }
+      );
+      const modalSelects = await session.page.$$("div.fixed.inset-0 select");
+      const accountableSelect = modalSelects[modalSelects.length - 1];
+      const accountableValue = await accountableSelect.evaluate((select) =>
+        [...select.options].find((option) => option.value)?.value ?? ""
+      );
+      await accountableSelect.select(accountableValue);
+      await sleep(400);
+      await clickInModal(session, "Record Wastage");
+      await sleep(1500);
+      expectDb(
+        `SELECT count(*) FROM "Wastage" w JOIN "Hotel" h ON h.id = w."hotelId" WHERE h.name = '${fixtures.hotelA}'`,
+        "1",
+        "wastage row"
+      );
+      expectDb(
+        `SELECT count(*) FROM "StockMovement" m JOIN "Hotel" h ON h.id = m."hotelId"
+         WHERE h.name = '${fixtures.hotelA}' AND m.type = 'WASTAGE'`,
+        "1",
+        "wastage stock movement"
+      );
     })
   );
 

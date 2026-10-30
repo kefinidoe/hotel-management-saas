@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { syncLowStockAlerts } from "@/lib/notifications";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 
 export async function GET() {
@@ -103,6 +104,8 @@ export async function POST(req: Request) {
       },
     }),
   ]);
+
+  await syncLowStockAlerts(tenant.hotelId);
 
   return NextResponse.json(purchase, { status: 201 });
 }

@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { recordAudit } from "@/lib/audit";
 import { rangesOverlap } from "@/lib/dates";
 import { blocksGuestPlacement, isBookableToday, ROOM_STATUS_LABELS } from "@/lib/room-status";
 import { accommodationRequired, folioTotals, parseMoney, roundMoney, stayNights } from "@/lib/billing";
@@ -368,6 +369,18 @@ export async function executeCheckOut(tenant: TenantContext, options: CheckOutOp
           },
         });
       }
+
+      await recordAudit(
+        {
+          hotelId,
+          userId: tenant.userId,
+          action: allowOutstandingBalance ? "CHECK_OUT_WITH_BALANCE" : "CHECK_OUT",
+          entity: "Reservation",
+          entityId: reservation.id,
+          metadata: { folioId: openFolio.id, balance: totals.balance },
+        },
+        tx
+      );
 
       return { folioId: openFolio.id, ...totals };
     },

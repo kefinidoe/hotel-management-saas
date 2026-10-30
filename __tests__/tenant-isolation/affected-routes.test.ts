@@ -302,10 +302,15 @@ describe("legacy API routes now use the active tenant context", () => {
       hotelId: "hotel-a", id: { in: ["item-a"] },
     });
     expect(mocks.recipeCreate).toHaveBeenCalledOnce();
+    // The ingredient rows inherit `hotelId` from the parent recipe through the
+    // composite foreign key; passing it in the nested create is rejected by
+    // Prisma ("Unknown argument hotelId"), which broke recipe creation until it
+    // was removed. The tenancy assertion is the recipe's own hotelId below.
     expect(mocks.recipeCreate.mock.calls[0][0].data).toMatchObject({
       hotelId: "hotel-a",
-      ingredients: { create: [{ hotelId: "hotel-a", inventoryItemId: "item-a", quantity: 1 }] },
+      ingredients: { create: [{ inventoryItemId: "item-a", quantity: 1 }] },
     });
+    expect(mocks.recipeCreate.mock.calls[0][0].data.ingredients.create[0]).not.toHaveProperty("hotelId");
   });
 
   it("rejects a Hotel B menu item or inventory ingredient when creating a recipe", async () => {

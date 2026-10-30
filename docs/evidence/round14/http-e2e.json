@@ -1,0 +1,319 @@
+{
+  "target": "http://127.0.0.1:3101",
+  "results": [
+    {
+      "area": "system",
+      "name": "login page renders",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "auth",
+      "name": "unauthenticated API is rejected",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "auth",
+      "name": "register hotel A owner",
+      "ok": true,
+      "detail": "owner-a-mvvb2n9d@example.test"
+    },
+    {
+      "area": "auth",
+      "name": "credentials sign-in",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "onboarding",
+      "name": "create hotel A workspace",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "dashboard",
+      "name": "dashboard renders for the new hotel",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "front desk",
+      "name": "create room type and rooms",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "front desk",
+      "name": "create a reservation",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "front desk",
+      "name": "double-booking the same room and dates is refused",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "front desk",
+      "name": "check in the reservation",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "billing",
+      "name": "folio shows the room charge",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "billing",
+      "name": "partial payment is accepted",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "billing",
+      "name": "duplicate payment request is not charged twice",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "pos",
+      "name": "menu category and item",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "pos",
+      "name": "pay-now order",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "pos",
+      "name": "duplicate pay-now request is idempotent",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "pos",
+      "name": "charge to room",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "inventory",
+      "name": "create item, purchase and wastage",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "housekeeping",
+      "name": "task exists and can be reassigned",
+      "ok": true,
+      "detail": "no task yet (created at check-out)"
+    },
+    {
+      "area": "maintenance",
+      "name": "create and assign a ticket",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "maintenance",
+      "name": "assigning a stranger from another hotel is refused",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "staff",
+      "name": "add a receptionist",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "staff",
+      "name": "a hotel admin cannot reset another user's password",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "permissions",
+      "name": "receptionist can use the front desk",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "permissions",
+      "name": "receptionist cannot read reports",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "permissions",
+      "name": "receptionist cannot read the subscription",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "subscription",
+      "name": "owner sees plan, status and limits",
+      "ok": true,
+      "detail": "BAND_1_10/TRIALING"
+    },
+    {
+      "area": "reports",
+      "name": "owner can read the financial report",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "isolation",
+      "name": "hotel B registers and onboards",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "isolation",
+      "name": "B cannot see A's guests",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "isolation",
+      "name": "B cannot read A's reservation by id",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "isolation",
+      "name": "B cannot read A's folio by id",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "isolation",
+      "name": "B cannot pay A's folio",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "isolation",
+      "name": "B's dashboard does not leak A's data",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "membership",
+      "name": "hotel B invites an existing account without granting access",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "membership",
+      "name": "the invitee has no access until accepting",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "membership",
+      "name": "nobody else can accept the invitation",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "membership",
+      "name": "the invitee accepts and can then switch hotels",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "membership",
+      "name": "C cannot switch into a hotel it does not belong to",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "entitlements",
+      "name": "suspended subscription blocks operational writes",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "entitlements",
+      "name": "writes work again once the subscription is active",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "billing",
+      "name": "settle the outstanding balance before check-out",
+      "ok": true,
+      "detail": "settled 4100"
+    },
+    {
+      "area": "front desk",
+      "name": "check out closes the stay and creates housekeeping work",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "housekeeping",
+      "name": "task can be reassigned to an active member",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "inventory",
+      "name": "a recipe links a menu item to its ingredients",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "inventory",
+      "name": "wastage accepts the accountable staff member chosen in the UI",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "notifications",
+      "name": "a maintenance ticket notifies the hotel and can be marked read",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "audit",
+      "name": "privileged actions were recorded",
+      "ok": true,
+      "detail": "CHECK_OUT:1 PAYMENT_RECORDED:3 STAFF_MEMBER_ADDED:1"
+    },
+    {
+      "area": "audit",
+      "name": "the owner can read the hotel's audit trail",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "audit",
+      "name": "a receptionist cannot read the audit trail",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "notifications",
+      "name": "one hotel's notifications are invisible to another",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "persistence",
+      "name": "rows are really in PostgreSQL",
+      "ok": true,
+      "detail": "1|2|4|1|4"
+    }
+  ],
+  "passed": 52,
+  "failed": 0
+}

@@ -1,0 +1,39 @@
+{
+  "mode": "native-engine-verify",
+  "evaluatedAt": "2026-10-30T18:33:38.475Z",
+  "node": "v22.22.3",
+  "platform": "debian-openssl-3.0.x",
+  "prismaVersion": "5.17.0",
+  "engineCommit": "393aa359c9ad4a4bb28630fb5613f9c281cde053",
+  "verdict": "BLOCKED",
+  "checks": [
+    {
+      "id": "artifact",
+      "description": "native query engine present with the pinned digest",
+      "status": "BLOCKED",
+      "detail": {
+        "searched": [
+          {
+            "path": "/home/user/hotel-management-saas/node_modules/@prisma/engines/libquery_engine-debian-openssl-3.0.x.so.node",
+            "state": "missing"
+          },
+          {
+            "path": "/home/user/hotel-management-saas/node_modules/.prisma/client/libquery_engine-debian-openssl-3.0.x.so.node",
+            "state": "missing"
+          },
+          {
+            "path": "/home/user/hotel-management-saas/node_modules/.prisma/client/libquery.so.node",
+            "state": "missing"
+          }
+        ],
+        "expected": {
+          "platform": "debian-openssl-3.0.x",
+          "prismaVersion": "5.17.0",
+          "engineCommit": "393aa359c9ad4a4bb28630fb5613f9c281cde053",
+          "sha256": "077e86821d96c3225ec75c4e2172822f8969cd4f720942f944bc853ea1b77f9f"
+        },
+        "hint": "The engine is downloaded by `prisma generate`/`npm ci` from binaries.prisma.sh and is required for the production client. Run this script on a host that can reach that host, or set PRISMA_QUERY_ENGINE_LIBRARY to the pinned binary. A placeholder file at this path means the download never happened; it must not be used to run the application."
+      }
+    }
+  ]
+}

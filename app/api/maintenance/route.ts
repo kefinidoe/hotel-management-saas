@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
+import { notify } from "@/lib/notifications";
 
 export async function GET() {
   const tenant = await getTenantFromRoute();
@@ -88,6 +89,20 @@ export async function POST(req: Request) {
       data: { status: "MAINTENANCE" },
     });
   }
+
+  // Whoever raised the ticket knows about it; the point of the notification is
+  // that the people who fix and pay for things find out without being told.
+  const room = roomId
+    ? await prisma.room.findFirst({ where: { id: roomId, hotelId: tenant.hotelId }, select: { number: true } })
+    : null;
+  await notify({
+    hotelId: tenant.hotelId,
+    type: "MAINTENANCE",
+    title: `Maintenance: ${ticket.title}`,
+    message: `${room ? `Room ${room.number} - ` : ""}${ticket.priority} priority ticket opened${
+      body.takeOutOfService ? "; the room has been taken out of service" : ""
+    }.`,
+  });
 
   return NextResponse.json(ticket, { status: 201 });
 }

@@ -11,6 +11,7 @@ import {
   round2,
 } from "@/lib/restaurant";
 import { deductRecipeStock } from "@/lib/inventory";
+import { syncLowStockAlerts } from "@/lib/notifications";
 
 const WALK_IN_GUEST = "Walk-in Guest";
 
@@ -273,6 +274,8 @@ export async function POST(req: Request) {
         timeout: 15000,
       }
     );
+
+    await syncLowStockAlerts(hotelId);
 
     return NextResponse.json(successBody(result), { status: 201 });
   } catch (error) {

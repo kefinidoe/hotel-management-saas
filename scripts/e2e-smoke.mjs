@@ -694,13 +694,91 @@ async function main() {
     assert([200].includes(res.status), `task update failed (${res.status}) ${res.text.slice(0, 200)}`);
   });
 
+  // ---- 12b. inventory workflows (recipes, wastage, notifications) ---------
+  await step("inventory", "a recipe links a menu item to its ingredients", async () => {
+    const res = await A.request("POST", "/api/recipes", {
+      menuItemId: state.menuItemId,
+      portions: 4,
+      ingredients: [{ inventoryItemId: state.inventoryItemId, quantity: 250 }],
+    });
+    assert(
+      [200, 201].includes(res.status),
+      `recipe creation failed (${res.status}) ${res.text.slice(0, 300)}`
+    );
+    const rows = sql(
+      `SELECT count(*) FROM "RecipeIngredient" WHERE "hotelId" = '${state.hotelA}' AND "inventoryItemId" = '${state.inventoryItemId}'`
+    );
+    assert(rows === "1", `expected one recipe ingredient row, database says ${rows}`);
+    state.recipeId = res.json.id;
+  });
+
+  await step("inventory", "wastage accepts the accountable staff member chosen in the UI", async () => {
+    const staff = await A.request("GET", "/api/staff");
+    const me = (staff.json ?? []).find((m) => m.role === "HOTEL_OWNER");
+    assert(me?.userId, "the staff list did not expose a userId for the owner");
+    const before = Number(
+      sql(`SELECT count(*) FROM "StockMovement" WHERE "hotelId" = '${state.hotelA}' AND type = 'WASTAGE'`)
+    );
+    const res = await A.request("POST", "/api/wastage", {
+      inventoryItemId: state.inventoryItemId,
+      quantity: 1,
+      reason: "SPOILAGE",
+      accountableUserId: me.userId,
+    });
+    assert(res.status === 201, `wastage failed (${res.status}) ${res.text.slice(0, 300)}`);
+    assert(res.json.accountableName, "the wastage record has no accountable person");
+    const after = Number(
+      sql(`SELECT count(*) FROM "StockMovement" WHERE "hotelId" = '${state.hotelA}' AND type = 'WASTAGE'`)
+    );
+    assert(after === before + 1, `expected one new wastage movement, ${before} -> ${after}`);
+  });
+
+  await step("notifications", "a maintenance ticket notifies the hotel and can be marked read", async () => {
+    const list = await A.request("GET", "/api/notifications");
+    assert(list.status === 200, `notifications failed (${list.status})`);
+    const items = list.json.notifications ?? [];
+    assert(items.length > 0, "no notifications were created for the hotel");
+    assert(items.some((n) => n.type === "MAINTENANCE"), "the maintenance ticket produced no notification");
+    assert(list.json.unread > 0, "every notification is already read");
+
+    const mark = await A.request("PATCH", "/api/notifications", { all: true });
+    assert(mark.status === 200, `marking all read failed (${mark.status})`);
+    const after = await A.request("GET", "/api/notifications");
+    assert(after.json.unread === 0, `unread count did not drop to 0 (${after.json.unread})`);
+  });
+
   // ---- 13. audit trail ----------------------------------------------------
   await step("audit", "privileged actions were recorded", async () => {
     const counts = sql(
       `SELECT action || ':' || count(*) FROM "AuditLog" WHERE "hotelId" = '${state.hotelA}' GROUP BY action ORDER BY action`
     );
     assert(counts.length > 0, "no audit rows for hotel A");
+    assert(/PAYMENT_RECORDED/.test(counts), `no payment audit row: ${counts}`);
+    assert(/CHECK_OUT/.test(counts), `no check-out audit row: ${counts}`);
     return counts.replace(/\n/g, " ");
+  });
+
+  await step("audit", "the owner can read the hotel's audit trail", async () => {
+    const res = await A.request("GET", "/api/audit-logs");
+    assert(res.status === 200, `audit read failed (${res.status}) ${res.text.slice(0, 200)}`);
+    const logs = res.json.logs ?? [];
+    assert(logs.length > 0, "the audit trail is empty for a hotel that just took payments");
+    assert(
+      logs.every((log) => typeof log.action === "string" && typeof log.actorName === "string"),
+      "audit rows are missing their action or actor"
+    );
+  });
+
+  await step("audit", "a receptionist cannot read the audit trail", async () => {
+    const res = await C.request("GET", "/api/audit-logs");
+    assert([401, 403].includes(res.status), `expected 401/403 for a receptionist, got ${res.status}`);
+  });
+
+  await step("notifications", "one hotel's notifications are invisible to another", async () => {
+    const res = await B.request("GET", "/api/notifications");
+    assert(res.status === 200, `hotel B notifications failed (${res.status})`);
+    const foreign = (res.json.notifications ?? []).filter((n) => n.type === "MAINTENANCE");
+    assert(foreign.length === 0, "hotel B can see hotel A's maintenance notification");
   });
 
   // ---- 14. persistence check ---------------------------------------------
