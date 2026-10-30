@@ -100,16 +100,29 @@ outside the working tree regardless.
 
 ## 3. Step 2 — analyse the archive (no database is created, nothing connects)
 
+Two entry points do the same thing. The standalone analyser needs only `pg_restore`, not `psql` or a
+running server:
+
 ```powershell
 cd $repo
+node scripts\archive-toc.mjs `
+  --dump "C:\hotel-saas-rehearsal\archive\hotel-management-saas-20261028-140823.dump" `
+  --expect-sha256 F81566E9CCBB511DD34D0FEA5076934CDFBB03CD8BCDE1B1611E8D0F77DB24A7
+```
+
+and the rehearsal tool's analysis mode:
+
+```powershell
 npm run migration:restore-rehearsal -- `
   --dump $archive `
   --expect-sha256 F81566E9CCBB511DD34D0FEA5076934CDFBB03CD8BCDE1B1611E8D0F77DB24A7 `
   --toc
 ```
 
-This reads the archive with `pg_restore --list` and exits. It does not create a database or open a
-connection. Expect output shaped like this (values from a Supabase-shaped fixture, not the owner's
+Either one reads the archive with `pg_restore --list` and exits. Neither creates a database or opens a
+connection. `--json` gives the machine-readable form, `--available-extension pgcrypto,plpgsql` lets the
+standalone analyser name extensions the target cannot install without querying a database, and
+`--help` lists the options. Expect output shaped like this (values from a Supabase-shaped fixture, not the owner's
 archive):
 
 ```

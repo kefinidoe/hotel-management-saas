@@ -1,4 +1,9 @@
 import { describe, it, expect } from "vitest";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import {
   APPLICATION_SCHEMA,
@@ -354,4 +359,139 @@ describe("dependency-aware filtering (the genuine-rehearsal failure)", () => {
     expect(unfiltered.excluded).toEqual([]);
     expect(unfiltered.text.split("\n").filter((line) => line.startsWith(";"))).toEqual(parseToc(SUPABASE_TOC).header);
   });
+});
+
+
+// ---------------------------------------------------------------------------
+// CLI. The parser and filter are libraries; this is the operator-facing entry
+// point, and its two failure modes both look like success if unhandled: no
+// output at all (the module is imported, nothing runs) or a silent exit 0.
+// ---------------------------------------------------------------------------
+const repoRoot = path.resolve(__dirname, "../..");
+const cli = (args: string[]) =>
+  spawnSync(process.execPath, [path.join(repoRoot, "scripts", "archive-toc.mjs"), ...args], { encoding: "utf8" });
+
+const digest = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
+
+const pgRestoreAvailable = spawnSync("pg_restore", ["--version"], { encoding: "utf8" }).status === 0;
+const rehearsalBaseUrl = process.env.REHEARSAL_TEST_BASE_URL;
+
+describe("scripts/archive-toc.mjs — CLI", () => {
+  it("prints usage and exits 0 for --help", () => {
+    const { status, stdout } = cli(["--help"]);
+    expect(status).toBe(0);
+    expect(stdout).toContain("Usage: node scripts/archive-toc.mjs --dump <path>");
+    expect(stdout).toContain("--toc");
+    expect(stdout).toContain("--expect-sha256");
+    expect(stdout).toContain("--json");
+  });
+
+  it("explains the missing --dump instead of doing nothing", () => {
+    const { status, stdout, stderr } = cli([]);
+    expect(status).toBe(2);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("--dump is required");
+    expect(stderr).toContain("Usage:");
+  });
+
+  it("rejects an unknown option", () => {
+    const { status, stderr } = cli(["--nope"]);
+    expect(status).toBe(2);
+    expect(stderr).toContain("Unknown option '--nope'");
+  });
+
+  it("rejects a flag used as a value", () => {
+    const { status, stderr } = cli(["--dump", "--json"]);
+    expect(status).toBe(2);
+    expect(stderr).toContain("--dump requires a value");
+  });
+
+  it("rejects a malformed digest", () => {
+    const { status, stderr } = cli(["--dump", "whatever.dump", "--expect-sha256", "abc"]);
+    expect(status).toBe(2);
+    expect(stderr).toContain("64-character hex digest");
+  });
+
+  it("reports a missing archive and never creates one", () => {
+    const { status, stderr } = cli(["--dump", path.join(tmpdir(), "definitely-not-here.dump")]);
+    expect(status).toBe(1);
+    expect(stderr).toContain("No such archive");
+    expect(stderr).toContain("never creates one");
+  });
+
+  it("refuses a file that is not a custom-format archive", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "archive-toc-cli-"));
+    const file = path.join(dir, "plain.sql");
+    writeFileSync(file, "CREATE TABLE t (id int);\n");
+    const { status, stderr } = cli(["--dump", file]);
+    expect(status).toBe(1);
+    expect(stderr).toContain("Not a PostgreSQL custom-format archive");
+  });
+
+  it("stops on a digest mismatch before parsing anything", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "archive-toc-digest-"));
+    const file = path.join(dir, "looks-custom.dump");
+    writeFileSync(file, Buffer.concat([Buffer.from("PGDMP", "latin1"), Buffer.from("body")]));
+    const { status, stderr } = cli(["--dump", file, "--expect-sha256", "0".repeat(64)]);
+    expect(status).toBe(1);
+    expect(stderr).toContain("does not match the recorded value");
+    // The real digest is reported so the operator can correct the record.
+    expect(stderr).toContain(digest(file));
+  });
+
+  it.skipIf(!pgRestoreAvailable || !rehearsalBaseUrl)(
+    "analyses a real archive and prints the report",
+    () => {
+      const base = (rehearsalBaseUrl as string).replace(/\/+$/, "");
+      const source = `toc_cli_source_${Date.now()}`;
+      const dir = mkdtempSync(path.join(tmpdir(), "archive-toc-cli-real-"));
+      const dump = path.join(dir, "cli.dump");
+      const psql = (args: string[]) => spawnSync("psql", args, { encoding: "utf8" });
+      try {
+        const created = psql(["-d", base, "-q", "-c", `CREATE DATABASE ${source}`]);
+        expect(created.status, created.stderr).toBe(0);
+        const built = psql([
+          "-d",
+          `${base}/${source}`,
+          "-q",
+          "-v",
+          "ON_ERROR_STOP=1",
+          "-c",
+          "CREATE SCHEMA auth",
+          "-c",
+          "CREATE TABLE auth.users (id int primary key)",
+          "-c",
+          'CREATE TABLE public."Hotel" (id int primary key)',
+          "-c",
+          'CREATE TABLE public."Guest" (id int primary key, "hotelId" int references public."Hotel"(id))',
+          "-c",
+          'COMMENT ON TABLE public."Hotel" IS \'kept\'',
+        ]);
+        expect(built.status, built.stderr).toBe(0);
+        const dumped = spawnSync("pg_dump", ["-Fc", "-d", `${base}/${source}`, "-f", dump], { encoding: "utf8" });
+        expect(dumped.status, dumped.stderr).toBe(0);
+
+        const { status, stdout } = cli(["--dump", dump, "--expect-sha256", digest(dump).toUpperCase()]);
+        expect(status).toBe(0);
+        expect(stdout).toContain("Archive analysis (no database is created)");
+        expect(stdout).toContain("Digest verified    : yes");
+        expect(stdout).toContain("Schemas            : auth, public");
+        expect(stdout).toContain("Supabase schemas   : auth");
+        expect(stdout).toContain("Looks like Supabase: yes");
+        expect(stdout).toContain("Application tables : 2 in public (Guest, Hotel)");
+        // `OWNED` is not a schema: `SEQUENCE OWNED BY` must not be parsed as one.
+        expect(stdout).not.toContain("OWNED");
+
+        const json = cli(["--dump", dump, "--json"]);
+        expect(json.status).toBe(0);
+        const report = JSON.parse(json.stdout);
+        expect(report.analysis.entries).toBeGreaterThan(10);
+        expect(report.analysis.applicationTables).toEqual(["Guest", "Hotel"]);
+        expect(report.archive.sha256).toBe(digest(dump));
+      } finally {
+        psql(["-d", base, "-q", "-c", `DROP DATABASE IF EXISTS ${source}`]);
+      }
+    },
+    60_000
+  );
 });

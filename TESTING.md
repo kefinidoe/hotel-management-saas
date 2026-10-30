@@ -2,7 +2,7 @@
 
 > ## Current verification status (2026-10-30)
 >
-> The latest full Vitest run passed **750 tests across 50 files** (1 skipped), and `npm run lint` passed.
+> The latest full Vitest run passed **758 tests across 50 files** (2 skipped), and `npm run lint` passed.
 > `npx tsc --noEmit` currently reports 296 diagnostics, all of them consequences of the Prisma
 > client not being generated in this sandbox (77 missing `@prisma/client` exports plus cascading
 > inference errors); none are in the migration, adoption or rehearsal code. Prisma generation,
@@ -23,7 +23,7 @@
 > above; production readiness is not claimed.
 
 ## Overview
-The current suite has **751 tests in 50 files** (one skips without a live PostgreSQL server). It is green as a test suite, but mocked and
+The current suite has **760 tests in 50 files** (two skip without a live PostgreSQL server). It is green as a test suite, but mocked and
 placeholder cases have limited reach. Relevant tenant and schema test groups include:
 
 | Suite | Tests | What it checks |
@@ -41,7 +41,7 @@ placeholder cases have limited reach. Relevant tenant and schema test groups inc
 | `scripts/database-target-safety.test.ts` | 4 | Identifier validation and wiring for standalone backup/restore target checks |
 | `scripts/migration-readiness.test.ts` | 9 | The three prerequisites are reported individually with the PASS / BLOCKED / FAIL vocabulary; approval is always PENDING APPROVAL; decision is the worst prerequisite |
 | `scripts/prisma-engine-pin.test.ts` | 16 | Pinned Prisma 5.17.0 digests and commit: parser, match/mismatch/missing paths, and the `verify-pin` CLI refusals |
-| `scripts/archive-toc.test.ts` | 27 | The `pg_restore --list` parser and the `--use-list` filter: Supabase-schema detection, extension/type exclusion, the `SCHEMA`-name regression that let `auth` survive filtering, and the dependency-aware filter that stops an excluded extension's or schema's `COMMENT`/`ACL` entries from surviving it (pure, no database) |
+| `scripts/archive-toc.test.ts` | 36 | The `pg_restore --list` parser and the `--use-list` filter: Supabase-schema detection, extension/type exclusion, the `SCHEMA`-name regression that let `auth` survive filtering, and the dependency-aware filter that stops an excluded extension's or schema's `COMMENT`/`ACL` entries from surviving it, and the CLI's `--help`/`--dump`/`--toc` contract (pure, no database; the real-archive case needs `REHEARSAL_TEST_BASE_URL`) |
 | `scripts/migration-evidence-tools.test.ts` | 21 | CLI-level refusals for `target-check.mjs` (no write path, target binding, pooler port) and `restore-rehearsal.mjs` (digest, missing archive, corrupt archive preflight, shared host, reserved names, unknown `--profile`, `--exclude-schema public`, plain-SQL `--toc`) — no database needed; the archive-reading cases skip when `psql`/`pg_restore` are not installed; one end-to-end restore test runs only when `REHEARSAL_TEST_BASE_URL` names a disposable server |
 | `safety/offline-auth-routes.test.ts` | 3 | Offline 503 responses without importing Prisma-backed auth modules |
 
@@ -228,7 +228,7 @@ Latest full run on the worktree:
 
 ```
 Test Files  50 passed (50)
-     Tests  750 passed | 1 skipped (751)
+     Tests  758 passed | 2 skipped (760)
 ```
 
 The PGlite schema/migration tests create disposable in-memory databases and close them after

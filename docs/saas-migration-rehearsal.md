@@ -552,6 +552,7 @@ missing, and a rehearsal that only checks the exit code can be misread as a pass
 |---|---|
 | `scripts/archive-toc.mjs` (new) | Pure parser/analyser for `pg_restore --list` output, plus the `--use-list` builder |
 | `--toc` on `restore-rehearsal` | Analyse the archive and exit; no database is created, nothing connects |
+| `archive-toc.mjs` CLI | The same analysis standalone: `node scripts/archive-toc.mjs --dump <archive> --toc [--json]` needs only `pg_restore` — no `psql`, no server |
 | `--profile auto\|plain\|supabase` | Choose how much of the archive to attempt: `plain` keeps the application schema, `supabase` assumes a local Supabase stack, `auto` decides from the archive plus whether the target has the `supabase_admin` role |
 | `--exclude-schema` | Add schemas to skip; refuses to drop `public` |
 | `--use-list` restore | The filtered TOC is written to a temp file, passed to `pg_restore`, and removed on both exit paths |

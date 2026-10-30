@@ -47,6 +47,12 @@
  *    expose the dependency so it can be excluded with its object.
  */
 
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { closeSync, openSync, readSync, statSync } from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
 /** Schemas that belong to the Supabase platform rather than to this application. */
 export const SUPABASE_MANAGED_SCHEMAS = [
   "auth",
@@ -70,6 +76,9 @@ export const SUPABASE_MANAGED_SCHEMAS = [
 
 /** The schema this application actually owns. */
 export const APPLICATION_SCHEMA = "public";
+
+/** TOC types that name their object in three words (`SEQUENCE OWNED BY public s`). */
+const THREE_WORD_TYPES = new Set(["SEQUENCE OWNED BY"]);
 
 /** TOC types that name their object in two words. */
 const TWO_WORD_TYPES = new Set([
@@ -154,10 +163,18 @@ export function parseToc(text) {
     let type = firstWord;
     let remainder = rest.trim();
 
-    const twoWord = remainder ? `${firstWord} ${remainder.split(/\s+/)[0]}` : "";
-    if (remainder && TWO_WORD_TYPES.has(twoWord)) {
+    // `SEQUENCE OWNED BY public Guest_id_seq postgres` reads as a three-word type;
+    // without this the parser called `OWNED` a schema and the analysis reported it
+    // as one.
+    const words = remainder ? remainder.split(/\s+/) : [];
+    const threeWord = words.length >= 2 ? `${firstWord} ${words[0]} ${words[1]}` : "";
+    const twoWord = words.length >= 1 ? `${firstWord} ${words[0]}` : "";
+    if (THREE_WORD_TYPES.has(threeWord)) {
+      type = threeWord;
+      remainder = words.slice(2).join(" ").trim();
+    } else if (TWO_WORD_TYPES.has(twoWord)) {
       type = twoWord;
-      remainder = remainder.slice(remainder.indexOf(" ") + 1).trim();
+      remainder = words.slice(1).join(" ").trim();
     }
 
     const parts = remainder ? remainder.split(/\s+/) : [];
@@ -311,4 +328,256 @@ export function buildFilteredToc(parsed, { excludeSchemas = [], excludeExtension
   }
 
   return { text: `${lines.join("\n")}\n`, excluded, kept: parsed.entries.length - excluded.length };
+}
+
+// ── CLI ───────────────────────────────────────────────────────────────────────
+//
+// This module is a library first: the parser and filter are imported by
+// `restore-rehearsal.mjs` and by the tests. The CLI below is for operators who
+// want to look at an archive without rehearsing it -- no database, no scratch
+// database, no writes. It is guarded so importing the module never runs it.
+
+const USAGE = `Usage: node scripts/archive-toc.mjs --dump <path> [options]
+
+Reads a pg_dump archive's table of contents with \`pg_restore --list\` and reports
+what it contains and what a plain PostgreSQL server can restore from it. No
+database is created or contacted; the archive is only read.
+
+Options:
+  --dump <path>                 Archive to analyse (custom, tar or directory).
+                                Required.
+  --toc                         Explicitly select analysis (the default action).
+  --expect-sha256 <hex>         Compare the archive's SHA-256 with this value and
+                                fail if they differ.
+  --pg-restore <path>           pg_restore binary (default PG_RESTORE_BIN, then
+                                pg_restore on PATH).
+  --available-extension <list>  Comma-separated extensions the target can install,
+                                without querying a database. Without it the report
+                                cannot say which extensions are unavailable.
+  --json                        Print the report as JSON.
+  --help, -h                    Show this text.
+`;
+
+class UsageError extends Error {}
+
+function parseArgs(argv) {
+  const options = {
+    dump: null,
+    expectSha256: null,
+    pgRestore: process.env.PG_RESTORE_BIN || null,
+    availableExtensions: null,
+    json: false,
+    help: false,
+  };
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const takeValue = (name) => {
+      const value = argv[i + 1];
+      if (!value || value.startsWith("-")) throw new UsageError(`${name} requires a value.`);
+      i++;
+      return value;
+    };
+
+    switch (arg) {
+      case "--dump":
+        options.dump = takeValue("--dump");
+        break;
+      case "--toc":
+        break;
+      case "--expect-sha256": {
+        const value = takeValue("--expect-sha256");
+        if (!/^[0-9a-f]{64}$/i.test(value)) throw new UsageError("--expect-sha256 must be a 64-character hex digest.");
+        options.expectSha256 = value.toLowerCase();
+        break;
+      }
+      case "--pg-restore":
+        options.pgRestore = takeValue("--pg-restore");
+        break;
+      case "--available-extension": {
+        const value = takeValue("--available-extension");
+        options.availableExtensions = value
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter(Boolean);
+        break;
+      }
+      case "--json":
+        options.json = true;
+        break;
+      case "--help":
+      case "-h":
+        options.help = true;
+        break;
+      default:
+        throw new UsageError(`Unknown option '${arg}'.`);
+    }
+  }
+
+  return options;
+}
+
+function isCustomArchive(dumpPath) {
+  let fd;
+  try {
+    fd = openSync(dumpPath, "r");
+    const head = Buffer.alloc(5);
+    return readSync(fd, head, 0, 5, 0) === 5 && head.toString("latin1") === "PGDMP";
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function sha256File(file) {
+  const hash = createHash("sha256");
+  const chunk = Buffer.alloc(1024 * 1024);
+  const fd = openSync(file, "r");
+  try {
+    let read;
+    while ((read = readSync(fd, chunk, 0, chunk.length, null)) > 0) hash.update(chunk.subarray(0, read));
+  } finally {
+    closeSync(fd);
+  }
+  return hash.digest("hex");
+}
+
+/**
+ * Run `pg_restore --list` and return the raw text, the digest and the size.
+ * Throws an Error whose message is meant for an operator, never a stack trace.
+ */
+export function readArchiveToc(dumpPath, { pgRestore = "pg_restore" } = {}) {
+  const listing = spawnSync(pgRestore, ["--list", dumpPath], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  if (listing.error) {
+    throw new Error(
+      `Could not run '${pgRestore}': ${listing.error.code === "ENOENT" ? "not found" : listing.error.message}\n` +
+        "Install the PostgreSQL client tools (matching the target major version) or pass --pg-restore.\n"
+    );
+  }
+  if (listing.status !== 0) {
+    throw new Error(
+      `The archive could not be read by pg_restore; nothing was analysed.\n${(listing.stderr ?? "").trim().slice(0, 800)}\n`
+    );
+  }
+  return listing.stdout ?? "";
+}
+
+const formatBytes = (bytes) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`);
+
+/** Human-readable analysis, the same facts the CLI prints. */
+export function formatAnalysis(report) {
+  const { archive, analysis } = report;
+  const lines = [];
+  lines.push("");
+  lines.push("Archive analysis (no database is created)");
+  lines.push("----------------------------------------");
+  lines.push(`Archive            : ${archive.path}`);
+  lines.push(`Size / SHA-256     : ${formatBytes(archive.size)} / ${archive.sha256}`);
+  lines.push(
+    `Digest verified    : ${
+      archive.expectedSha256 ? "yes, matches --expect-sha256" : "no (no --expect-sha256 supplied)"
+    }`
+  );
+  lines.push(`TOC entries        : ${analysis.entries}`);
+  lines.push(`Schemas            : ${analysis.schemas.join(", ") || "none"}`);
+  lines.push(`Supabase schemas   : ${analysis.supabaseSchemas.join(", ") || "none"}`);
+  lines.push(`Looks like Supabase: ${analysis.looksLikeSupabase ? "yes" : "no"}`);
+  lines.push(`Extensions         : ${analysis.extensions.join(", ") || "none"}`);
+  if (analysis.unavailableExtensions) {
+    lines.push(`Unavailable there  : ${analysis.unavailableExtensions.join(", ") || "none"}`);
+  }
+  lines.push(
+    `Application tables : ${analysis.applicationTables.length} in ${APPLICATION_SCHEMA}` +
+      (analysis.applicationTables.length ? ` (${analysis.applicationTables.join(", ")})` : "")
+  );
+  if (analysis.supabaseOnlyObjectTypes.length) {
+    lines.push(`Supabase-only types: ${analysis.supabaseOnlyObjectTypes.join(", ")}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function main(argv) {
+  let options;
+  try {
+    options = parseArgs(argv);
+  } catch (error) {
+    if (error instanceof UsageError) {
+      process.stderr.write(`${error.message}\n\n${USAGE}`);
+      return 2;
+    }
+    throw error;
+  }
+
+  if (options.help) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+  if (!options.dump) {
+    process.stderr.write(`--dump is required: point it at the archive to analyse.\n\n${USAGE}`);
+    return 2;
+  }
+
+  const dumpPath = path.resolve(options.dump);
+  let stats;
+  try {
+    stats = statSync(dumpPath);
+  } catch {
+    process.stderr.write(
+      `No such archive: ${dumpPath}\nThis tool reads an existing archive only; it never creates one.\n`
+    );
+    return 1;
+  }
+  if (stats.isDirectory()) {
+    process.stderr.write(
+      `This analyser reads a single archive file, not a directory archive: ${dumpPath}\n` +
+        "Use `npm run migration:restore-rehearsal -- --dump <dir> --toc` for directory archives.\n"
+    );
+    return 1;
+  }
+  if (!isCustomArchive(dumpPath)) {
+    process.stderr.write(
+      `Not a PostgreSQL custom-format archive: ${dumpPath}\n` +
+        "The first bytes must be 'PGDMP'. A plain .sql file has no table of contents to analyse.\n"
+    );
+    return 1;
+  }
+
+  const sha256 = sha256File(dumpPath);
+  if (options.expectSha256 && sha256 !== options.expectSha256) {
+    process.stderr.write(
+      `Archive digest does not match the recorded value; nothing was analysed.\n` +
+        `  archive : ${dumpPath}\n  sha256  : ${sha256}\n  expected: ${options.expectSha256}\n`
+    );
+    return 1;
+  }
+
+  let listing;
+  try {
+    listing = readArchiveToc(dumpPath, { pgRestore: options.pgRestore ?? "pg_restore" });
+  } catch (error) {
+    process.stderr.write(`${error.message}`);
+    return 1;
+  }
+
+  const analysis = summariseToc(parseToc(listing), { availableExtensions: options.availableExtensions });
+  const report = {
+    mode: "archive-analysis",
+    archive: {
+      path: dumpPath,
+      size: stats.size,
+      sha256,
+      expectedSha256: options.expectSha256,
+      digestVerified: Boolean(options.expectSha256),
+    },
+    analysis,
+  };
+
+  process.stdout.write(options.json ? `${JSON.stringify(report, null, 2)}\n` : formatAnalysis(report));
+  return 0;
+}
+
+// `import` must stay free of side effects; only a direct run does anything.
+const invokedDirectly =
+  process.argv[1] !== undefined && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
+if (invokedDirectly) {
+  process.exitCode = main(process.argv.slice(2));
 }
