@@ -781,6 +781,95 @@ async function main() {
     assert(foreign.length === 0, "hotel B can see hotel A's maintenance notification");
   });
 
+  // ---- 13b. cancellation and membership removal --------------------------
+  await step("front desk", "a booking can be cancelled and frees its room", async () => {
+    // Whole nights: the folio night count is derived from midnight boundaries.
+    const night = (days) => {
+      const d = new Date();
+      d.setUTCHours(0, 0, 0, 0);
+      return new Date(d.getTime() + days * 86_400_000).toISOString();
+    };
+    const checkIn = night(20);
+    const checkOut = night(22);
+    const create = await A.request("POST", "/api/reservations", {
+      roomId: state.rooms[1],
+      checkInDate: checkIn,
+      checkOutDate: checkOut,
+      guestName: "Guest Cancelled",
+      guestPhone: "+254700000555",
+      tariffId: state.roomTypeId,
+      occupancy: "SINGLE",
+      mealPlan: "BED_ONLY",
+    });
+    assert([200, 201].includes(create.status), `booking failed (${create.status}) ${create.text.slice(0, 200)}`);
+    const id = create.json.id ?? create.json.reservation?.id;
+    assert(id, "no reservation id returned");
+
+    const cancel = await A.request("PUT", `/api/reservations/${id}`, { status: "CANCELLED" });
+    assert(cancel.status === 200, `cancel failed (${cancel.status}) ${cancel.text.slice(0, 200)}`);
+
+    const reread = await A.request("GET", `/api/reservations/${id}`);
+    assert(reread.status === 200, `re-read failed (${reread.status})`);
+    const status = reread.json.status ?? reread.json.reservation?.status;
+    assert(status === "CANCELLED", `status is ${status}, expected CANCELLED`);
+
+    // The room must be bookable again for exactly those dates: availability is
+    // derived from non-cancelled reservations, so a stale row would show up as a
+    // spurious 409 here.
+    const rebook = await A.request("POST", "/api/reservations", {
+      roomId: state.rooms[1],
+      checkInDate: checkIn,
+      checkOutDate: checkOut,
+      guestName: "Guest Rebooked",
+      guestPhone: "+254700000666",
+      tariffId: state.roomTypeId,
+      occupancy: "SINGLE",
+      mealPlan: "BED_ONLY",
+    });
+    assert(
+      [200, 201].includes(rebook.status),
+      `the cancelled stay still blocks the room (${rebook.status}) ${rebook.text.slice(0, 200)}`
+    );
+    state.cancelledReservation = id;
+  });
+
+  await step("front desk", "a cancelled booking cannot be checked in", async () => {
+    const res = await A.request("POST", `/api/reservations/${state.cancelledReservation}/check-in`, {});
+    assert(
+      [400, 404, 409, 422].includes(res.status),
+      `check-in of a cancelled booking returned ${res.status}`
+    );
+  });
+
+  await step("staff", "removing a member revokes their access immediately", async () => {
+    // The receptionist accepted a second workspace earlier, so the session has to
+    // name hotel A explicitly before it can be used as a revocation baseline.
+    await C.login(emailC, password);
+    const switchRes = await C.request("POST", "/api/auth/switch-hotel", { hotelId: state.hotelA });
+    assert([200, 204].includes(switchRes.status), `switch to A failed (${switchRes.status})`);
+
+    const before = await C.request("GET", `/api/reservations/${state.reservationA}`);
+    assert(before.status === 200, `receptionist cannot read hotel A (${before.status}) ${before.text.slice(0, 200)}`);
+
+    const del = await A.request("DELETE", `/api/staff/${state.staffMembershipId}`);
+    assert([200, 204].includes(del.status), `remove failed (${del.status}) ${del.text.slice(0, 200)}`);
+
+    const after = await C.request("GET", `/api/reservations/${state.reservationA}`);
+    assert(
+      [403, 404].includes(after.status),
+      `removed member still reads hotel A's reservation (${after.status})`
+    );
+
+    const memberships = await C.request("GET", "/api/auth/memberships");
+    const stillThere = (memberships.json.memberships ?? []).some((m) => m.hotelId === state.hotelA);
+    assert(!stillThere, "the removed hotel is still listed in the member's workspaces");
+
+    const rows = sql(
+      `SELECT count(*) FROM "HotelMembership" WHERE "hotelId" = '${state.hotelA}' AND id = '${state.staffMembershipId}'`
+    );
+    assert(rows === "0", `membership row still in the database (count ${rows})`);
+  });
+
   // ---- 14. persistence check ---------------------------------------------
   await step("persistence", "rows are really in PostgreSQL", async () => {
     const hotel = state.hotelA;

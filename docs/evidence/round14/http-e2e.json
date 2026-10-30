@@ -17,7 +17,7 @@
       "area": "auth",
       "name": "register hotel A owner",
       "ok": true,
-      "detail": "owner-a-mvvb2n9d@example.test"
+      "detail": "owner-a-mvvbwiw7@example.test"
     },
     {
       "area": "auth",
@@ -308,12 +308,30 @@
       "detail": ""
     },
     {
+      "area": "front desk",
+      "name": "a booking can be cancelled and frees its room",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "front desk",
+      "name": "a cancelled booking cannot be checked in",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "area": "staff",
+      "name": "removing a member revokes their access immediately",
+      "ok": true,
+      "detail": ""
+    },
+    {
       "area": "persistence",
       "name": "rows are really in PostgreSQL",
       "ok": true,
-      "detail": "1|2|4|1|4"
+      "detail": "1|4|4|1|4"
     }
   ],
-  "passed": 52,
+  "passed": 55,
   "failed": 0
 }
