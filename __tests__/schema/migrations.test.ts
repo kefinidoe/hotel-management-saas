@@ -218,7 +218,7 @@ describe("Prisma migration history", () => {
   });
 });
 
-describe("tenant join-key migration draft", () => {
+describe("tenant join-key migration", () => {
   it("aborts before changing the schema when an existing reservation-room link crosses hotels", async () => {
     const rehearsal = new PGlite();
     try {
@@ -367,5 +367,75 @@ describe("legacy data conversion", () => {
     } finally {
       await legacyDb.close();
     }
+  });
+});
+
+describe("charge-to-room idempotency migration", () => {
+  const hotel = "pos-idempotency-hotel";
+
+  beforeAll(async () => {
+    await db.query(
+      `INSERT INTO "Hotel" (id, name, slug, "updatedAt") VALUES ($1, 'POS Idempotency', 'pos-idempotency', NOW())`,
+      [hotel]
+    );
+  });
+
+  it("allows many orders without an idempotency key", async () => {
+    for (const id of ["pos-plain-1", "pos-plain-2"]) {
+      await db.query(`INSERT INTO "Order" (id, "hotelId", total) VALUES ($1, $2, 10)`, [id, hotel]);
+    }
+    const rows = await db.query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM "Order" WHERE "hotelId" = $1 AND "idempotencyKey" IS NULL`,
+      [hotel]
+    );
+    expect(rows.rows[0].count).toBe(2);
+  });
+
+  it("rejects a replayed key for the same hotel and operation", async () => {
+    await db.query(
+      `INSERT INTO "Order" (id, "hotelId", total, "idempotencyOperation", "idempotencyKey", "requestFingerprint")
+       VALUES ('pos-key-1', $1, 10, 'CHARGE_TO_ROOM', 'key-1', 'fingerprint-1')`,
+      [hotel]
+    );
+    await expect(
+      db.query(
+        `INSERT INTO "Order" (id, "hotelId", total, "idempotencyOperation", "idempotencyKey", "requestFingerprint")
+         VALUES ('pos-key-2', $1, 10, 'CHARGE_TO_ROOM', 'key-1', 'fingerprint-2')`,
+        [hotel]
+      )
+    ).rejects.toThrow(/Order_hotelId_idempotencyOperation_idempotencyKey_key/);
+  });
+
+  it("scopes a client key to its operation, so another operation may reuse it", async () => {
+    await db.query(
+      `INSERT INTO "Order" (id, "hotelId", total, "idempotencyOperation", "idempotencyKey", "requestFingerprint")
+       VALUES ('pos-key-3', $1, 10, 'OTHER_OPERATION', 'key-1', 'fingerprint-1')`,
+      [hotel]
+    );
+    const rows = await db.query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM "Order" WHERE "hotelId" = $1 AND "idempotencyKey" = 'key-1'`,
+      [hotel]
+    );
+    expect(rows.rows[0].count).toBe(2);
+  });
+
+  it("rejects a partially populated idempotency tuple", async () => {
+    await expect(
+      db.query(
+        `INSERT INTO "Order" (id, "hotelId", total, "idempotencyOperation", "idempotencyKey")
+         VALUES ('pos-key-partial', $1, 10, 'CHARGE_TO_ROOM', 'key-partial')`,
+        [hotel]
+      )
+    ).rejects.toThrow(/Order_idempotency_triple_check/);
+  });
+
+  it("rejects an empty idempotency value", async () => {
+    await expect(
+      db.query(
+        `INSERT INTO "Order" (id, "hotelId", total, "idempotencyOperation", "idempotencyKey", "requestFingerprint")
+         VALUES ('pos-key-empty', $1, 10, 'CHARGE_TO_ROOM', '   ', 'fingerprint')`,
+        [hotel]
+      )
+    ).rejects.toThrow(/Order_idempotency_triple_check/);
   });
 });

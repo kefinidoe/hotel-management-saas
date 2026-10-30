@@ -329,6 +329,8 @@ model ReservationRoom {
 
   @@unique([reservationId, roomId])
   @@index([hotelId])
+  // Child-side index for the (roomId, hotelId) foreign key.
+  @@index([roomId, hotelId])
 }
 
 // ===========================================================================
@@ -558,6 +560,8 @@ model OrderItem {
   total      Decimal   @db.Decimal(10, 2)
 
   @@index([orderId])
+  // Child-side index for the (menuItemId, hotelId) foreign key.
+  @@index([menuItemId, hotelId])
 }
 
 // ===========================================================================
@@ -617,6 +621,8 @@ model RecipeIngredient {
   quantity        Decimal       @db.Decimal(10, 2)
 
   @@unique([recipeId, inventoryItemId])
+  // Child-side index for the (inventoryItemId, hotelId) foreign key.
+  @@index([inventoryItemId, hotelId])
 }
 
 enum StockMovementType {

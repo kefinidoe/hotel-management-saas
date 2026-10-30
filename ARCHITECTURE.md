@@ -128,6 +128,10 @@ Design decisions worth knowing about:
 
 5 migrations, latest `20260929182000_add_room_is_twin`. Schema and migrations are in sync.
 
+> **Note (2026-10-30):** this section is a snapshot of an earlier step. The repository now carries 19
+> reviewed migrations, `Order`/`OrderItem` are written by the charge-to-room route, and the
+> deployment strategy for a database without a Prisma ledger is in `docs/migration-strategy.md`.
+
 ---
 
 ## 4. Authentication & authorisation

@@ -59,9 +59,29 @@ space → `%20`. This is the single most common cause of "can't reach database s
 npm run prisma:generate
 ```
 
-The migration history and target database are under review. Do not run `migrate deploy`,
-`migrate dev`, `db push`, `migrate resolve`, or reset against Supabase or any populated/shared
-database. A migration rehearsal requires an explicitly approved, disposable local target.
+## 4b. Migrations
+
+There are 19 reviewed migrations, checksum-pinned in `prisma/migration-release-manifest.json`.
+`npm run migration:manifest` verifies the files still match that manifest.
+
+- **Fresh local database:** `npx prisma migrate deploy` (or apply `prisma/migrations/*` in order).
+- **A database that already has a schema but no `_prisma_migrations` table** (this includes the
+  deployed Supabase project): do **not** run `migrate deploy` first — it would replay migration 1
+  against live tables. Run the read-only dry run, then the documented baseline:
+  ```bash
+  SAAS_ENVIRONMENT=saas SAAS_DATABASE_IDENTIFIER=<id> DIRECT_URL='postgresql://...' \
+    npm run migration:adopt
+  ```
+  The full runbook is `docs/migration-strategy.md`; the rehearsal evidence is
+  `docs/saas-migration-rehearsal.md`. A rehearsal needs an explicitly approved, disposable local
+  target (`npm run migration:rehearse`, loopback only).
+- **Against the real Prisma migration engine:** `npm run migration:verify-engine` deploys,
+  baselines, detects drift and recovers using Prisma's own migrate implementation. It needs a
+  verification-only tool stack outside the repository (`docs/migration-strategy.md` §7.2) and a
+  disposable PostgreSQL server; it never touches the app's pinned `prisma@5.17.0` dependency.
+
+Never run `migrate dev`, `db push`, `migrate resolve`, or reset against Supabase or any
+populated/shared database.
 
 `npm run seed` inserts fictional demo hotels and users. It is refused unless both database URLs
 point to the same loopback database named `hotel_saas_demo_<suffix>`,
@@ -81,7 +101,7 @@ npm run dev
 ## 6. Verify — run these and tell me what they say
 
 ```bash
-npm run test:run             # expect 133 passed / 6 files
+npm run test:run             # expect 678 passed / 46 files
 npm run lint                 # expect "No ESLint warnings or errors"
 npx tsc --noEmit             # expect NO output. This is the one check still unproven.
 npx prisma migrate status    # expect "Database schema is up to date!"

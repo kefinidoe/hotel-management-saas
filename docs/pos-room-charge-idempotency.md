@@ -4,11 +4,25 @@
 
 `Payment` is the wrong idempotency record for a room charge: charging a folio creates an unpaid guest-balance item, not settled funds, and creating a `Payment` would misstate payment and revenue reporting. `Order` and `OrderItem` are the durable record of the restaurant sale, but before this change an `Order` had no request key, no canonical request fingerprint, and no database uniqueness guard. Application locks alone cannot make retries safe across processes or after a lost response.
 
-## Smallest schema change proposed
+## Schema change
 
-Add nullable `idempotencyOperation`, `idempotencyKey`, and `requestFingerprint` fields to `Order`, plus a unique constraint on `(hotelId, idempotencyOperation, idempotencyKey)`. Nullable fields leave all historical and non-idempotent orders unchanged; the operation dimension scopes a key to `CHARGE_TO_ROOM`. Persist the Order in the same transaction as its order lines, folio items, inventory deductions, and stock movements. The unique database constraint is the cross-process final guard; the transaction lookup handles normal replay.
+The change adds nullable `idempotencyOperation`, `idempotencyKey`, and `requestFingerprint` fields to `Order`, plus a unique constraint on `(hotelId, idempotencyOperation, idempotencyKey)`. Nullable fields leave all historical and non-idempotent orders unchanged; the operation dimension scopes a key to `CHARGE_TO_ROOM`. Persist the Order in the same transaction as its order lines, folio items, inventory deductions, and stock movements. The unique database constraint is the cross-process final guard; the transaction lookup handles normal replay.
 
-The draft migration is `prisma/migrations/20261029120000_add_pos_charge_to_room_idempotency/migration.sql`. It is for review only and has **not** been applied to any database.
+The migration is `prisma/migrations/20261029120000_add_pos_charge_to_room_idempotency/migration.sql`. It is
+committed, checksum-pinned in `prisma/migration-release-manifest.json`, and rehearsed on PostgreSQL
+17.11 (see [saas-migration-rehearsal.md](saas-migration-rehearsal.md)). It is **not yet applied to the
+deployed database**; that happens through the adoption runbook in
+[migration-strategy.md](migration-strategy.md).
+
+The migration also enforces the invariant that the three columns are written together:
+
+```sql
+ALTER TABLE "Order" ADD CONSTRAINT "Order_idempotency_triple_check" CHECK (...);
+```
+
+All-null (a non-idempotent order) and all-present (a charge-to-room request) are the only valid
+states. A partially populated tuple is rejected by PostgreSQL, because NULLs are distinct in a
+unique index and a partial tuple would otherwise slip past the uniqueness guard.
 
 ## Request identity
 
