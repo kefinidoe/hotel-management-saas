@@ -2,11 +2,13 @@
 
 **Status: rehearsal executed 2026-10-30 against PostgreSQL 17.11. 8/8 psql scenarios, 83 assertions;
 then executed again by the real Prisma migration engine (6.19.0): 6/6 scenarios, 37 assertions.
-Backup restoration rehearsed on a synthetic archive. No failures.** The strategy and the runbook live in [migration-strategy.md](migration-strategy.md);
+Backup restoration rehearsed on a synthetic archive, and the procedure automated as a digest-enforced
+command (§9). Three external inputs are still missing — the owner's archive, the target credentials and
+a reachable Prisma 5.17.0 engine — so production readiness is not claimed. No failures in what was run.** The strategy and the runbook live in [migration-strategy.md](migration-strategy.md);
 this document is the evidence record: what was run, on what, and what it does *not* prove.
 
 This file supersedes the earlier "preparation only / NO-GO" notes, which were accurate when no
-PostgreSQL server existed in the sandbox. See [§7](#7-history-of-this-record) for why the status
+PostgreSQL server existed in the sandbox. See [§10](#10-history-of-this-record) for why the status
 changed.
 
 ---
@@ -306,15 +308,70 @@ sha256sum hotel-management-saas-20261028-140823.dump     # expect F81566E9…24A
 | Real Prisma migration engine executed against disposable databases | **PASS** (6 scenarios, 37 assertions, §6) |
 | Adoption tooling accepted by the real engine (ledger interop, drift detection) | **PASS** (§6) |
 | Failure and recovery path through the real engine | **PASS** (§6) |
-| Backup/restore + post-restore fingerprint procedure | **PASS** on a synthetic archive (§7) |
-| Verified restore of **the owner's** archive | **NOT DONE** — archive not supplied (§7) |
-| Read-only checkpoint detection against the live target | **NOT DONE** — needs `DIRECT_URL`; one dry run |
-| `prisma migrate deploy` with the **pinned 5.17.0** engine | **NOT DONE** — engine binary unreachable here (§5.1) |
+| Backup/restore + post-restore fingerprint procedure | **PASS** on a synthetic archive (§7) and on a full-schema archive (§9) |
+| Digest-enforced restore rehearsal tool (`npm run migration:restore-rehearsal`) | **PASS** — refuses mismatched digests before connecting, drops its scratch database (§9) |
+| Read-only checkpoint/fingerprint tool (`npm run migration:target-check`) | **PASS** against local targets; read-only enforced by the server (§9) |
+| Verified restore of **the owner's** archive | **NOT DONE** — archive not supplied (§7); one command once the file exists |
+| Read-only checkpoint detection against the live target | **NOT DONE** — needs `DIRECT_URL`; `npm run migration:target-check` is the command |
+| `prisma migrate deploy` with the **pinned 5.17.0** engine | **NOT DONE** — `binaries.prisma.sh` unreachable; recovery and acceptance steps recorded in [migration-strategy.md §7.1.1–7.1.3](migration-strategy.md) |
 | Owner approval for the deployment window | **NOT DONE** |
 
 ---
 
-## 9. History of this record
+## 9. Evidence-gap closure pass (2026-10-30)
+
+The remaining gaps from §8 were attacked with two new tools rather than with more prose. Both are
+deliberately narrow: one can only read, the other can only restore into a database it created itself.
+
+| Tool | Property that makes it evidence |
+|---|---|
+| `scripts/target-check.mjs` (`npm run migration:target-check`) | No write path exists. Every statement runs on a session whose `default_transaction_read_only` is `on`, set through `PGOPTIONS`, and the report is refused if the server did not apply it. Prints the checkpoint, ledger-vs-manifest comparison, and an md5 fingerprint of tables/columns/indexes/constraints/functions |
+| `scripts/restore-rehearsal.mjs` (`npm run migration:restore-rehearsal`) | Refuses to restore unless the archive's SHA-256 equals `--expect-sha256`; refuses an existing database name; creates and drops its own scratch database; insists on an expected digest or explicit `--allow-unverified` |
+
+### 9.1 What was actually run here
+
+Local PostgreSQL 17.11, loopback only. Source database: all 19 migrations applied with `psql`, plus
+two hotels, one user and three guests (fictional data, no ledger).
+
+| Step | Observed |
+|---|---|
+| `backup-db.mjs` on that source | 94 951 bytes, 239 objects, "verified OK", SHA-256 `3b95d707dccde8118da50aa3168493147a235ba3b24956939819024f5bb807d8` |
+| `restore-rehearsal.mjs`, digest supplied | **PASS** — restore finished with no errors; 28 public tables; `User`=1, `Hotel`=2, `Guest`=3; ledger absent; checkpoint `saas_current`; inspection ran read-only (`transaction_read_only=on`); scratch database dropped |
+| `restore-rehearsal.mjs --keep --json` | **PASS** — database kept, `ok: true`, `digestVerified: true`; the kept copy answered `select count(*) from "Guest"` = 3 before being dropped |
+| `restore-rehearsal.mjs` with a wrong digest | exit 1 — "Archive digest does not match the recorded value; nothing was restored" |
+| `restore-rehearsal.mjs` with no digest | exit 1 — refuses until `--expect-sha256` is supplied |
+| `restore-rehearsal.mjs` with a missing archive | exit 1 — "No such archive … never creates one to stand in for a missing backup" |
+| `restore-rehearsal.mjs` with a non-loopback `--base-url` | exit 1 — will not create/drop databases on a shared host without `--allow-remote-target` |
+| `restore-rehearsal.mjs --database backup_src` | exit 1 — "already exists; refusing to restore into it" |
+| `target-check.mjs` on the ledgerless full-schema copy | **PASS** — ledger ABSENT, checkpoint `saas_current`, fingerprint `cd13215577c5b085e071c9a131c30790` (28 tables, 107 indexes, 84 constraints, 219 objects), `default_transaction_read_only=on` |
+| `target-check.mjs` on a database with a real 19-row ledger | **PASS** — ledger present, 19 applied, 0 unfinished, 0 checksum mismatches, same fingerprint digest, adoption plan 0/0 |
+| Same fingerprint on both copies | The digest excludes `_prisma_migrations`, so a target and its restored copy are directly comparable |
+| `target-check.mjs` after tampering with one ledger checksum | exit 1 — "1 mismatch(es)"; the tamper is named with ledger and expected digests |
+| `target-check.mjs` on an empty database | **PASS** with `--expect-checkpoint empty`; adoption plan 0 to baseline, 19 to deploy |
+| `target-check.mjs --expect-checkpoint legacy_single_hotel_through_11` on a current schema | exit 1 — "expected legacy_single_hotel_through_11, detected saas_current" |
+| `target-check.mjs` without `SAAS_ENVIRONMENT` / with a remote rehearsal binding / on port 6543 | exit 1 each — target binding refused before any connection |
+| `target-check.mjs --execute` | exit 2 — "Unknown option"; the tool has no write flag to misuse |
+
+Both tools are covered by `__tests__/scripts/migration-evidence-tools.test.ts` (15 tests, no database
+or `psql` required), because the important behaviour is refusal. Full suite after this pass:
+**693 tests in 47 files**, `npm run lint` clean.
+
+### 9.2 Gap status after this pass
+
+| # | Gap | Status | What is precisely missing |
+|---|---|---|---|
+| 1 | Recover and verify `hotel-management-saas-20261028-140823.dump`, then rehearse it | **BLOCKED — file absent.** Searched the whole filesystem (`*.dump`, `*140823*`); the only archive present is one built here. The recorded identity to check against is 384 096 bytes / `F81566E9…24A7`; the rehearsal is now one command (`--expect-sha256`) that cannot silently restore the wrong file | the archive itself |
+| 2 | Read-only fingerprint and checkpoint against the configured Supabase target | **BLOCKED — credentials absent.** No `DIRECT_URL`, `DATABASE_URL`, `.env`, or Supabase token exists in this workspace; connecting without them would mean inventing a target. The read-only tool is built and proven against local targets | `DIRECT_URL` + `SAAS_DATABASE_IDENTIFIER` (and the owner's authorisation to connect read-only) |
+| 3 | Obtain the official Prisma 5.17.0 engine and verify it against a restored disposable database | **BLOCKED — egress.** `binaries.prisma.sh` TLS-resets and all GitHub hosts are unreachable; no npm/PyPI package carries the native 5.17.0 engines. URL contract, artifact checksums (`schema-engine` = `0a52943c…956e`) and the four acceptance criteria are recorded in [migration-strategy.md §7.1.1–7.1.3](migration-strategy.md) | network access to `binaries.prisma.sh` (or the mirror) and the engine commit `393aa359…` |
+| 4 | Fix what the pass found, document actual results | **DONE** — three real defects found and fixed while building the tools: `pg_restore` needed `--clean --if-exists` for the pre-existing `public` schema; the row-count query aliased a column `rows` inside `FROM (…) rows`, so `row_to_json` bound to the bigint column; the scratch database was not dropped when inspection failed after setting the read-only default | — |
+| 5 | Keep the work committed and pushed | Committed to `main` with the tests passing | — |
+
+No synthetic result stands in for a missing input: where a file or credential is absent, the row above
+says so and the tool that would consume it is built, tested and waiting.
+
+---
+
+## 10. History of this record
 
 * **Before 2026-10-30 — preparation only.** No `psql`, `postgres`, `initdb`, Docker or Podman
   existed in the sandbox, so the documented procedure was written but not executed, and the status
@@ -333,6 +390,12 @@ sha256sum hotel-management-saas-20261028-140823.dump     # expect F81566E9…24A
   [migration-strategy.md §7.1](migration-strategy.md).
 * **2026-10-30 — restoration procedure rehearsed** on a synthetic archive; the owner's archive is
   still missing (§7).
+* **2026-10-30 — evidence-gap pass.** `scripts/restore-rehearsal.mjs` and `scripts/target-check.mjs`
+  were added with 15 CLI tests: the first enforces the archive digest before connecting and cleans up
+  its scratch database in every path, the second has no write path at all and proves the session is
+  read-only before reporting. Both were exercised end to end on local PostgreSQL 17.11 (14 runs,
+  including the refusal paths and a tampered-ledger detection). The owner's archive, the target
+  credentials and a reachable 5.17.0 engine are still absent; §10 records exactly what each is.
 
 The earlier record's inventory of "untracked proposals" is obsolete: all 19 migrations are tracked
 and checksum-pinned, and the stale `PROPOSAL ONLY` header was removed from

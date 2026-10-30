@@ -22,10 +22,13 @@
     "migration:adopt": "node scripts/migrate-adopt.mjs",
     "migration:rehearse": "node scripts/migration-rehearsal.mjs",
     "migration:verify-engine": "node scripts/prisma-engine-verify.mjs",
+    "migration:target-check": "node scripts/target-check.mjs",
+    "migration:restore-rehearsal": "node scripts/restore-rehearsal.mjs",
     "db:clean": "tsx scripts/clean-test-data.ts",
     "reset-password": "tsx scripts/reset-password.ts",
     "backup": "node scripts/backup-db.mjs",
     "backup:restore": "node scripts/restore-db.mjs",
+    "backup:rehearse": "node scripts/restore-rehearsal.mjs",
     "postinstall": "prisma generate"
   },
   "prisma": {

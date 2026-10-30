@@ -1,0 +1,694 @@
+#!/usr/bin/env node
+/**
+ * Restore rehearsal in one command: verify an archive's identity, restore it
+ * into a disposable database this script creates, fingerprint the result, then
+ * drop the database again.
+ *
+ * Why a script and not a checklist
+ * --------------------------------
+ * A restore is only evidence if the archive that was restored is the archive
+ * whose digest was recorded, and if the restored database is thrown away
+ * afterwards. Both are easy to get wrong by hand: `pg_restore` happily restores
+ * the wrong file, and a half-finished rehearsal leaves a database behind on a
+ * server nobody is watching. Here the digest is checked *before* the server is
+ * contacted, the scratch database name is generated (and refused if it already
+ * exists), and the database is dropped in every path except `--keep`.
+ *
+ * The archive's recorded identity is supplied with `--expect-sha256`. Without
+ * it the script still restores, but reports `digestVerified: false` and exits 0
+ * only if `--allow-unverified` is passed: an unverified restore proves that the
+ * file is a valid dump, not that it is *the* backup. For a production backup the
+ * expected digest is
+ *   F81566E9CCBB511DD34D0FEA5076934CDFBB03CD8BCDE1B1611E8D0F77DB24A7
+ * (hotel-management-saas-20261028-140823.dump, 384096 bytes). Pass it explicitly;
+ * this script does not hard-code a digest for a file it has not seen.
+ *
+ * Server selection
+ * ----------------
+ * `--base-url` (or RESTORE_REHEARSAL_BASE_URL) is the server that hosts the
+ * disposable database; it must not be the database this app runs on. Loopback is
+ * the default (postgresql://postgres@127.0.0.1:5432). Any other host needs
+ * `--allow-remote-target`, because a rehearsal creates and drops a database:
+ * that belongs on a scratch server or a dedicated scratch project, never on a
+ * shared one.
+ *
+ * Usage: node scripts/restore-rehearsal.mjs --dump <path> [options]
+ *
+ * Exit codes: 0 restored and (by default) dropped, 1 anything failed,
+ * 2 usage error.
+ */
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { closeSync, createReadStream, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import path from "node:path";
+
+import { buildFeatureQuery, evaluateCheckpoints } from "./migration-ledger.mjs";
+import { psqlVersion, queryJson, queryScalar, PsqlError, resolvePsql, runPsql } from "./psql.mjs";
+import { sanitiseForPgTools } from "./pg-url.mjs";
+
+const USAGE = `Usage: node scripts/restore-rehearsal.mjs --dump <path> [options]
+
+Verifies an archive, restores it into a disposable database, fingerprints the
+restored schema and data, then drops that database.
+
+Options:
+  --dump <path>              Archive to restore (pg_dump custom/tar, a directory
+                             archive, or a plain .sql file). Required.
+  --expect-sha256 <hex>      Recorded SHA-256 of the archive. Restore is refused
+                             unless the file matches.
+  --allow-unverified         Permit a restore without --expect-sha256 (the report
+                             then states that the digest was not verified).
+  --base-url <url>           Server that hosts the scratch database.
+                             Default: RESTORE_REHEARSAL_BASE_URL, then
+                             postgresql://postgres@127.0.0.1:5432
+  --maintenance-db <name>    Database used to CREATE/DROP the scratch database
+                             (default: postgres).
+  --database <name>          Scratch database name. Default:
+                             rehearsal_restore_<YYYYMMDD_HHMMSS>. Refused if it
+                             already exists.
+  --psql <path>              psql binary (default PSQL_BIN, then psql on PATH).
+  --pg-restore <path>        pg_restore binary (default PG_RESTORE_BIN, then a
+                             sibling of psql, then pg_restore on PATH).
+  --expect-checkpoint <ids>  Comma-separated acceptable checkpoint ids for the
+                             restored schema.
+  --keep                     Keep the restored database (its name is printed).
+  --allow-remote-target      Permit a non-loopback --base-url.
+  --json                     Print the report as JSON.
+  --help, -h                 Show this text.
+`;
+
+// Session default for the post-restore inspection: the server, not this script,
+// rejects writes while the restored database is being read.
+const READ_ONLY_OPTION = "-c default_transaction_read_only=on";
+
+// Tables fingerprinting tries to count. Absent tables are skipped, so this list
+// can cover both the pre-tenancy and the current schema.
+const KEY_TABLES = [
+  "User",
+  "Hotel",
+  "HotelMembership",
+  "Guest",
+  "Room",
+  "ReservationRoom",
+  "Order",
+  "Payment",
+  "Wastage",
+  "Subscription",
+  "AuditLog",
+];
+
+function parseArgs(argv) {
+  const options = {
+    dump: undefined,
+    expectSha256: undefined,
+    allowUnverified: false,
+    baseUrl: undefined,
+    maintenanceDb: "postgres",
+    database: undefined,
+    psql: undefined,
+    pgRestore: undefined,
+    expectCheckpoint: undefined,
+    keep: false,
+    allowRemote: false,
+    json: false,
+    help: false,
+  };
+
+  const takeValue = (flag, i) => {
+    const value = argv[i + 1];
+    if (value === undefined || value.startsWith("--")) throw new Error(`${flag} needs a value.`);
+    return value;
+  };
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    switch (arg) {
+      case "--dump":
+        options.dump = takeValue(arg, i++);
+        break;
+      case "--expect-sha256": {
+        const value = takeValue(arg, i++);
+        if (!/^[0-9a-f]{64}$/i.test(value)) throw new Error("--expect-sha256 must be a 64-character hex digest.");
+        options.expectSha256 = value.toLowerCase();
+        break;
+      }
+      case "--allow-unverified":
+        options.allowUnverified = true;
+        break;
+      case "--base-url":
+        options.baseUrl = takeValue(arg, i++);
+        break;
+      case "--maintenance-db":
+        options.maintenanceDb = takeValue(arg, i++);
+        break;
+      case "--database":
+        options.database = takeValue(arg, i++);
+        break;
+      case "--psql":
+        options.psql = takeValue(arg, i++);
+        break;
+      case "--pg-restore":
+        options.pgRestore = takeValue(arg, i++);
+        break;
+      case "--expect-checkpoint":
+        options.expectCheckpoint = takeValue(arg, i++)
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter(Boolean);
+        break;
+      case "--keep":
+        options.keep = true;
+        break;
+      case "--allow-remote-target":
+        options.allowRemote = true;
+        break;
+      case "--json":
+        options.json = true;
+        break;
+      case "--help":
+      case "-h":
+        options.help = true;
+        break;
+      default:
+        throw new Error(`Unknown option '${arg}'.`);
+    }
+  }
+  return options;
+}
+
+function sha256File(file) {
+  return new Promise((resolvePromise, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(file);
+    stream.on("error", reject);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolvePromise(hash.digest("hex")));
+  });
+}
+
+/**
+ * Digest of a directory-format archive. Sorted relative paths plus each file's
+ * own digest, so the result changes if any member changes and does not depend on
+ * filesystem ordering.
+ */
+async function sha256Directory(root) {
+  const hash = createHash("sha256");
+  const walk = async (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = path.join(dir, entry.name);
+      const relative = path.relative(root, full).split(path.sep).join("/");
+      if (entry.isDirectory()) {
+        hash.update(`dir ${relative}\n`);
+        await walk(full);
+      } else {
+        const digest = await sha256File(full);
+        hash.update(`file ${relative} ${statSync(full).size} ${digest}\n`);
+      }
+    }
+  };
+  await walk(root);
+  return hash.digest("hex");
+}
+
+function detectFormat(dumpPath) {
+  if (statSync(dumpPath).isDirectory()) return "directory";
+  const fd = openSync(dumpPath, "r");
+  try {
+    const header = Buffer.alloc(5);
+    readSync(fd, header, 0, 5, 0);
+    return header.toString("latin1") === "PGDMP" ? "custom" : "plain";
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function resolvePgRestore(explicit, psqlBin) {
+  if (explicit) return explicit;
+  if (process.env.PG_RESTORE_BIN) return process.env.PG_RESTORE_BIN;
+  // A --psql pointing into a PostgreSQL bin/ directory implies a matching
+  // pg_restore; prefer it over whatever happens to be on PATH, because a client
+  // older than the archive's format version cannot read it.
+  if (psqlBin.includes(path.sep)) {
+    const candidate = path.join(path.dirname(psqlBin), process.platform === "win32" ? "pg_restore.exe" : "pg_restore");
+    if (existsSync(candidate)) return candidate;
+  }
+  return "pg_restore";
+}
+
+function pgRestoreVersion(bin) {
+  const result = spawnSync(bin, ["--version"], { encoding: "utf8" });
+  if (result.error) throw new Error(`Could not run '${bin}': ${result.error.message}`);
+  return (result.stdout || "").trim();
+}
+
+function runPgRestore(bin, args) {
+  const result = spawnSync(bin, args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  if (result.error) throw new Error(`Could not run ${bin}: ${result.error.message}`);
+  return { status: result.status, stderr: result.stderr ?? "", stdout: result.stdout ?? "" };
+}
+
+function withDatabase(baseUrl, database) {
+  const url = new URL(baseUrl);
+  url.pathname = `/${database}`;
+  return sanitiseForPgTools(url.toString());
+}
+
+function isLoopback(host) {
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+}
+
+function quoteIdent(name) {
+  return `"${String(name).replace(/"/g, '""')}"`;
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} bytes`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Post-restore, read-only inspection: ledger, checkpoint, tables, key row counts. */
+function inspectRestored(url, psqlBin) {
+  process.env.PGOPTIONS = `${process.env.PGOPTIONS ?? ""} ${READ_ONLY_OPTION}`.trim();
+
+  const identity = queryJson({
+    url,
+    psqlBin,
+    sql: `SELECT json_build_object(
+        'database', current_database(),
+        'serverVersion', current_setting('server_version'),
+        'readOnly', current_setting('transaction_read_only'),
+        'ledgerExists', to_regclass('public."_prisma_migrations"') IS NOT NULL,
+        'publicTables', (
+          SELECT count(*) FROM information_schema.tables
+          WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+        ),
+        'tables', (
+          SELECT coalesce(json_agg(table_name ORDER BY table_name), '[]')
+          FROM information_schema.tables
+          WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+        )
+      )::text;`,
+  });
+
+  const ledgerRows = identity.ledgerExists
+    ? Number(
+        queryScalar({ url, psqlBin, sql: 'SELECT count(*) FROM "_prisma_migrations";' }) || "0"
+      )
+    : 0;
+  const failedRows = identity.ledgerExists
+    ? Number(
+        queryScalar({
+          url,
+          psqlBin,
+          sql: 'SELECT count(*) FROM "_prisma_migrations" WHERE "finished_at" IS NULL AND "rolled_back_at" IS NULL;',
+        }) || "0"
+      )
+    : 0;
+
+  const features = queryJson({ url, psqlBin, sql: buildFeatureQuery() });
+  const checkpoints = evaluateCheckpoints(features);
+
+  const present = new Set(identity.tables ?? []);
+  const wanted = KEY_TABLES.filter((name) => present.has(name));
+  const rowCounts = {};
+  if (wanted.length > 0) {
+    // Column names deliberately differ from the subquery alias (`t`): naming a
+    // column `rows` inside `... FROM (...) rows` makes `row_to_json(rows)` resolve
+    // to the bigint column instead of the row, which is exactly how this failed
+    // the first time it ran.
+    const union = wanted
+      .map(
+        (name) =>
+          `SELECT '${name.replace(/'/g, "''")}'::text AS table_name, count(*)::bigint AS row_count FROM ${quoteIdent(name)}`
+      )
+      .join(" UNION ALL ");
+    const rows = queryJson({
+      url,
+      psqlBin,
+      sql: `SELECT coalesce(json_agg(row_to_json(t))::text, '[]') FROM (${union}) t;`,
+    });
+    for (const row of rows) rowCounts[row.table_name] = Number(row.row_count);
+  }
+
+  return {
+    database: identity.database,
+    serverVersion: identity.serverVersion,
+    readOnly: identity.readOnly,
+    ledgerExists: identity.ledgerExists,
+    ledgerRows,
+    failedLedgerRows: failedRows,
+    publicTables: identity.publicTables,
+    tables: identity.tables,
+    checkpoints,
+    rowCounts,
+  };
+}
+
+function printHumanReport(report) {
+  const lines = [];
+  lines.push("");
+  lines.push("Backup restore rehearsal");
+  lines.push("------------------------");
+  lines.push(`Archive              : ${report.archive.path}`);
+  lines.push(
+    `Archive size         : ${report.archive.size === null ? "directory archive" : formatBytes(report.archive.size)} (${report.archive.format} format)`
+  );
+  lines.push(`Archive SHA-256      : ${report.archive.sha256}`);
+  lines.push(
+    `Digest verified      : ${
+      report.archive.digestVerified
+        ? "yes, matches --expect-sha256"
+        : report.archive.expectedSha256
+          ? "NO: the archive does not match the recorded digest"
+          : "no (no --expect-sha256 supplied)"
+    }`
+  );
+  if (report.archive.expectedSha256) lines.push(`Expected SHA-256     : ${report.archive.expectedSha256}`);
+  lines.push(`Base server          : ${report.server.host} (maintenance db: ${report.server.maintenanceDatabase})`);
+  lines.push(`psql / pg_restore    : ${report.server.psqlVersion} / ${report.server.pgRestoreVersion}`);
+  lines.push(`Scratch database     : ${report.scratch.database}${report.scratch.created ? "" : " (not created)"}`);
+  lines.push("");
+  lines.push(`Restore              : ${report.restore.ok ? "finished with no errors" : "FAILED"}`);
+  if (report.restore.problems.length > 0) {
+    for (const line of report.restore.problems.slice(0, 10)) lines.push(`  ! ${line}`);
+  }
+
+  if (report.inspection) {
+    const inspection = report.inspection;
+    lines.push("");
+    lines.push("Restored database (read-only inspection)");
+    lines.push(`  Server version     : ${inspection.serverVersion}`);
+    lines.push(`  Public tables      : ${inspection.publicTables}`);
+    lines.push(
+      `  Ledger             : ${inspection.ledgerExists ? `present, ${inspection.ledgerRows} row(s), ${inspection.failedLedgerRows} unfinished` : "absent (pre-ledger backup)"}`
+    );
+    lines.push(`  Detected checkpoint: ${inspection.checkpoints.length ? inspection.checkpoints.join(", ") : "none matched"}`);
+    const counts = Object.entries(inspection.rowCounts);
+    if (counts.length > 0) {
+      lines.push(`  Row counts         : ${counts.map(([name, rows]) => `${name}=${rows}`).join(", ")}`);
+    }
+  }
+
+  lines.push("");
+  if (report.checks.length > 0) {
+    lines.push("Checks");
+    for (const check of report.checks) lines.push(`  ${check.ok ? "PASS" : "FAIL"}  ${check.name}${check.detail ? `: ${check.detail}` : ""}`);
+    lines.push("");
+  }
+  lines.push(`Cleanup              : ${report.cleanup.details}`);
+  lines.push("");
+  lines.push(report.ok ? "Result: PASS." : "Result: FAIL. See the failed checks above.");
+  return lines.join("\n");
+}
+
+async function main() {
+  let options;
+  try {
+    options = parseArgs(process.argv.slice(2));
+  } catch (error) {
+    process.stderr.write(`${error.message}\n\n${USAGE}`);
+    return 2;
+  }
+  if (options.help) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+  if (!options.dump) {
+    process.stderr.write(`--dump is required: point it at the archive to rehearse.\n\n${USAGE}`);
+    return 2;
+  }
+  if (!existsSync(options.dump)) {
+    process.stderr.write(
+      `No such archive: ${options.dump}\n` +
+        "This rehearsal restores a real archive only; it never creates one to stand in for a missing backup.\n"
+    );
+    return 1;
+  }
+  if (!options.expectSha256 && !options.allowUnverified) {
+    process.stderr.write(
+      "Refusing to rehearse without the archive's recorded digest.\n" +
+        "Pass --expect-sha256 <hex> so the rehearsal proves that this exact file is the recorded backup.\n" +
+        "Use --allow-unverified only to test the harness against an archive whose digest is not yet on record.\n"
+    );
+    return 1;
+  }
+
+  const dumpPath = path.resolve(options.dump);
+  const stats = statSync(dumpPath);
+  if (!stats.isDirectory() && stats.size === 0) {
+    process.stderr.write(`The archive is empty: ${dumpPath}\n`);
+    return 1;
+  }
+
+  const format = detectFormat(dumpPath);
+  const sha256 = stats.isDirectory() ? await sha256Directory(dumpPath) : await sha256File(dumpPath);
+  const digestVerified = options.expectSha256 ? sha256 === options.expectSha256 : false;
+
+  if (options.expectSha256 && !digestVerified) {
+    process.stderr.write(
+      `Archive digest does not match the recorded value; nothing was restored.\n` +
+        `  archive : ${dumpPath}\n  sha256  : ${sha256}\n  expected: ${options.expectSha256}\n` +
+        "Stop here: restoring a different archive would produce evidence for the wrong file.\n"
+    );
+    return 1;
+  }
+
+  const baseUrlRaw = options.baseUrl || process.env.RESTORE_REHEARSAL_BASE_URL || "postgresql://postgres@127.0.0.1:5432";
+  let baseUrl;
+  try {
+    baseUrl = new URL(baseUrlRaw);
+  } catch {
+    process.stderr.write("--base-url is not a valid PostgreSQL URL (it is never echoed, since it may hold a password).\n");
+    return 1;
+  }
+  if (baseUrl.protocol !== "postgres:" && baseUrl.protocol !== "postgresql:") {
+    process.stderr.write("--base-url must use the postgres or postgresql protocol.\n");
+    return 1;
+  }
+  if (!isLoopback(baseUrl.hostname) && !options.allowRemote) {
+    process.stderr.write(
+      `Refusing to create and drop databases on '${baseUrl.hostname}': this rehearsal owns a scratch database, ` +
+        "so it belongs on a scratch server or a disposable project.\n" +
+        "If that host really is disposable, re-run with --allow-remote-target.\n"
+    );
+    return 1;
+  }
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(options.maintenanceDb)) {
+    process.stderr.write("--maintenance-db must be a plain PostgreSQL identifier.\n");
+    return 1;
+  }
+
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "").replace("T", "_");
+  const database = options.database || `rehearsal_restore_${stamp}`;
+  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(database)) {
+    process.stderr.write("--database must be a lower-case PostgreSQL identifier, at most 63 characters.\n");
+    return 1;
+  }
+  if (database === options.maintenanceDb || ["postgres", "template0", "template1"].includes(database)) {
+    process.stderr.write(`Refusing to use '${database}' as the scratch database.\n`);
+    return 1;
+  }
+
+  // Never restore into the database name this app is configured for, even on the
+  // same host: the name collision is the mistake worth catching.
+  const live = process.env.DIRECT_URL || process.env.DATABASE_URL;
+  if (live) {
+    try {
+      const liveUrl = new URL(live);
+      if (liveUrl.hostname === baseUrl.hostname && liveUrl.pathname.replace(/^\//, "") === database) {
+        process.stderr.write(
+          `Refusing to use '${database}': that is the database this app is configured to use.\n`
+        );
+        return 1;
+      }
+    } catch {
+      // An unparseable live URL cannot collide with a name we generate.
+    }
+  }
+
+  const psqlBin = resolvePsql(options.psql);
+  let psqlClientVersion;
+  let pgRestoreBin;
+  let pgRestoreClientVersion;
+  try {
+    psqlClientVersion = psqlVersion(psqlBin);
+    pgRestoreBin = resolvePgRestore(options.pgRestore, psqlBin);
+    pgRestoreClientVersion = pgRestoreVersion(pgRestoreBin);
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    return 1;
+  }
+
+  const maintenanceUrl = withDatabase(baseUrl.toString(), options.maintenanceDb);
+  const scratchUrl = withDatabase(baseUrl.toString(), database);
+
+  const report = {
+    mode: "restore-rehearsal",
+    archive: {
+      path: dumpPath,
+      size: stats.isDirectory() ? null : stats.size,
+      format,
+      sha256,
+      expectedSha256: options.expectSha256 ?? null,
+      digestVerified,
+    },
+    server: {
+      host: baseUrl.hostname,
+      maintenanceDatabase: options.maintenanceDb,
+      psqlVersion: psqlClientVersion,
+      pgRestoreVersion: pgRestoreClientVersion,
+    },
+    scratch: { database, created: false, kept: options.keep },
+    restore: { ok: false, problems: [] },
+    inspection: null,
+    cleanup: { dropped: false, ok: true, details: "not attempted (no scratch database was created)" },
+    checks: [],
+    ok: false,
+  };
+
+  // Refuse before creating anything if the name is taken: a rehearsal must never
+  // restore over a database it did not create.
+  try {
+    const exists = queryScalar({
+      url: maintenanceUrl,
+      psqlBin,
+      sql: `SELECT count(*) FROM pg_database WHERE datname = '${database}';`,
+    }).trim();
+    if (exists !== "0") {
+      process.stderr.write(
+        `Database '${database}' already exists; refusing to restore into it.\n` +
+          "Choose another --database name, or drop it yourself first.\n"
+      );
+      return 1;
+    }
+    runPsql({ url: maintenanceUrl, psqlBin, sql: `CREATE DATABASE ${quoteIdent(database)};` });
+    report.scratch.created = true;
+  } catch (error) {
+    if (error instanceof PsqlError) {
+      process.stderr.write(`Could not create the scratch database (${database}): ${error.message}\n`);
+      return 1;
+    }
+    throw error;
+  }
+
+  let inspection = null;
+  try {
+    if (format === "plain") {
+      runPsql({ url: scratchUrl, psqlBin, file: dumpPath });
+      report.restore = { ok: true, problems: [] };
+    } else {
+      // --clean --if-exists: a freshly created database still owns a `public`
+      // schema, and the archive's `CREATE SCHEMA public` would otherwise fail.
+      // Dropping first makes the result exactly the archive; on an empty scratch
+      // database the resulting "does not exist, skipping" notices are expected.
+      const args = [
+        "--dbname",
+        scratchUrl,
+        "--clean",
+        "--if-exists",
+        "--no-owner",
+        "--no-privileges",
+        "--single-transaction",
+        "--exit-on-error",
+        dumpPath,
+      ];
+      const result = runPgRestore(pgRestoreBin, args);
+      const problems = result.stderr
+        .split(/\r?\n/)
+        .filter((line) => /error:/i.test(line) && !/does not exist, skipping/i.test(line));
+      report.restore = { ok: result.status === 0 && problems.length === 0, problems, status: result.status };
+    }
+  } catch (error) {
+    if (error instanceof PsqlError) {
+      report.restore = { ok: false, problems: [error.message] };
+    } else {
+      throw error;
+    }
+  }
+
+  if (report.restore.ok) {
+    try {
+      inspection = inspectRestored(scratchUrl, psqlBin);
+      report.inspection = inspection;
+    } catch (error) {
+      if (error instanceof PsqlError) {
+        report.restore.ok = false;
+        report.restore.problems.push(`Could not inspect the restored database: ${error.message}`);
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  report.checks.push({
+    name: "restore finished with no errors",
+    ok: report.restore.ok,
+    detail: report.restore.ok
+      ? `${inspection ? `${inspection.publicTables} table(s) in public` : "restored, not inspected"}`
+      : report.restore.problems[0] ?? `pg_restore exited with status ${report.restore.status ?? "unknown"}`,
+  });
+
+  if (inspection) {
+    report.checks.push({
+      name: "restored schema matches a known checkpoint",
+      ok: inspection.checkpoints.length > 0,
+      detail: inspection.checkpoints.join(", ") || "no match",
+    });
+    if (options.expectCheckpoint) {
+      report.checks.push({
+        name: "restored schema matches an expected checkpoint",
+        ok: inspection.checkpoints.some((id) => options.expectCheckpoint.includes(id)),
+        detail: `expected ${options.expectCheckpoint.join("|")}, detected ${inspection.checkpoints.join("|") || "none"}`,
+      });
+    }
+    report.checks.push({
+      name: "inspection ran read-only",
+      ok: inspection.readOnly === "on",
+      detail: `transaction_read_only=${inspection.readOnly}`,
+    });
+  } else if (report.restore.ok) {
+    report.checks.push({
+      name: "restored database could be inspected",
+      ok: false,
+      detail: report.restore.problems.at(-1) ?? "inspection did not run",
+    });
+  }
+
+  // Drop the scratch database unless asked to keep it. A rehearsal that leaves
+  // databases behind is how "disposable" stops being true.
+  if (report.scratch.created) {
+    if (options.keep) {
+      report.cleanup = { dropped: false, ok: true, kept: true, details: `kept at request (--keep): ${database}` };
+    } else {
+      try {
+        // DROP DATABASE is refused inside a read-only transaction, so the
+        // inspection default is removed before the maintenance connection is
+        // used. Unconditionally: inspection may have set it and then thrown.
+        process.env.PGOPTIONS = (process.env.PGOPTIONS ?? "").replace(READ_ONLY_OPTION, "").trim();
+        if (!process.env.PGOPTIONS) delete process.env.PGOPTIONS;
+        runPsql({ url: maintenanceUrl, psqlBin, sql: `DROP DATABASE IF EXISTS ${quoteIdent(database)} WITH (FORCE);` });
+        report.cleanup = { dropped: true, ok: true, details: `scratch database ${database} dropped` };
+      } catch (error) {
+        const message = error instanceof PsqlError ? error.message : String(error?.message ?? error);
+        report.cleanup = { dropped: false, ok: false, details: `could not drop ${database}: ${message}` };
+        report.checks.push({ name: "scratch database removed", ok: false, detail: message });
+      }
+    }
+  }
+
+  const checksOk = report.checks.every((check) => check.ok);
+  report.ok = report.restore.ok && checksOk && report.cleanup.ok === true;
+
+  process.stdout.write(`${options.json ? JSON.stringify(report, null, 2) : printHumanReport(report)}\n`);
+  return report.ok ? 0 : 1;
+}
+
+main()
+  .then((code) => {
+    process.exitCode = code;
+  })
+  .catch((error) => {
+    process.stderr.write(`${error?.message ?? error}\n`);
+    process.exitCode = 1;
+  });
