@@ -339,6 +339,12 @@ async function runBrowser(fixtures) {
       }, roomNumber);
       assert(opened, `Room ${roomNumber} is not on the reservations calendar`);
       await page.waitForSelector('[data-testid="approved-rate"]', { timeout: 15_000 });
+      // The rate panel is filled by the server's quote, so wait for the amount
+      // rather than for the element: the first paint legitimately shows "--".
+      await page.waitForFunction(
+        () => (document.querySelector('[data-testid="approved-rate"]')?.textContent || "").trim() !== "--",
+        { timeout: 20_000 }
+      );
       // The rate panel sits at the bottom of a scrolling modal; bring it into
       // frame so the screenshot shows what the receptionist actually reads.
       await page.evaluate(() => {

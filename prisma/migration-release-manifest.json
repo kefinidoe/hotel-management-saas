@@ -78,6 +78,10 @@
     {
       "name": "20261029130000_add_tenant_composite_join_fks",
       "sha256": "f2c5e918f612eb6ce7e5a1aaa12315821ef5f881ffb3c64dc77b472806abfab8"
+    },
+    {
+      "name": "20261031120000_add_pricing_engine",
+      "sha256": "27642ce20ea2a605c98a5e80d49ea8bf892087c99875dfc7f6a4383e054b6a91"
     }
   ]
 }

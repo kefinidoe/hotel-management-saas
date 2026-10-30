@@ -138,6 +138,13 @@ export const SCHEMA_FEATURES = {
   fk_RecipeIngredient_recipe: constraint("RecipeIngredient_recipeId_hotelId_fkey"),
   fk_RecipeIngredient_inventoryItem: constraint("RecipeIngredient_inventoryItemId_hotelId_fkey"),
   fk_OrderItem_order: constraint("OrderItem_orderId_hotelId_fkey"),
+
+  // Configurable pricing engine (migration 20).
+  table_HotelPricingSettings: table("HotelPricingSettings"),
+  table_OccupancyType: table("OccupancyType"),
+  table_MealPlanConfig: table("MealPlanConfig"),
+  table_ReservationPriceSnapshot: table("ReservationPriceSnapshot"),
+  column_ReservationPriceSnapshot_grandTotal: column("ReservationPriceSnapshot", "grandTotal"),
   fk_OrderItem_menuItem: constraint("OrderItem_menuItemId_hotelId_fkey"),
 };
 
@@ -286,8 +293,8 @@ export const CHECKPOINTS = [
     forbid: ["column_ReservationRoom_hotelId"],
   },
   {
-    id: "saas_current",
-    label: "Current schema, all migrations applied (migrations 1-19)",
+    id: "saas_through_19",
+    label: "Tenant composite join keys applied, pricing engine missing (migrations 1-19)",
     appliedThrough: "20261029130000_add_tenant_composite_join_fks",
     require: [
       "table_Hotel",
@@ -306,6 +313,38 @@ export const CHECKPOINTS = [
       "fk_RecipeIngredient_inventoryItem",
       "fk_OrderItem_order",
       "fk_OrderItem_menuItem",
+    ],
+    forbid: [
+      "table_HotelPricingSettings",
+      "table_ReservationPriceSnapshot",
+    ],
+  },
+  {
+    id: "saas_current",
+    label: "Current schema, all migrations applied (migrations 1-20)",
+    appliedThrough: "20261031120000_add_pricing_engine",
+    require: [
+      "table_Hotel",
+      "table_Subscription",
+      "column_HotelMembership_department",
+      "column_Order_idempotencyOperation",
+      "column_Payment_requestFingerprint",
+      "column_ReservationRoom_hotelId",
+      "column_Recipe_hotelId",
+      "column_RecipeIngredient_hotelId",
+      "column_OrderItem_hotelId",
+      "fk_ReservationRoom_reservation",
+      "fk_ReservationRoom_room",
+      "fk_Recipe_menuItem",
+      "fk_RecipeIngredient_recipe",
+      "fk_RecipeIngredient_inventoryItem",
+      "fk_OrderItem_order",
+      "fk_OrderItem_menuItem",
+      "table_HotelPricingSettings",
+      "table_OccupancyType",
+      "table_MealPlanConfig",
+      "table_ReservationPriceSnapshot",
+      "column_ReservationPriceSnapshot_grandTotal",
     ],
     forbid: [],
   },

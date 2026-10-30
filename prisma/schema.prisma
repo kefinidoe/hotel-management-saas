@@ -98,6 +98,19 @@ model Hotel {
   notifications      Notification[]
   auditLogs          AuditLog[]
 
+  // Pricing configuration (all tenant-scoped; see docs/pricing-engine-design.md)
+  occupancyTypes     OccupancyType[]
+  roomTypeOccupancies RoomTypeOccupancy[]
+  mealPlanConfigs    MealPlanConfig[]
+  mealPlanRoomTypes  MealPlanRoomType[]
+  rateAdjustments    RateAdjustment[]
+  extraBedRules      ExtraBedRule[]
+  childPricingRules  ChildPricingRule[]
+  taxRules           TaxRule[]
+  pricingSettings    HotelPricingSettings?
+  priceSnapshots     ReservationPriceSnapshot[]
+  priceChanges       ReservationPriceChange[]
+
   @@index([status])
 }
 
@@ -212,6 +225,11 @@ model RoomType {
 
   rooms Room[]
 
+  occupancyRates  RoomTypeOccupancy[]
+  mealPlanLinks   MealPlanRoomType[]
+  extraBedRules   ExtraBedRule[]
+  rateAdjustments RateAdjustment[]
+
   @@unique([id, hotelId])
   @@index([hotelId])
 }
@@ -308,6 +326,8 @@ model Reservation {
 
   rooms  ReservationRoom[]
   folios Folio[]
+  priceSnapshot ReservationPriceSnapshot?
+  priceChanges  ReservationPriceChange[]
 
   @@unique([hotelId, code])
   @@unique([id, hotelId])
@@ -776,4 +796,289 @@ model AuditLog {
 
   @@index([hotelId, createdAt])
   @@index([hotelId, entity, entityId])
+}
+
+// ===========================================================================
+// PRICING ENGINE (HOTEL-SCOPED CONFIGURATION)
+//
+// Every model here is tenant-owned. Hotel-scoped records carry hotelId directly
+// and (where another pricing table references them) an `@@unique([id, hotelId])`
+// target so the reference itself is composite — a foreign key cannot point at
+// another hotel's row even if application code tried to.
+//
+// Nothing here replaces RoomType.baseRate: a hotel that has not configured
+// occupancy rates keeps working on its existing base rate (LEGACY_BASE_RATE).
+// ===========================================================================
+
+enum MealPlanPricingBasis {
+  PER_PERSON_PER_NIGHT
+  PER_ROOM_PER_NIGHT
+  PER_PERSON_PER_STAY
+  PER_ROOM_PER_STAY
+}
+
+enum RateAdjustmentKind {
+  SEASONAL // date range
+  WEEKEND  // recurring days of week
+}
+
+enum RateAdjustmentType {
+  PERCENT         // multiply the nightly rate
+  FIXED_PER_NIGHT // add/subtract a nightly amount
+  SET_RATE        // replace the nightly rate with a fixed amount
+}
+
+enum ChildChargeType {
+  FIXED_PER_NIGHT
+  PERCENT_OF_ADULT
+}
+
+enum TaxBasis {
+  PERCENT
+  FIXED
+}
+
+enum TaxAppliesTo {
+  ROOM
+  MEALS
+  ALL
+}
+
+enum TaxChargeBasis {
+  PER_NIGHT
+  PER_STAY
+  PER_PERSON_PER_NIGHT
+}
+
+enum PricingModel {
+  ROOM_TYPE_OCCUPANCY // configured occupancy rates below
+  LEGACY_BASE_RATE    // RoomType.baseRate, unchanged behaviour
+}
+
+/// A hotel's own occupancy options ("Single", "Double", "Twin", "Family", ...).
+/// Nothing is global: two hotels may name or price occupancies differently.
+model OccupancyType {
+  id          String   @id @default(uuid())
+  hotelId     String
+  hotel       Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  minAdults   Int      @default(1)
+  maxAdults   Int      @default(4)
+  maxChildren Int      @default(0)
+  sortOrder   Int      @default(0)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  roomTypeRates RoomTypeOccupancy[]
+
+  @@unique([id, hotelId])
+  @@unique([hotelId, name])
+  @@index([hotelId, isActive])
+}
+
+/// The nightly rate for one occupancy option of one room type.
+model RoomTypeOccupancy {
+  id              String        @id @default(uuid())
+  hotelId         String
+  hotel           Hotel         @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  roomTypeId      String
+  roomType        RoomType      @relation(fields: [roomTypeId, hotelId], references: [id, hotelId], onDelete: Cascade)
+  occupancyTypeId String
+  occupancyType   OccupancyType @relation(fields: [occupancyTypeId, hotelId], references: [id, hotelId], onDelete: Cascade)
+  nightlyRate     Decimal       @db.Decimal(10, 2)
+  isActive        Boolean       @default(true)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@unique([roomTypeId, occupancyTypeId])
+  @@index([hotelId, roomTypeId])
+  @@index([occupancyTypeId, hotelId])
+}
+
+/// A hotel-defined meal plan with its own pricing basis and charge.
+model MealPlanConfig {
+  id             String               @id @default(uuid())
+  hotelId        String
+  hotel          Hotel                @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name           String
+  description    String?
+  includedItems  String[]             @default([])
+  pricingBasis   MealPlanPricingBasis @default(PER_PERSON_PER_NIGHT)
+  charge         Decimal              @db.Decimal(10, 2) @default(0)
+  effectiveFrom  DateTime?
+  effectiveTo    DateTime?
+  sortOrder      Int                  @default(0)
+  isActive       Boolean              @default(true)
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  roomTypes MealPlanRoomType[]
+
+  @@unique([id, hotelId])
+  @@unique([hotelId, name])
+  @@index([hotelId, isActive])
+}
+
+/// Restricts a meal plan to specific room types. No rows = available to all.
+model MealPlanRoomType {
+  id         String         @id @default(uuid())
+  hotelId    String
+  hotel      Hotel          @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  mealPlanId String
+  mealPlan   MealPlanConfig @relation(fields: [mealPlanId, hotelId], references: [id, hotelId], onDelete: Cascade)
+  roomTypeId String
+  roomType   RoomType       @relation(fields: [roomTypeId, hotelId], references: [id, hotelId], onDelete: Cascade)
+
+  @@unique([mealPlanId, roomTypeId])
+  @@index([hotelId, roomTypeId])
+}
+
+/// Seasonal and weekend rate adjustments. `roomTypeId` = null applies to all
+/// room types; `daysOfWeek` (0 = Sunday) is used by WEEKEND rows.
+model RateAdjustment {
+  id             String             @id @default(uuid())
+  hotelId        String
+  hotel          Hotel              @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  roomTypeId     String?
+  roomType       RoomType?          @relation(fields: [roomTypeId, hotelId], references: [id, hotelId], onDelete: Cascade)
+  name           String
+  kind           RateAdjustmentKind
+  adjustmentType RateAdjustmentType
+  amount         Decimal            @db.Decimal(10, 2)
+  daysOfWeek     Int[]              @default([])
+  startDate      DateTime?
+  endDate        DateTime?
+  priority       Int                @default(0)
+  isActive       Boolean            @default(true)
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  @@unique([id, hotelId])
+  @@index([hotelId, kind, isActive])
+  @@index([hotelId, roomTypeId])
+}
+
+model ExtraBedRule {
+  id          String    @id @default(uuid())
+  hotelId     String
+  hotel       Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  roomTypeId  String?
+  roomType    RoomType? @relation(fields: [roomTypeId, hotelId], references: [id, hotelId], onDelete: Cascade)
+  name        String
+  nightlyRate Decimal   @db.Decimal(10, 2)
+  childRate   Decimal?  @db.Decimal(10, 2)
+  maxPerRoom  Int       @default(1)
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([id, hotelId])
+  @@index([hotelId, isActive])
+}
+
+model ChildPricingRule {
+  id         String          @id @default(uuid())
+  hotelId    String
+  hotel      Hotel           @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name       String
+  minAge     Int             @default(0)
+  maxAge     Int             @default(12)
+  chargeType ChildChargeType @default(FIXED_PER_NIGHT)
+  amount     Decimal         @db.Decimal(10, 2)
+  isActive   Boolean         @default(true)
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+
+  @@unique([id, hotelId])
+  @@index([hotelId, isActive])
+}
+
+model TaxRule {
+  id         String          @id @default(uuid())
+  hotelId    String
+  hotel      Hotel           @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name       String
+  basis      TaxBasis        @default(PERCENT)
+  amount     Decimal         @db.Decimal(10, 2)
+  appliesTo  TaxAppliesTo    @default(ALL)
+  chargeBasis TaxChargeBasis  @default(PER_STAY)
+  isInclusive Boolean        @default(false)
+  sortOrder  Int             @default(0)
+  isActive   Boolean         @default(true)
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+
+  @@unique([id, hotelId])
+  @@index([hotelId, isActive])
+}
+
+/// Which pricing features a hotel actually uses, plus its tax posture.
+model HotelPricingSettings {
+  id                  String       @id @default(uuid())
+  hotelId             String       @unique
+  hotel               Hotel        @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  pricingModel        PricingModel @default(LEGACY_BASE_RATE)
+  useOccupancyRates   Boolean      @default(false)
+  useMealPlans        Boolean      @default(false)
+  useSeasonalPricing  Boolean      @default(false)
+  useWeekendPricing   Boolean      @default(false)
+  useChildPricing     Boolean      @default(false)
+  useExtraBeds        Boolean      @default(false)
+  useTaxes            Boolean      @default(false)
+  pricesIncludeTax    Boolean      @default(false)
+  updatedAt           DateTime     @updatedAt
+  createdAt           DateTime     @default(now())
+}
+
+/// The agreed price of a reservation, frozen at creation/repricing time.
+/// Editing pricing configuration never rewrites these rows.
+model ReservationPriceSnapshot {
+  id             String      @id @default(uuid())
+  hotelId        String
+  hotel          Hotel       @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  reservationId  String      @unique
+  reservation    Reservation @relation(fields: [reservationId, hotelId], references: [id, hotelId], onDelete: Cascade)
+
+  pricingModel   PricingModel
+  currency       String
+  occupancyName  String?
+  mealPlanName   String?
+  mealPlanBasis  MealPlanPricingBasis?
+  nightlyRate    Decimal     @db.Decimal(10, 2)
+  nights         Int
+  adults         Int         @default(1)
+  children       Int         @default(0)
+  extraBeds      Int         @default(0)
+  roomTotal      Decimal     @db.Decimal(10, 2)
+  mealsTotal     Decimal     @db.Decimal(10, 2) @default(0)
+  extrasTotal    Decimal     @db.Decimal(10, 2) @default(0)
+  adjustmentsTotal Decimal   @db.Decimal(10, 2) @default(0)
+  discountTotal  Decimal     @db.Decimal(10, 2) @default(0)
+  taxTotal       Decimal     @db.Decimal(10, 2) @default(0)
+  grandTotal     Decimal     @db.Decimal(10, 2)
+  breakdown      Json
+  createdById    String
+  createdAt      DateTime    @default(now())
+
+  @@unique([reservationId, hotelId])
+  @@index([hotelId, createdAt])
+}
+
+/// Audit trail for explicit repricing of an existing reservation.
+model ReservationPriceChange {
+  id               String      @id @default(uuid())
+  hotelId          String
+  hotel            Hotel       @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  reservationId    String
+  reservation      Reservation @relation(fields: [reservationId, hotelId], references: [id, hotelId], onDelete: Cascade)
+  previousTotal    Decimal     @db.Decimal(10, 2)
+  newTotal         Decimal     @db.Decimal(10, 2)
+  reason           String?
+  breakdown        Json
+  changedById      String
+  createdAt        DateTime    @default(now())
+
+  @@index([hotelId, reservationId, createdAt])
 }

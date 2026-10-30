@@ -3,11 +3,14 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { rangesOverlap } from "@/lib/dates";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
-import { accommodationRequired, parseMoney, stayNights } from "@/lib/billing";
+import { accommodationRequired, parseMoney, roundMoney, stayNights } from "@/lib/billing";
 import { hasRole } from "@/lib/permissions";
 import { nextReservationCode } from "@/lib/reservation-code";
 import { isMealPlan, isOccupancy, tariffPricesStay } from "@/lib/tariffs";
 import { blocksGuestPlacement, ROOM_STATUS_LABELS } from "@/lib/room-status";
+import { loadPricingConfig } from "@/lib/pricing/config";
+import { priceStay } from "@/lib/pricing/engine";
+import type { PriceBreakdown } from "@/lib/pricing/types";
 
 const BOOKING_SOURCES = ["WALK_IN", "PHONE", "WEBSITE", "OTA", "CORPORATE", "OTHER"] as const;
 
@@ -99,16 +102,29 @@ export async function POST(req: Request) {
   const tariffId = text(body?.tariffId);
   const occupancy = isOccupancy(body?.occupancy) ? body.occupancy : undefined;
   const mealPlan = isMealPlan(body?.mealPlan) ? body.mealPlan : undefined;
+  const occupancyTypeId = text(body?.occupancyTypeId) || null;
+  const mealPlanId = text(body?.mealPlanId) || null;
   const notes = text(body?.notes);
 
+  // Which pricing model this hotel uses decides which fields are required. A
+  // hotel that has configured occupancy rates sends occupancyTypeId; a hotel that
+  // still sells at its room type's rate sends the legacy tariff fields.
+  const pricingConfig = await loadPricingConfig(hotelId, tenant.hotel.currency);
+  const usesConfiguredPricing =
+    pricingConfig.settings.pricingModel === "ROOM_TYPE_OCCUPANCY" &&
+    pricingConfig.settings.useOccupancyRates;
+
+  const missingPricingFields = usesConfiguredPricing
+    ? []
+    : !tariffId || !occupancy || !mealPlan
+      ? ["tariffId", "occupancy", "mealPlan"]
+      : [];
   if (
     !guestName ||
     !body?.checkInDate ||
     !body?.checkOutDate ||
     !roomId ||
-    !tariffId ||
-    !occupancy ||
-    !mealPlan
+    missingPricingFields.length > 0
   ) {
     return NextResponse.json({ error: "Missing required reservation fields." }, { status: 400 });
   }
@@ -131,7 +147,15 @@ export async function POST(req: Request) {
     );
   }
 
-  if (discount > 0 && !hasRole(tenant.role, ROLE_GROUPS.MANAGEMENT)) {
+  const discountPercent =
+    body?.discountPercent === undefined || body?.discountPercent === null || body?.discountPercent === ""
+      ? undefined
+      : Number(body.discountPercent);
+  if (discountPercent !== undefined && (!Number.isFinite(discountPercent) || discountPercent < 0 || discountPercent > 100)) {
+    return NextResponse.json({ error: "A percentage discount must be between 0 and 100." }, { status: 400 });
+  }
+
+  if ((discount > 0 || (discountPercent ?? 0) > 0) && !hasRole(tenant.role, ROLE_GROUPS.MANAGEMENT)) {
     return NextResponse.json(
       { error: "Only an Admin or Manager can apply an accommodation discount." },
       { status: 403 }
@@ -158,23 +182,16 @@ export async function POST(req: Request) {
           SELECT pg_advisory_xact_lock(hashtext(${lockKey}))::text AS locked
         `;
 
-        // Validate that both room and tariff belong to THIS tenant hotel
-        const [room, tariff] = await Promise.all([
-          tx.room.findUnique({
-            where: { id_hotelId: { id: roomId, hotelId } },
-            // roomTypeId is needed to price a hotel that sells its rooms at the
-            // room type's own rate instead of per occupancy/meal-plan tariffs.
-            select: { id: true, number: true, status: true, isActive: true, roomTypeId: true },
-          }),
-          tx.roomType.findUnique({
-            where: { id_hotelId: { id: tariffId, hotelId } },
-          }),
-        ]);
+        // Validate that the room belongs to THIS tenant hotel.
+        const room = await tx.room.findUnique({
+          where: { id_hotelId: { id: roomId, hotelId } },
+          // roomTypeId is what the pricing engine prices from.
+          select: { id: true, number: true, status: true, isActive: true, roomTypeId: true },
+        });
         if (!room) throw new ReservationError("Room not found in this hotel.", 404);
         if (!room.isActive) {
           throw new ReservationError("That room is no longer part of the active hotel inventory.");
         }
-        if (!tariff) throw new ReservationError("The selected tariff is unavailable in this hotel.", 404);
 
         // A stay starting today needs a room that is fit to receive a guest.
         const startOf = (date: Date) =>
@@ -185,33 +202,72 @@ export async function POST(req: Request) {
           );
         }
 
-        // The price must come from either the tariff for this occupancy and meal
-        // plan, or the selected room's own room type. Anything else is refused so
-        // a client cannot price a room at another type's rate.
-        if (!tariffPricesStay(tariff, room.roomTypeId, occupancy, mealPlan)) {
-          throw new ReservationError(
-            "The selected tariff does not match the occupancy and meal plan."
-          );
-        }
+        // ---- Price the stay on the server, from the hotel's own configuration.
+        //      A client-supplied amount is never used: the engine recomputes
+        //      everything from rows already scoped to this hotel.
+        let rate: number; // nightly room rate, stored on ReservationRoom
+        let priceSnapshot: PriceBreakdown | null = null;
 
-        let rate: number;
-        try {
-          rate = parseMoney(Number(tariff.baseRate), "Configured nightly rate", {
-            allowZero: true,
+        if (usesConfiguredPricing) {
+          const priced = priceStay(pricingConfig, {
+            roomTypeId: room.roomTypeId,
+            occupancyTypeId,
+            mealPlanId,
+            checkIn,
+            checkOut,
+            adults,
+            children,
+            childAges: Array.isArray(body.childAges)
+              ? body.childAges.map((age: unknown) => Number(age)).filter((age: number) => Number.isFinite(age))
+              : undefined,
+            extraBeds: Number.isInteger(Number(body.extraBeds ?? 0)) ? Number(body.extraBeds ?? 0) : 0,
+            discount: discount > 0 ? discount : undefined,
+            discountPercent,
           });
+          if (!priced.ok) throw new ReservationError(priced.message);
+          priceSnapshot = priced;
+          // ReservationRoom.rate stays the per-night room cost (room + seasonal
+          // adjustments); meals, extras and taxes live in the snapshot and are
+          // written to the folio at check-in.
+          rate = roundMoney((priced.totals.room + priced.totals.adjustments) / priced.nights);
           if (rate <= 0) {
-            // A hotel that never set a rate must not be able to give rooms away
-            // silently: say what is wrong and where to fix it.
             throw new ReservationError(
-              "This room has no nightly rate configured. Set a rate on the Rooms page before selling it."
+              "This room has no nightly rate configured. Set a rate on the Pricing page before selling it."
             );
           }
-          accommodationRequired([rate], nights, discount);
-        } catch (error) {
-          if (error instanceof ReservationError) throw error;
-          throw new ReservationError(
-            error instanceof Error ? error.message : "The configured tariff is invalid."
-          );
+        } else {
+          const tariff = await tx.roomType.findUnique({
+            where: { id_hotelId: { id: tariffId, hotelId } },
+          });
+          if (!tariff) throw new ReservationError("The selected tariff is unavailable in this hotel.", 404);
+
+          // The price must come from either the tariff for this occupancy and meal
+          // plan, or the selected room's own room type. Anything else is refused so
+          // a client cannot price a room at another type's rate.
+          if (!tariffPricesStay(tariff, room.roomTypeId, occupancy!, mealPlan!)) {
+            throw new ReservationError(
+              "The selected tariff does not match the occupancy and meal plan."
+            );
+          }
+
+          try {
+            rate = parseMoney(Number(tariff.baseRate), "Configured nightly rate", {
+              allowZero: true,
+            });
+            if (rate <= 0) {
+              // A hotel that never set a rate must not be able to give rooms away
+              // silently: say what is wrong and where to fix it.
+              throw new ReservationError(
+                "This room has no nightly rate configured. Set a rate on the Rooms page before selling it."
+              );
+            }
+            accommodationRequired([rate], nights, discount);
+          } catch (error) {
+            if (error instanceof ReservationError) throw error;
+            throw new ReservationError(
+              error instanceof Error ? error.message : "The configured tariff is invalid."
+            );
+          }
         }
 
         // Tenant-scoped room overlap check
@@ -280,6 +336,8 @@ export async function POST(req: Request) {
           existingCodes.map((reservation) => reservation.code)
         );
 
+        const effectiveDiscount = priceSnapshot ? priceSnapshot.totals.discount : discount;
+
         const reservation = await tx.reservation.create({
           data: {
             hotelId,
@@ -291,14 +349,32 @@ export async function POST(req: Request) {
             source,
             adults,
             children,
-            discount: discount || null,
+            discount: effectiveDiscount || null,
             notes: notes || null,
             createdById: tenant.userId,
             rooms: { create: [{ roomId: room.id, rate }] },
           },
         });
 
-        return { id: reservation.id, code: reservation.code };
+        // Freeze the agreed price. Editing pricing configuration later must not
+        // change what this guest was quoted.
+        if (priceSnapshot) {
+          await persistPriceSnapshot(tx, {
+            hotelId,
+            reservationId: reservation.id,
+            breakdown: priceSnapshot,
+            createdById: tenant.userId,
+          });
+        }
+
+        return {
+          id: reservation.id,
+          code: reservation.code,
+          currency: pricingConfig.currency,
+          total: priceSnapshot ? priceSnapshot.totals.grandTotal : roundMoney(rate * nights - discount),
+          nightlyRate: rate,
+          nights,
+        };
       },
       {
         isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
@@ -323,4 +399,51 @@ export async function POST(req: Request) {
     console.error("Reservation creation failed:", error);
     return NextResponse.json({ error: "Could not create the reservation." }, { status: 500 });
   }
+}
+
+/**
+ * Persist the frozen price breakdown.
+ *
+ * Guarded so an installation that has not run the pricing migration (or a test
+ * double without that delegate) still creates reservations: the snapshot is an
+ * additional guarantee, not a prerequisite for selling a room.
+ */
+async function persistPriceSnapshot(
+  tx: unknown,
+  input: {
+    hotelId: string;
+    reservationId: string;
+    breakdown: PriceBreakdown;
+    createdById: string;
+  }
+) {
+  const delegate = (tx as { reservationPriceSnapshot?: { create?: (args: unknown) => Promise<unknown> } })
+    .reservationPriceSnapshot;
+  if (!delegate?.create) return null;
+  const { breakdown } = input;
+  return delegate.create({
+    data: {
+      hotelId: input.hotelId,
+      reservationId: input.reservationId,
+      pricingModel: breakdown.pricingModel,
+      currency: breakdown.currency,
+      occupancyName: breakdown.occupancyName,
+      mealPlanName: breakdown.mealPlanName,
+      mealPlanBasis: breakdown.mealPlanBasis,
+      nightlyRate: breakdown.nightlyRate,
+      nights: breakdown.nights,
+      adults: breakdown.adults,
+      children: breakdown.children,
+      extraBeds: breakdown.extraBeds,
+      roomTotal: breakdown.totals.room,
+      mealsTotal: breakdown.totals.meals,
+      extrasTotal: breakdown.totals.extras,
+      adjustmentsTotal: breakdown.totals.adjustments,
+      discountTotal: breakdown.totals.discount,
+      taxTotal: breakdown.totals.tax,
+      grandTotal: breakdown.totals.grandTotal,
+      breakdown: breakdown as unknown as Prisma.InputJsonValue,
+      createdById: input.createdById,
+    },
+  });
 }

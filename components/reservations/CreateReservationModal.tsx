@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { apiErrorMessage, requestJson } from "@/lib/client-api";
 import { addDays, isoDay } from "@/lib/dates";
@@ -18,10 +18,10 @@ import {
   MEAL_PLANS,
   OCCUPANCY_LABELS,
   OCCUPANCIES,
-  resolveApprovedRate,
   type MealPlanCode,
   type Occupancy,
 } from "@/lib/tariffs";
+import type { PriceBreakdown } from "@/lib/pricing/types";
 
 type Room = {
   id: string;
@@ -32,6 +32,19 @@ type Room = {
   status: RoomStatus;
 };
 type RoomTypeTariff = { id: string; name: string; baseRate: number | string; mealPlan: string | null };
+
+type QuoteResponse = PriceBreakdown & {
+  roomId: string;
+  roomNumber: string;
+  availableOccupancies: {
+    id: string;
+    name: string;
+    minAdults: number;
+    maxAdults: number;
+    nightlyRate: number;
+  }[];
+  availableMealPlans: { id: string; name: string; pricingBasis: string; charge: number }[];
+};
 
 function inputClass() {
   return "w-full rounded-control border border-border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent";
@@ -59,6 +72,13 @@ function money(amount: number, currency: string): string {
   }
 }
 
+const BASIS_LABELS: Record<string, string> = {
+  PER_PERSON_PER_NIGHT: "per person / night",
+  PER_ROOM_PER_NIGHT: "per room / night",
+  PER_PERSON_PER_STAY: "per person / stay",
+  PER_ROOM_PER_STAY: "per room / stay",
+};
+
 export default function CreateReservationModal({
   rooms,
   roomTypes,
@@ -80,8 +100,9 @@ export default function CreateReservationModal({
   onCreated: (reservationId: string) => void;
   onError: (e: string | null) => void;
 }) {
-  // Captures the common hotel check-in details: guest identity, stay dates,
-  // and room/tariff. Actual payment is recorded at check-in.
+  // Captures the common hotel check-in details: guest identity, stay dates, and
+  // room/occupancy/meal plan. The price is never computed here — the server's
+  // quote endpoint prices the stay and this form renders that breakdown.
   const [guestName, setGuestName] = useState("");
   const [guestPhone, setGuestPhone] = useState("");
   const [idNumber, setIdNumber] = useState("");
@@ -92,33 +113,32 @@ export default function CreateReservationModal({
   const [checkOutDate, setCheckOutDate] = useState(isoDay(addDays(defaultDate, 1)));
   const [occupancy, setOccupancy] = useState<Occupancy>("SINGLE");
   const [mealPlan, setMealPlan] = useState<MealPlanCode>("BED_ONLY");
+  const [occupancyTypeId, setOccupancyTypeId] = useState("");
+  const [mealPlanId, setMealPlanId] = useState("");
   const [adults, setAdults] = useState("1");
   const [children, setChildren] = useState("0");
+  const [extraBeds, setExtraBeds] = useState("0");
   const [discount, setDiscount] = useState("");
   const [loading, setLoading] = useState(false);
+  const [quote, setQuote] = useState<QuoteResponse | null>(null);
+  // The options the server offered for the current room type. Kept separately
+  // from the quote so a failing price (bad dates, capacity) does not blank the
+  // occupancy/meal-plan pickers — that is exactly when they are needed.
+  const [catalog, setCatalog] = useState<{
+    roomTypeId: string;
+    pricingModel: string;
+    occupancies: QuoteResponse["availableOccupancies"];
+    mealPlans: QuoteResponse["availableMealPlans"];
+  } | null>(null);
+  const [quoteError, setQuoteError] = useState<string | null>(null);
+  const [quoting, setQuoting] = useState(false);
   const tariffs = roomTypes;
 
   const room = rooms.find((r) => r.id === roomId);
-
-  // The rate comes from the occupancy/meal-plan tariff when the hotel has one,
-  // otherwise from the selected room's own room type. Both are resolved here and
-  // re-derived on the server, so the figure on screen is never what is trusted.
-  const approved = useMemo(
-    () =>
-      resolveApprovedRate({
-        tariffs,
-        occupancy,
-        mealPlan,
-        roomTypeId: room?.roomTypeId ?? null,
-      }),
-    [tariffs, occupancy, mealPlan, room?.roomTypeId]
-  );
-  const rate = approved.ok ? approved.rate : 0;
   const nights = nightsBetween(checkInDate, checkOutDate);
-  const total = approved.ok && nights ? rate * nights : null;
 
   // Status is a "right now" fact, so it is enforced only when the stay starts
-  // today -- a room being cleaned today says nothing about next month.
+  // today — a room being cleaned today says nothing about next month.
   const startsToday = checkInDate === isoDay(new Date());
   const selectable = (candidate: Room) => !startsToday || isBookableToday(candidate.status);
   const selectedRoomBlocked = room ? startsToday && !isBookableToday(room.status) : false;
@@ -131,6 +151,101 @@ export default function CreateReservationModal({
       ),
     [rooms]
   );
+
+  // ---------------------------------------------------------------------
+  // Live quote. Re-runs whenever any priced input changes, so changing the room,
+  // occupancy, meal plan, guests or dates updates every amount immediately.
+  // ---------------------------------------------------------------------
+  const quoteSequence = useRef(0);
+  const requestKey = JSON.stringify({
+    roomId,
+    occupancyTypeId,
+    mealPlanId,
+    checkInDate,
+    checkOutDate,
+    adults,
+    children,
+    extraBeds,
+    discount: canApplyDiscount ? discount : "",
+  });
+
+  useEffect(() => {
+    if (!room || !nights) {
+      setQuote(null);
+      setQuoteError(null);
+      return;
+    }
+    const sequence = ++quoteSequence.current;
+    setQuoting(true);
+    const timer = setTimeout(async () => {
+      try {
+        const data = await requestJson<QuoteResponse>("/api/reservations/quote", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            roomId,
+            occupancyTypeId: occupancyTypeId || undefined,
+            mealPlanId: mealPlanId || undefined,
+            checkInDate: new Date(checkInDate).toISOString(),
+            checkOutDate: new Date(checkOutDate).toISOString(),
+            adults: Number(adults) || 1,
+            children: Number(children) || 0,
+            extraBeds: Number(extraBeds) || 0,
+            discount: canApplyDiscount && discount ? Number(discount) : undefined,
+          }),
+        });
+        if (sequence !== quoteSequence.current) return;
+        setQuote(data);
+        setQuoteError(null);
+        setCatalog({
+          roomTypeId: room.roomTypeId ?? "",
+          pricingModel: data.pricingModel,
+          occupancies: data.availableOccupancies,
+          mealPlans: data.availableMealPlans,
+        });
+        // Adopt the server's defaults on the first quote so the selects always
+        // show something that is actually configured.
+        if (!occupancyTypeId && data.occupancyTypeId) setOccupancyTypeId(data.occupancyTypeId);
+        if (!mealPlanId && data.mealPlanId) setMealPlanId(data.mealPlanId);
+      } catch (error) {
+        if (sequence !== quoteSequence.current) return;
+        const message = apiErrorMessage(error, "Could not price this stay.");
+        // The chosen occupancy may no longer fit — the receptionist changed the
+        // guest count. Drop the selection and let the server pick a fitting
+        // option rather than insisting on one it just refused. Anything that
+        // still fails is reported by the next quote.
+        if (
+          occupancyTypeId &&
+          /allows \d+[-–]\d+ adults|is not sold as|no nightly rate|not available in this hotel/i.test(message)
+        ) {
+          setOccupancyTypeId("");
+          setQuoteError(null);
+          return;
+        }
+        setQuote(null);
+        setQuoteError(message);
+      } finally {
+        if (sequence === quoteSequence.current) setQuoting(false);
+      }
+    }, 200);
+
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestKey]);
+
+  const roomTypeId = room?.roomTypeId ?? "";
+  const currentCatalog = catalog && catalog.roomTypeId === roomTypeId ? catalog : null;
+  const usesConfiguredPricing = currentCatalog?.pricingModel === "ROOM_TYPE_OCCUPANCY";
+  const occupancies = currentCatalog?.occupancies ?? [];
+  const mealPlans = currentCatalog?.mealPlans ?? [];
+
+  // Different room types are sold as different occupancies with different meal
+  // plans: drop the previous selection so the server's default for the new type
+  // applies instead of a stale id that would be refused.
+  useEffect(() => {
+    setOccupancyTypeId("");
+    setMealPlanId("");
+  }, [roomTypeId]);
 
   // Everything the button depends on, phrased so the person can act on it.
   const problems: string[] = [];
@@ -147,25 +262,21 @@ export default function CreateReservationModal({
   if (!Number.isInteger(Number(adults)) || Number(adults) < 1) {
     problems.push("Adults must be at least 1.");
   }
-  if (!approved.ok) {
-    problems.push(
-      approved.reason === "NO_TARIFF"
-        ? "This hotel has no nightly rate for the selected room. Set one on the Rooms page."
-        : "The nightly rate for this room is not a valid amount. Correct it on the Rooms page."
-    );
+  if (quoteError) problems.push(quoteError);
+  if (!quote && !quoteError && nights) {
+    problems.push(quoting ? "Pricing this stay…" : "The stay could not be priced yet.");
   }
-  const canSubmit = problems.length === 0 && !loading;
+  if (quote && quote.totals.grandTotal <= 0) {
+    problems.push("This stay prices at zero. Set a rate on the Pricing page before selling it.");
+  }
+  const canSubmit = problems.length === 0 && !loading && Boolean(quote);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     // The button is disabled in these cases; this is the belt-and-braces path for
     // a submit that arrives anyway (Enter key, assistive tech, stale markup).
-    if (!approved.ok || problems.length > 0) {
+    if (problems.length > 0 || !quote) {
       onError(problems[0] ?? "Complete the reservation details before submitting.");
-      return;
-    }
-    if (selectedRoomBlocked && room) {
-      onError(`Room ${room.number} is ${ROOM_STATUS_LABELS[room.status]}. Choose an available room.`);
       return;
     }
     setLoading(true);
@@ -183,11 +294,16 @@ export default function CreateReservationModal({
           checkInDate: new Date(checkInDate).toISOString(),
           checkOutDate: new Date(checkOutDate).toISOString(),
           roomId,
-          tariffId: approved.tariff.id,
-          occupancy,
-          mealPlan,
+          // Configured pricing sends the hotel's own occupancy and meal plan; a
+          // hotel still on room-type rates sends the legacy fields instead.
+          occupancyTypeId: usesConfiguredPricing ? occupancyTypeId || undefined : undefined,
+          mealPlanId: usesConfiguredPricing ? mealPlanId || undefined : undefined,
+          tariffId: usesConfiguredPricing ? undefined : room?.roomTypeId ?? tariffs[0]?.id,
+          occupancy: usesConfiguredPricing ? undefined : occupancy,
+          mealPlan: usesConfiguredPricing ? undefined : mealPlan,
           adults: Number(adults) || 1,
           children: Number(children) || 0,
+          extraBeds: Number(extraBeds) || 0,
           discount: canApplyDiscount && discount ? Number(discount) : null,
         }),
       });
@@ -205,7 +321,7 @@ export default function CreateReservationModal({
       <div className="card w-full max-w-md max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between mb-4">
           <h2>New Reservation</h2>
-          <button onClick={onClose} className="text-text-secondary hover:text-text-primary">
+          <button onClick={onClose} className="text-text-secondary hover:text-text-primary" aria-label="Close">
             <X size={18} />
           </button>
         </div>
@@ -249,18 +365,22 @@ export default function CreateReservationModal({
           </div>
           <p className="text-xs text-text-muted">Check-out is strictly at 10:00 AM.</p>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-3 gap-3">
             <div>
               <label className="block text-sm font-medium mb-1.5">Adults</label>
-              <input type="number" min="1" value={adults} onChange={(e) => setAdults(e.target.value)} className={inputClass()} />
+              <input type="number" data-testid="adults" min="1" value={adults} onChange={(e) => setAdults(e.target.value)} className={inputClass()} />
             </div>
             <div>
               <label className="block text-sm font-medium mb-1.5">Children</label>
-              <input type="number" min="0" value={children} onChange={(e) => setChildren(e.target.value)} className={inputClass()} />
+              <input type="number" data-testid="children" min="0" value={children} onChange={(e) => setChildren(e.target.value)} className={inputClass()} />
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1.5">Extra beds</label>
+              <input type="number" data-testid="extra-beds" min="0" value={extraBeds} onChange={(e) => setExtraBeds(e.target.value)} className={inputClass()} />
             </div>
           </div>
 
-          <p className="text-xs font-medium uppercase tracking-wide text-text-muted pt-2">Room &amp; Tariff</p>
+          <p className="text-xs font-medium uppercase tracking-wide text-text-muted pt-2">Room &amp; Rate</p>
 
           <div>
             <div className="flex items-baseline justify-between mb-1.5">
@@ -303,35 +423,73 @@ export default function CreateReservationModal({
             )}
           </div>
 
-          <div>
-            <label className="block text-sm font-medium mb-1.5">Occupancy</label>
-            <select
-              value={occupancy}
-              onChange={(e) => setOccupancy(e.target.value as Occupancy)}
-              className={inputClass()}
-            >
-              {OCCUPANCIES.map((option) => (
-                <option key={option} value={option}>
-                  {OCCUPANCY_LABELS[option]}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1.5">Meal Plan</label>
-            <select
-              value={mealPlan}
-              onChange={(e) => setMealPlan(e.target.value as MealPlanCode)}
-              className={inputClass()}
-            >
-              {MEAL_PLANS.map((option) => (
-                <option key={option} value={option}>
-                  {MEAL_PLAN_LABELS[option]}
-                </option>
-              ))}
-            </select>
-          </div>
+          {usesConfiguredPricing ? (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium mb-1.5">Occupancy</label>
+                <select
+                  data-testid="occupancy-select"
+                  value={occupancyTypeId}
+                  onChange={(e) => setOccupancyTypeId(e.target.value)}
+                  className={inputClass()}
+                >
+                  <option value="">Choose…</option>
+                  {occupancies.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1.5">Meal plan</label>
+                <select
+                  data-testid="meal-plan-select"
+                  value={mealPlanId}
+                  onChange={(e) => setMealPlanId(e.target.value)}
+                  className={inputClass()}
+                >
+                  <option value="">None</option>
+                  {mealPlans.map((plan) => (
+                    <option key={plan.id} value={plan.id}>
+                      {plan.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium mb-1.5">Occupancy</label>
+                <select
+                  value={occupancy}
+                  onChange={(e) => setOccupancy(e.target.value as Occupancy)}
+                  className={inputClass()}
+                >
+                  {OCCUPANCIES.map((option) => (
+                    <option key={option} value={option}>
+                      {OCCUPANCY_LABELS[option]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1.5">Meal Plan</label>
+                <select
+                  value={mealPlan}
+                  onChange={(e) => setMealPlan(e.target.value as MealPlanCode)}
+                  className={inputClass()}
+                >
+                  {MEAL_PLANS.map((option) => (
+                    <option key={option} value={option}>
+                      {MEAL_PLAN_LABELS[option]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
 
           <div className={canApplyDiscount ? "grid grid-cols-2 gap-3" : ""}>
             <div>
@@ -344,13 +502,13 @@ export default function CreateReservationModal({
                 aria-live="polite"
                 className={`${inputClass()} bg-bg font-medium`}
               >
-                {approved.ok ? money(rate, currency) : "--"}
+                {quote ? money(quote.effectiveNightlyRate, quote.currency || currency) : "--"}
               </p>
-              {approved.ok && (
+              {quote && (
                 <p className="mt-1 text-xs text-text-muted" data-testid="approved-rate-source">
-                  {approved.source === "OCCUPANCY_TARIFF"
-                    ? `${approved.tariff.name} · ${MEAL_PLAN_LABELS[mealPlan]}`
-                    : `${room?.roomTypeName ?? approved.tariff.name} room rate`}
+                  {quote.roomTypeName}
+                  {quote.occupancyName ? ` · ${quote.occupancyName}` : ""}
+                  {quote.nights > 1 ? ` · average over ${quote.nights} nights` : ""}
                 </p>
               )}
             </div>
@@ -371,11 +529,58 @@ export default function CreateReservationModal({
             )}
           </div>
 
-          {approved.ok && total !== null && (
-            <p className="text-sm text-text-secondary" data-testid="stay-total">
-              {nights} night{nights === 1 ? "" : "s"} × {money(rate, currency)} ={" "}
-              <span className="font-medium text-text-primary">{money(total, currency)}</span>
-              {canApplyDiscount && discount ? " before discount" : ""}
+          {quote && (
+            <div className="rounded-control border border-border p-3 text-sm" data-testid="price-breakdown">
+              <p className="text-xs font-medium uppercase tracking-wide text-text-muted mb-2">
+                Price breakdown
+              </p>
+              <ul className="space-y-1">
+                {quote.lines.map((line) => (
+                  <li key={line.code} className="flex items-start justify-between gap-3">
+                    <span className="text-text-secondary">
+                      {line.label}
+                      {line.kind === "TAX" ? "" : line.quantity > 1 ? ` × ${line.quantity}` : ""}
+                    </span>
+                    <span className={line.amount < 0 ? "text-success" : "text-text-primary"}>
+                      {money(line.amount, quote.currency || currency)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <div className="mt-2 border-t border-border pt-2 space-y-1">
+                <div className="flex justify-between text-xs text-text-muted">
+                  <span>Subtotal</span>
+                  <span data-testid="price-subtotal">
+                    {money(quote.totals.subtotal, quote.currency || currency)}
+                  </span>
+                </div>
+                {quote.totals.discount > 0 && (
+                  <div className="flex justify-between text-xs text-text-secondary">
+                    <span>Discount</span>
+                    <span>-{money(quote.totals.discount, quote.currency || currency)}</span>
+                  </div>
+                )}
+                {quote.totals.tax > 0 && (
+                  <div className="flex justify-between text-xs text-text-secondary">
+                    <span>Taxes &amp; service{quote.taxInclusive ? " (included)" : ""}</span>
+                    <span>{money(quote.totals.tax, quote.currency || currency)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between font-medium">
+                  <span>Total for {quote.nights} night{quote.nights === 1 ? "" : "s"}</span>
+                  <span data-testid="price-total">{money(quote.totals.grandTotal, quote.currency || currency)}</span>
+                </div>
+                <div className="flex justify-between text-xs text-text-muted">
+                  <span>Average per night</span>
+                  <span>{money(quote.totals.averagePerNight, quote.currency || currency)}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {quote?.mealPlanName && quote.mealPlanBasis && (
+            <p className="text-xs text-text-muted" data-testid="meal-plan-basis">
+              {quote.mealPlanName} · {BASIS_LABELS[quote.mealPlanBasis] ?? quote.mealPlanBasis}
             </p>
           )}
 

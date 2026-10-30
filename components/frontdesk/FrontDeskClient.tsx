@@ -7,6 +7,7 @@ import type { HotelRole } from "@prisma/client";
 import CreateReservationModal from "@/components/reservations/CreateReservationModal";
 import FolioModal from "./FolioModal";
 import CheckInModal from "./CheckInModal";
+import RepriceDialog from "@/components/reservations/RepriceDialog";
 import ExtendStayModal from "./ExtendStayModal";
 import { hasRole, ROLE_GROUPS } from "@/lib/permissions";
 import type { RoomStatus } from "@prisma/client";
@@ -79,6 +80,7 @@ export default function FrontDeskClient({
   const [walkInOpen, setWalkInOpen] = useState(false);
   const [checkInReservation, setCheckInReservation] = useState<ResRow | null>(null);
   const [extendReservation, setExtendReservation] = useState<ResRow | null>(null);
+  const [repriceReservation, setRepriceReservation] = useState<ResRow | null>(null);
   const [openFolio, setOpenFolio] = useState<{ folioId: string; reservationId: string } | null>(null);
 
   const roomSummary = summariseRooms(rooms);
@@ -221,15 +223,28 @@ export default function FrontDeskClient({
                 </div>
 
                 {canManageStays && (
-                  <button
-                    onClick={() => {
-                      setError(null);
-                      setCheckInReservation(r);
-                    }}
-                    className="btn-primary w-full mt-4 transition-all duration-200 group-hover:shadow-sm"
-                  >
-                    Check In
-                  </button>
+                  <div className={canOverrideBalance ? "mt-4 grid grid-cols-2 gap-2" : "mt-4"}>
+                    <button
+                      onClick={() => {
+                        setError(null);
+                        setCheckInReservation(r);
+                      }}
+                      className="btn-primary w-full transition-all duration-200 group-hover:shadow-sm"
+                    >
+                      Check In
+                    </button>
+                    {canOverrideBalance && (
+                      <button
+                        onClick={() => {
+                          setError(null);
+                          setRepriceReservation(r);
+                        }}
+                        className="btn-secondary w-full"
+                      >
+                        Reprice
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             ))}
@@ -424,6 +439,18 @@ export default function FrontDeskClient({
           onExtended={(folioId) => {
             refresh();
             setOpenFolio({ folioId, reservationId: extendReservation.id });
+          }}
+        />
+      )}
+
+      {repriceReservation && (
+        <RepriceDialog
+          reservation={repriceReservation}
+          currency={currency}
+          onClose={() => setRepriceReservation(null)}
+          onRepriced={(message) => {
+            refresh();
+            setError(message);
           }}
         />
       )}

@@ -1,6 +1,6 @@
 {
   "base": "http://127.0.0.1:3000",
-  "generatedAt": "2026-10-30T22:01:58.595Z",
+  "generatedAt": "2026-10-30T23:50:32.949Z",
   "hotel": "Riverside Grand Hotel",
   "currency": "KES",
   "passed": 13,
@@ -18,21 +18,21 @@
       "description": "receptionist creates a reservation on a 'Standard' room type",
       "status": "PASS",
       "ms": 0,
-      "detail": "RES-2026-00006"
+      "detail": "RES-2026-00010"
     },
     {
       "id": "api-rate-persisted",
       "description": "stored nightly rate is the room type's configured rate",
       "status": "PASS",
-      "ms": 17,
-      "detail": "4500.00 in 7c00a083-61c6-49b3-9f66-a0585706bcec"
+      "ms": 15,
+      "detail": "4500.00 in 57190ce0-5c63-465d-9e04-a2b8c89d2267"
     },
     {
       "id": "api-no-double-booking",
       "description": "the same room and dates cannot be sold twice",
       "status": "PASS",
       "ms": 0,
-      "detail": "409 Room is already booked for part of that date range (RES-2026-00006)."
+      "detail": "409 Room is already booked for part of that date range (RES-2026-00010)."
     },
     {
       "id": "api-tenant-isolation",
@@ -53,7 +53,7 @@
       "description": "the new reservation is returned by the list endpoint",
       "status": "PASS",
       "ms": 0,
-      "detail": "RES-2026-00006"
+      "detail": "RES-2026-00010"
     },
     {
       "id": "api-owner-hotel-selected",
@@ -67,7 +67,7 @@
       "description": "the owner can create a reservation too",
       "status": "PASS",
       "ms": 0,
-      "detail": "RES-2026-00007"
+      "detail": "RES-2026-00011"
     },
     {
       "id": "browser-rate-populated",
@@ -94,8 +94,8 @@
       "id": "browser-created",
       "description": "reservation created from the form",
       "status": "PASS",
-      "ms": 11,
-      "detail": "RES-2026-00008 @ 8500.00"
+      "ms": 10,
+      "detail": "RES-2026-00012 @ 8500.00"
     },
     {
       "id": "browser-persisted",

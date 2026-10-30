@@ -59,10 +59,11 @@ describe("migration release manifest", () => {
     expect(manifest).not.toBeNull();
     const names = manifest.migrations.map((entry: { name: string }) => entry.name);
     expect(names).toEqual(migrations.map((migration) => migration.name));
-    expect(names).toHaveLength(19);
+    expect(names).toHaveLength(20);
     expect(names[0]).toBe("20260915161717_init");
-    expect(names[names.length - 1]).toBe("20261029130000_add_tenant_composite_join_fks");
+    expect(names[names.length - 1]).toBe("20261031120000_add_pricing_engine");
     expect(names).toContain("20261029120000_add_pos_charge_to_room_idempotency");
+    expect(names).toContain("20261029130000_add_tenant_composite_join_fks");
   });
 
   it("matches the files on disk", () => {
@@ -198,14 +199,23 @@ describe("adoption planning", () => {
     }
   });
 
-  it("baselines 17 migrations for an unmanaged SaaS database and leaves the two new ones pending", () => {
+  it("baselines 17 migrations for an unmanaged SaaS database and leaves the three new ones pending", () => {
     const plan = buildAdoptionPlan({ migrations, features: featuresFor("saas_through_17"), ledgerRows: [] });
     expect(plan.checkpoint?.id).toBe("saas_through_17");
     expect(plan.baseline).toEqual(names.slice(0, 17));
     expect(plan.pending).toEqual([
       "20261029120000_add_pos_charge_to_room_idempotency",
       "20261029130000_add_tenant_composite_join_fks",
+      "20261031120000_add_pricing_engine",
     ]);
+    expect(plan.problems).toEqual([]);
+  });
+
+  it("baselines 19 migrations for a database that predates the pricing engine", () => {
+    const plan = buildAdoptionPlan({ migrations, features: featuresFor("saas_through_19"), ledgerRows: [] });
+    expect(plan.checkpoint?.id).toBe("saas_through_19");
+    expect(plan.baseline).toEqual(names.slice(0, 19));
+    expect(plan.pending).toEqual(["20261031120000_add_pricing_engine"]);
     expect(plan.problems).toEqual([]);
   });
 

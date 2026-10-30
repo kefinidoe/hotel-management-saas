@@ -1,0 +1,210 @@
+{
+  "base": "http://127.0.0.1:3000",
+  "generatedAt": "2026-10-30T23:56:16.242Z",
+  "hotel": "Riverside Grand Hotel",
+  "currency": "KES",
+  "passed": 31,
+  "failed": 0,
+  "screenshots": [
+    "/home/user/hotel-management-saas/docs/evidence/pricing/pricing-01-settings-overview.png",
+    "/home/user/hotel-management-saas/docs/evidence/pricing/pricing-02-rate-edit.png",
+    "/home/user/hotel-management-saas/docs/evidence/pricing/pricing-03-rate-persisted.png",
+    "/home/user/hotel-management-saas/docs/evidence/pricing/pricing-04-modal-breakdown.png",
+    "/home/user/hotel-management-saas/docs/evidence/pricing/pricing-05-occupancy-repriced.png",
+    "/home/user/hotel-management-saas/docs/evidence/pricing/pricing-06-meal-plan-repriced.png",
+    "/home/user/hotel-management-saas/docs/evidence/pricing/pricing-07-dates-repriced.png",
+    "/home/user/hotel-management-saas/docs/evidence/pricing/pricing-08-ready-to-submit.png",
+    "/home/user/hotel-management-saas/docs/evidence/pricing/pricing-09-created.png",
+    "/home/user/hotel-management-saas/docs/evidence/pricing/pricing-10-after-reload.png",
+    "/home/user/hotel-management-saas/docs/evidence/pricing/pricing-11-reprice-dialog.png",
+    "/home/user/hotel-management-saas/docs/evidence/pricing/pricing-12-repriced.png"
+  ],
+  "results": [
+    {
+      "id": "api-config-read",
+      "description": "the owner reads the pricing configuration",
+      "status": "PASS",
+      "detail": "9 room types, 3 occupancies"
+    },
+    {
+      "id": "api-config-write-forbidden",
+      "description": "a receptionist cannot write pricing configuration",
+      "status": "PASS",
+      "detail": "403 and nothing written"
+    },
+    {
+      "id": "api-occupancy-created",
+      "description": "occupancy options carry the hotel's own names",
+      "status": "PASS",
+      "detail": "Pricing Double, Pricing Family, Pricing Single"
+    },
+    {
+      "id": "api-rates-saved",
+      "description": "per-occupancy nightly rates are stored per room type",
+      "status": "PASS",
+      "detail": "4500/5500"
+    },
+    {
+      "id": "api-twin-only-single",
+      "description": "a room type sold only as a single has exactly one rate",
+      "status": "PASS",
+      "detail": "1 active rate(s)"
+    },
+    {
+      "id": "api-meal-plan-created",
+      "description": "a meal plan is created with an explicit pricing basis",
+      "status": "PASS",
+      "detail": "65c74e1a-a450-49a0-8964-af0e9b54d999"
+    },
+    {
+      "id": "api-settings-updated",
+      "description": "the hotel switches to occupancy-based pricing",
+      "status": "PASS",
+      "detail": "ROOM_TYPE_OCCUPANCY"
+    },
+    {
+      "id": "api-quote-configured",
+      "description": "the quote endpoint prices occupancy + meal plan per person/night",
+      "status": "PASS",
+      "detail": "20,700 KES (2 lines)"
+    },
+    {
+      "id": "api-quote-defaults-occupancy",
+      "description": "an omitted occupancy is defaulted server-side so the form can open",
+      "status": "PASS",
+      "detail": "Pricing Double @ 5,500"
+    },
+    {
+      "id": "api-unsupported-occupancy-refused",
+      "description": "an occupancy this room type is not sold as is refused",
+      "status": "PASS",
+      "detail": "400 Pricing Twin is not sold as Pricing Double. Choose another occupancy."
+    },
+    {
+      "id": "api-foreign-occupancy-refused",
+      "description": "another hotel's occupancy option is refused",
+      "status": "PASS",
+      "detail": "400"
+    },
+    {
+      "id": "api-reservation-priced",
+      "description": "the reservation stores the quoted total",
+      "status": "PASS",
+      "detail": "[object Object]"
+    },
+    {
+      "id": "api-snapshot-frozen",
+      "description": "a price snapshot is written with the reservation",
+      "status": "PASS",
+      "detail": "20,700 KES, 3 nights"
+    },
+    {
+      "id": "api-config-change-keeps-sold-price",
+      "description": "raising the rate does not re-price a sold reservation",
+      "status": "PASS",
+      "detail": "sold 20,700 → new 6,400"
+    },
+    {
+      "id": "api-manipulated-total-ignored",
+      "description": "a client-supplied total is ignored",
+      "status": "PASS",
+      "detail": "6,400"
+    },
+    {
+      "id": "api-reprice-permission",
+      "description": "a receptionist may not reprice a sold reservation",
+      "status": "PASS",
+      "detail": "403"
+    },
+    {
+      "id": "api-reprice-applied-and-audited",
+      "description": "repricing is explicit, audited and keeps the old price on record",
+      "status": "PASS",
+      "detail": "20,700 → 23,400 (audited)"
+    },
+    {
+      "id": "api-discount-permission",
+      "description": "only management may discount a stay",
+      "status": "PASS",
+      "detail": "403 for receptionist, 5,900 for manager"
+    },
+    {
+      "id": "api-tenant-isolation",
+      "description": "another hotel's receptionist cannot quote this hotel's room",
+      "status": "PASS",
+      "detail": "404"
+    },
+    {
+      "id": "api-cross-tenant-meal-plan-refused",
+      "description": "a meal plan cannot reference another hotel's room type",
+      "status": "PASS",
+      "detail": "404 and no partial row"
+    },
+    {
+      "id": "browser-settings-page",
+      "description": "the Pricing & Rates page shows the hotel currency and sections",
+      "status": "PASS",
+      "detail": "KES labelled"
+    },
+    {
+      "id": "browser-rate-edit-persists",
+      "description": "editing a rate in the UI persists across a reload",
+      "status": "PASS",
+      "detail": "6,500 KES"
+    },
+    {
+      "id": "browser-quote-breakdown",
+      "description": "the form shows a server-computed breakdown",
+      "status": "PASS",
+      "detail": "6,500 KES (2 adults, 1 night, default occupancy)"
+    },
+    {
+      "id": "browser-occupancy-reprices",
+      "description": "choosing a hotel-defined occupancy re-prices the stay",
+      "status": "PASS",
+      "detail": "6,500 → 9,000 (Pricing Family)"
+    },
+    {
+      "id": "browser-meal-plan-reprices",
+      "description": "choosing a meal plan adds its per-person charge",
+      "status": "PASS",
+      "detail": "9,000 → 10,400 (Pricing Breakfast · per person / night)"
+    },
+    {
+      "id": "browser-dates-reprice",
+      "description": "changing the dates re-prices the stay per night",
+      "status": "PASS",
+      "detail": "31,200 KES for 3 nights"
+    },
+    {
+      "id": "browser-created",
+      "description": "submitting stores the snapshot for the sold stay",
+      "status": "PASS",
+      "detail": "31,200 KES"
+    },
+    {
+      "id": "browser-persisted",
+      "description": "the reservation is still there after a reload",
+      "status": "PASS",
+      "detail": "visible"
+    },
+    {
+      "id": "api-arrival-created",
+      "description": "a same-day arrival is booked for the Front Desk",
+      "status": "PASS",
+      "detail": "RES-2026-00017 @ 4,600"
+    },
+    {
+      "id": "browser-config-edit-keeps-sold-price",
+      "description": "editing rates afterwards cannot re-price a sold stay",
+      "status": "PASS",
+      "detail": "31,200 unchanged after raising to 9,000"
+    },
+    {
+      "id": "browser-reprice-workflow",
+      "description": "the owner reprices an arrival from the Front Desk",
+      "status": "PASS",
+      "detail": "Ksh 4,600.00 → Ksh 5,600.00"
+    }
+  ]
+}
