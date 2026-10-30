@@ -10,6 +10,7 @@ import {
   SUPABASE_MANAGED_SCHEMAS,
   buildFilteredToc,
   parseToc,
+  referencesSchema,
   relationsIn,
   summariseToc,
 } from "../../scripts/archive-toc.mjs";
@@ -494,4 +495,201 @@ describe("scripts/archive-toc.mjs — CLI", () => {
     },
     60_000
   );
+});
+
+/**
+ * Sanitised table of contents modelled on the **genuine** archive's `realtime`
+ * entries, which produced the second real restore failure:
+ *
+ *   pg_restore: error: could not execute query: ERROR:  schema "realtime" does not exist
+ *   Command was: CREATE FUNCTION public.audit_realtime(wal realtime.wal_rls) RETURNS integer
+ *     LANGUAGE sql AS $$ SELECT 1 $$;
+ *
+ * Two independent defects made that possible: `ROW SECURITY realtime messages`
+ * was parsed as `{ type: "ROW", schema: "SECURITY" }`, so the row-security entry
+ * survived the `realtime` exclusion; and a `public`-schema function whose
+ * argument list names an excluded type was kept because its own `schema` is
+ * `public`. Entry ids and OIDs are illustrative; the shapes are the real ones.
+ */
+const REALTIME_TOC = `;
+; Archive created at 2026-10-28 14:08:23 EAT
+;     dbname: postgres
+;     TOC Entries: 48
+;     Format: CUSTOM
+;
+; Selected TOC Entries:
+;
+6; 2615 16463 SCHEMA - realtime postgres
+870; 1247 16465 TYPE realtime action postgres
+873; 1247 16474 TYPE realtime equality_op postgres
+876; 1247 16485 TYPE realtime user_defined_filter postgres
+879; 1247 16488 TYPE realtime wal_column postgres
+882; 1247 16491 TYPE realtime wal_rls postgres
+235; 1255 16528 FUNCTION public audit_realtime(realtime.wal_rls) postgres
+234; 1255 16524 FUNCTION public pgrst_ddl_watch() postgres
+232; 1255 16519 FUNCTION realtime broadcast_changes(realtime.wal_rls) postgres
+231; 1255 16518 FUNCTION realtime check_equality_op(realtime.equality_op, regtype, text, text) postgres
+233; 1255 16520 FUNCTION realtime notify_event() postgres
+230; 1255 16517 FUNCTION realtime to_regrole(text) postgres
+221; 1259 16450 TABLE public Guest postgres
+220; 1259 16449 SEQUENCE public Guest_id_seq postgres
+2630; 0 0 SEQUENCE OWNED BY public Guest_id_seq postgres
+219; 1259 16441 TABLE public Hotel postgres
+2631; 0 0 COMMENT public TABLE "Hotel" postgres
+218; 1259 16440 SEQUENCE public Hotel_id_seq postgres
+2632; 0 0 SEQUENCE OWNED BY public Hotel_id_seq postgres
+227; 1259 16499 TABLE realtime messages postgres
+226; 1259 16498 SEQUENCE realtime messages_id_seq postgres
+2633; 0 0 SEQUENCE OWNED BY realtime messages_id_seq postgres
+225; 1259 16492 TABLE realtime schema_migrations postgres
+229; 1259 16509 TABLE realtime subscription postgres
+228; 1259 16508 SEQUENCE realtime subscription_id_seq postgres
+2634; 0 0 SEQUENCE OWNED BY realtime subscription_id_seq postgres
+2448; 2604 16453 DEFAULT public Guest id postgres
+2447; 2604 16444 DEFAULT public Hotel id postgres
+2450; 2604 16502 DEFAULT realtime messages id postgres
+2618; 0 16450 TABLE DATA public Guest postgres
+2616; 0 16441 TABLE DATA public Hotel postgres
+2621; 0 16499 TABLE DATA realtime messages postgres
+2619; 0 16492 TABLE DATA realtime schema_migrations postgres
+2623; 0 16509 TABLE DATA realtime subscription postgres
+2635; 0 0 SEQUENCE SET public Guest_id_seq postgres
+2636; 0 0 SEQUENCE SET public Hotel_id_seq postgres
+2637; 0 0 SEQUENCE SET realtime messages_id_seq postgres
+2456; 2606 16457 CONSTRAINT public Guest Guest_pkey postgres
+2454; 2606 16448 CONSTRAINT public Hotel Hotel_pkey postgres
+2460; 2606 16507 CONSTRAINT realtime messages messages_pkey postgres
+2461; 1259 16523 INDEX realtime messages_topic_idx postgres
+2465; 2620 16521 TRIGGER realtime messages messages_notify postgres
+2464; 2606 16458 FK CONSTRAINT public Guest Guest_hotelId_fkey postgres
+2611; 0 16499 ROW SECURITY realtime messages postgres
+2612; 3256 16522 POLICY realtime messages messages_select postgres
+2613; 6104 16526 PUBLICATION - supabase_realtime postgres
+2614; 6106 16527 PUBLICATION TABLE realtime supabase_realtime messages postgres
+2446; 3466 16525 EVENT TRIGGER - pgrst_ddl_watch postgres
+`;
+
+const realtimeParsed = parseToc(REALTIME_TOC);
+const realtimeFiltered = buildFilteredToc(realtimeParsed, {
+  excludeSchemas: ["realtime"],
+  excludeTypes: ["EVENT TRIGGER", "PUBLICATION", "PUBLICATION TABLE", "PUBLICATION TABLES IN SCHEMA", "SUBSCRIPTION"],
+});
+const realtimeLive = liveLines(realtimeFiltered.text);
+const entryFor = (fragment: string) =>
+  realtimeParsed.entries.find((entry) => entry.raw.includes(fragment));
+
+describe("realtime-style exclusions (the second genuine-rehearsal failure)", () => {
+  it("splits multi-word object types before the schema slot", () => {
+    // `ROW SECURITY realtime messages` used to parse as type "ROW", schema
+    // "SECURITY", name "realtime" -- so the exclusion never matched it.
+    expect(entryFor("ROW SECURITY realtime messages")).toMatchObject({
+      type: "ROW SECURITY",
+      schema: "realtime",
+      name: "messages",
+    });
+    expect(entryFor("SEQUENCE OWNED BY realtime messages_id_seq")).toMatchObject({
+      type: "SEQUENCE OWNED BY",
+      schema: "realtime",
+      name: "messages_id_seq",
+    });
+    expect(entryFor("PUBLICATION TABLE realtime supabase_realtime")).toMatchObject({
+      type: "PUBLICATION TABLE",
+      schema: "realtime",
+      name: "supabase_realtime",
+    });
+    expect(entryFor("SEQUENCE SET realtime messages_id_seq")).toMatchObject({
+      type: "SEQUENCE SET",
+      schema: "realtime",
+    });
+  });
+
+  it("names the failing entry: a public function with a realtime signature", () => {
+    const entry = entryFor("audit_realtime(realtime.wal_rls)");
+    // Its own schema is public, which is why the schema rule alone kept it.
+    expect(entry).toMatchObject({ type: "FUNCTION", schema: "public", name: "audit_realtime(realtime.wal_rls)" });
+    expect(realtimeFiltered.excluded.map((item) => item.reason)).toContain("schema reference");
+    expect(realtimeLive.filter((line) => line.includes("audit_realtime"))).toEqual([]);
+  });
+
+  it("excludes every realtime object type", () => {
+    const live = realtimeLive.join("\n");
+    for (const fragment of [
+      "TYPE realtime",
+      "FUNCTION realtime",
+      "TABLE realtime",
+      "SEQUENCE realtime",
+      "SEQUENCE OWNED BY realtime",
+      "SEQUENCE SET realtime",
+      "TABLE DATA realtime",
+      "CONSTRAINT realtime",
+      "INDEX realtime",
+      "TRIGGER realtime",
+      "ROW SECURITY realtime",
+      "POLICY realtime",
+      "DEFAULT realtime",
+      "SCHEMA - realtime",
+    ]) {
+      expect(live, `still live: ${fragment}`).not.toContain(fragment);
+    }
+    expect(realtimeLive.filter((line) => /\brealtime\b/.test(line))).toEqual([]);
+  });
+
+  it("excludes publications, publication membership and event triggers", () => {
+    for (const fragment of ["PUBLICATION -", "PUBLICATION TABLE", "EVENT TRIGGER"]) {
+      expect(realtimeFiltered.excluded.map((entry) => entry.type)).toContain(
+        fragment === "PUBLICATION -" ? "PUBLICATION" : fragment
+      );
+    }
+    expect(realtimeLive.join("\n")).not.toMatch(/PUBLICATION|EVENT TRIGGER/);
+  });
+
+  it("keeps the application schema, its data and its comments", () => {
+    const live = realtimeLive.join("\n");
+    expect(live).toContain("TABLE public Hotel postgres");
+    expect(live).toContain("TABLE public Guest postgres");
+    expect(live).toContain("TABLE DATA public Hotel postgres");
+    expect(live).toContain("TABLE DATA public Guest postgres");
+    expect(live).toContain('COMMENT public TABLE "Hotel" postgres');
+    expect(live).toContain("CONSTRAINT public Hotel Hotel_pkey postgres");
+    expect(live).toContain("FK CONSTRAINT public Guest Guest_hotelId_fkey postgres");
+    expect(live).toContain("SEQUENCE SET public Hotel_id_seq postgres");
+  });
+
+  it("keeps a public function that does not reference the excluded schema", () => {
+    expect(realtimeLive).toContain("234; 1255 16524 FUNCTION public pgrst_ddl_watch() postgres");
+  });
+
+  it("reports why each entry went", () => {
+    const counts = realtimeFiltered.excluded.reduce<Record<string, number>>((totals, entry) => {
+      totals[entry.reason] = (totals[entry.reason] ?? 0) + 1;
+      return totals;
+    }, {});
+    // `PUBLICATION TABLE` is excluded by its schema (realtime), not by type.
+    expect(counts).toEqual({ schema: 28, "schema reference": 1, type: 2 });
+    expect(realtimeFiltered.kept + realtimeFiltered.excluded.length).toBe(48);
+  });
+
+  it("produces a use-list with no live line that names the excluded schema", () => {
+    for (const line of realtimeLive) {
+      expect(line).not.toMatch(/(^|[^\w$])"?realtime"?\s*\./);
+      expect(line).not.toMatch(/ROW SECURITY realtime/);
+    }
+  });
+});
+
+describe("referencesSchema", () => {
+  it("matches qualified references only", () => {
+    expect(referencesSchema("FUNCTION public audit_realtime(realtime.wal_rls) postgres", ["realtime"])).toBe(true);
+    expect(referencesSchema('FUNCTION public f("realtime"."wal_rls")', ["realtime"])).toBe(true);
+    expect(referencesSchema("TABLE realtime messages postgres", ["realtime"])).toBe(false);
+    expect(referencesSchema("PUBLICATION - supabase_realtime postgres", ["realtime"])).toBe(false);
+    expect(referencesSchema("TABLE _realtime messages postgres", ["realtime"])).toBe(false);
+    expect(referencesSchema('TABLE public "Hotel" postgres', ["realtime"])).toBe(false);
+  });
+
+  it("works for any excluded schema, not just realtime", () => {
+    expect(referencesSchema("FUNCTION public f(auth.uid())", ["auth"])).toBe(true);
+    expect(referencesSchema("FUNCTION public f(vault.secrets)", ["auth", "vault"])).toBe(true);
+    expect(referencesSchema("", ["auth"])).toBe(false);
+  });
 });

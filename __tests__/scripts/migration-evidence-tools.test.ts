@@ -354,3 +354,159 @@ describe("scripts/restore-rehearsal.mjs — dependent comments survive filtering
     60_000
   );
 });
+
+// ---------------------------------------------------------------------------
+// End-to-end regression for the second genuine failure: `ERROR: schema
+// "realtime" does not exist`. Reproduces both halves of it — a row-security
+// entry whose multi-word type used to be misparsed, and a `public`-schema
+// function whose signature names an excluded type.
+// Runs only with REHEARSAL_TEST_BASE_URL pointing at a disposable server.
+// ---------------------------------------------------------------------------
+describe("scripts/restore-rehearsal.mjs — realtime-schema dependencies", () => {
+  it.skipIf(!pgToolsAvailable || !rehearsalBaseUrl)(
+    "restores when a retained function references an excluded schema",
+    () => {
+      const base = (rehearsalBaseUrl as string).replace(/\/+$/, "");
+      const source = `realtime_source_${Date.now()}`;
+      const dir = mkdtempSync(path.join(tmpdir(), "restore-rehearsal-realtime-"));
+      const dump = path.join(dir, "realtime.dump");
+      const psql = (args: string[]) => spawnSync("psql", args, { encoding: "utf8" });
+      try {
+        expect(psql(["-d", base, "-q", "-c", `CREATE DATABASE ${source}`]).status).toBe(0);
+        const build = psql([
+          "-d",
+          `${base}/${source}`,
+          "-q",
+          "-v",
+          "ON_ERROR_STOP=1",
+          "-c",
+          'CREATE TABLE public."Hotel" (id int primary key)',
+          "-c",
+          'CREATE TABLE public."Guest" (id int primary key, "hotelId" int references public."Hotel"(id))',
+          "-c",
+          'INSERT INTO public."Hotel" VALUES (1)',
+          "-c",
+          'INSERT INTO public."Guest" VALUES (1, 1)',
+          // Supabase-shaped realtime schema.
+          "-c",
+          "CREATE SCHEMA realtime",
+          "-c",
+          "CREATE TYPE realtime.wal_rls AS (wal jsonb)",
+          "-c",
+          "CREATE TABLE realtime.messages (id bigserial primary key, topic text)",
+          "-c",
+          "INSERT INTO realtime.messages (topic) VALUES ('room:1')",
+          "-c",
+          "CREATE FUNCTION realtime.notify_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+          "-c",
+          "CREATE TRIGGER messages_notify AFTER INSERT ON realtime.messages FOR EACH ROW EXECUTE FUNCTION realtime.notify_event()",
+          "-c",
+          "ALTER TABLE realtime.messages ENABLE ROW LEVEL SECURITY",
+          "-c",
+          "CREATE POLICY messages_select ON realtime.messages FOR SELECT USING (true)",
+          // The entry that broke the genuine restore: a public function whose
+          // argument type lives in the excluded schema.
+          "-c",
+          "CREATE FUNCTION public.audit_realtime(wal realtime.wal_rls) RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$",
+        ]);
+        expect(build.status, build.stderr).toBe(0);
+
+        const dumped = spawnSync("pg_dump", ["-Fc", "-d", `${base}/${source}`, "-f", dump], { encoding: "utf8" });
+        expect(dumped.status, dumped.stderr).toBe(0);
+
+        const digest = createHash("sha256").update(readFileSync(dump)).digest("hex");
+        const { status, stdout } = run("restore-rehearsal.mjs", [
+          "--dump",
+          dump,
+          "--expect-sha256",
+          digest,
+          "--base-url",
+          base,
+          "--profile",
+          "plain",
+          "--json",
+        ]);
+
+        const report = JSON.parse(stdout);
+        expect(status).toBe(1); // no approved checkpoint in this fixture, by design
+        expect(report.restore.ok).toBe(true);
+        expect(report.restore.problems).toEqual([]);
+        expect(report.restore.filter.excludeSchemas).toContain("realtime");
+        expect(report.restore.filter.byReason).toMatchObject({ "schema reference": 1 });
+        expect(report.inspection.tables).toEqual(["Guest", "Hotel"]);
+        expect(report.inspection.rowCounts).toEqual({ Hotel: 1, Guest: 1 });
+      } finally {
+        psql(["-d", base, "-q", "-c", `DROP DATABASE IF EXISTS ${source}`]);
+      }
+    },
+    60_000
+  );
+});
+
+// ---------------------------------------------------------------------------
+// When a dependency cannot be seen in the table of contents, the restore must
+// still fail *informatively*: the report has to carry pg_restore's `Command was:`
+// statement, not just the error text. A view body is the clearest such case — a
+// TOC line carries only the view's name, never its definition.
+// ---------------------------------------------------------------------------
+describe("scripts/restore-rehearsal.mjs — failing statement in the report", () => {
+  it.skipIf(!pgToolsAvailable || !rehearsalBaseUrl)(
+    "names the SQL statement that broke the restore",
+    () => {
+      const base = (rehearsalBaseUrl as string).replace(/\/+$/, "");
+      const source = `view_source_${Date.now()}`;
+      const dir = mkdtempSync(path.join(tmpdir(), "restore-rehearsal-view-"));
+      const dump = path.join(dir, "view.dump");
+      const psql = (args: string[]) => spawnSync("psql", args, { encoding: "utf8" });
+      try {
+        expect(psql(["-d", base, "-q", "-c", `CREATE DATABASE ${source}`]).status).toBe(0);
+        const build = psql([
+          "-d",
+          `${base}/${source}`,
+          "-q",
+          "-v",
+          "ON_ERROR_STOP=1",
+          "-c",
+          'CREATE TABLE public."Hotel" (id int primary key)',
+          "-c",
+          "CREATE SCHEMA realtime",
+          "-c",
+          "CREATE TABLE realtime.messages (id int primary key, topic text)",
+          // A view body is invisible in `pg_restore --list`, so the filter cannot
+          // know this entry depends on the excluded schema.
+          "-c",
+          'CREATE VIEW public."RecentMessages" AS SELECT id, topic FROM realtime.messages',
+        ]);
+        expect(build.status, build.stderr).toBe(0);
+
+        const dumped = spawnSync("pg_dump", ["-Fc", "-d", `${base}/${source}`, "-f", dump], { encoding: "utf8" });
+        expect(dumped.status, dumped.stderr).toBe(0);
+        const digest = createHash("sha256").update(readFileSync(dump)).digest("hex");
+
+        const { stdout } = run("restore-rehearsal.mjs", [
+          "--dump",
+          dump,
+          "--expect-sha256",
+          digest,
+          "--base-url",
+          base,
+          "--profile",
+          "plain",
+          "--json",
+        ]);
+
+        const report = JSON.parse(stdout);
+        expect(report.restore.ok).toBe(false);
+        expect(report.restore.problems).toHaveLength(1);
+        // The error alone would not say which object failed.
+        expect(report.restore.problems[0]).toContain("does not exist");
+        expect(report.restore.problems[0]).toContain("Command was:");
+        expect(report.restore.problems[0]).toContain("RecentMessages");
+        expect(report.restore.problems[0]).not.toContain("LINE 4:");
+      } finally {
+        psql(["-d", base, "-q", "-c", `DROP DATABASE IF EXISTS ${source}`]);
+      }
+    },
+    60_000
+  );
+});

@@ -336,6 +336,7 @@ The archive is only read, never modified, so the second hash must still equal
 | `extension "…" is not available` | Extension the target cannot install | Expected; the filter skips it. Restore it only if the schema needs it |
 | `schema "auth" already exists` | Restoring without the filter | Use `--profile plain` (or `supabase` on a stack) |
 | `extension "x" does not exist` while running `COMMENT ON EXTENSION x` | A comment entry that depends on an excluded extension survived the filter | Fixed in `archive-toc.mjs` (§13 of the rehearsal record). If it reappears, check `restore.filter.byReason` for `extension comment` |
+| `schema "realtime" does not exist` (or any excluded schema) | A retained entry still references the schema: multi-word TOC types such as `ROW SECURITY` were misparsed, or a `public` function's signature names an excluded type | Fixed in `archive-toc.mjs` (§14). The report's `Command was:` line names the exact statement — check whether its dependency is visible in `pg_restore --list` at all |
 | `role "supabase_admin" does not exist` | Archive objects owned by Supabase roles | `--profile plain` skips them; or use option A |
 | `permission denied for schema public` | PG 15+ `public` ownership | Connect as the database owner / `postgres` |
 | Checkpoint check `FAIL` with `Ledger: absent` | Archive is an older end-state | Re-run with the matching `--expect-checkpoint` |

@@ -680,7 +680,94 @@ regression test that fails on the old code.
 
 ---
 
-## 14. History of this record
+## 14. The `realtime` schema failure, and the two defects behind it (2026-10-30)
+
+### 14.1 What happened
+
+After §13's fix, the next genuine rehearsal (634-entry archive, `plain` profile, PostgreSQL 17.11,
+scratch database created and dropped cleanly) failed with:
+
+```
+pg_restore: error: could not execute query: ERROR:  schema "realtime" does not exist
+```
+
+The `plain` profile listed `realtime` as excluded, so a retained entry was still referencing it.
+
+### 14.2 Root cause: two independent defects
+
+A Supabase-shaped fixture carrying the same `realtime` object types (schema, five composite/enum
+types, five functions, three tables with their sequences, table data, constraints, an index, a
+trigger, row-level security, a policy, a publication and an event trigger) reproduced the failure on
+a disposable PostgreSQL 17.11 server. Commenting out each rule in turn isolated two separate causes:
+
+| Defect | Evidence |
+|---|---|
+| **Parser: multi-word types were split at the wrong place.** `ROW SECURITY realtime messages postgres` was read as `{ type: "ROW", schema: "SECURITY", name: "realtime" }`, so the row-security entry was never matched by the `realtime` exclusion. | With only this rule disabled the restore failed with `schema "realtime" does not exist` / `Command was: ALTER TABLE realtime.messages ENABLE ROW LEVEL SECURITY;` |
+| **Filter: a retained entry whose *text* references an excluded schema was kept.** `FUNCTION public audit_realtime(realtime.wal_rls)` belongs to `public`, so every schema/type rule kept it — but `CREATE FUNCTION` cannot resolve an argument type in a schema that does not exist. | With only this rule disabled the restore failed with `schema "realtime" does not exist` / `Command was: CREATE FUNCTION public.audit_realtime(wal realtime.wal_rls) RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$;` |
+
+Both produce the same error text, so the first message alone did not identify the entry — the
+`Command was:` line did. The rehearsal report now carries it (§14.4).
+
+A third, smaller dependency was found while checking publication entries: `PUBLICATION TABLE ...`
+membership rows were parsed as type `PUBLICATION` with schema `TABLE`, and skipping the publication
+alone would leave an `ALTER PUBLICATION ... ADD TABLE` referring to nothing.
+
+### 14.3 The fix
+
+`scripts/archive-toc.mjs`:
+
+* **`OBJECT_TYPE_PHRASES`** replaces the hand-written two-word set with the full list of multi-word
+  TOC types (`ROW SECURITY`, `PUBLICATION TABLE`, `PUBLICATION TABLES IN SCHEMA`, `SEQUENCE OWNED
+  BY`, `MATERIALIZED VIEW DATA`, `TEXT SEARCH *`, `OPERATOR CLASS`, …), matched longest-first and
+  case-sensitively so a schema or table called `data` cannot be read as `TABLE DATA`.
+* **`referencesSchema(text, schemas)`** detects a quote-tolerant, word-boundary-aware qualified
+  reference (`realtime.wal_rls`, `"realtime"."x"`) and deliberately does not match `supabase_realtime`
+  (no dot) or `_realtime.messages` (identifier character before the name). Entries it catches are
+  excluded with reason `schema reference`.
+* `PUBLICATION TABLE` and `PUBLICATION TABLES IN SCHEMA` join `SUPABASE_ONLY_TYPES`, because they
+  depend on a publication that the same profile may be skipping.
+
+Nothing else moved: schema ownership is still read from the schema slot (now correctly), the
+`supabase` profile still restores everything, extension availability, comments, coverage checks,
+digest enforcement and cleanup are unchanged.
+
+### 14.4 Reporting
+
+`restore-rehearsal.mjs` now keeps pg_restore's `Command was:` statement with the error, collapsing
+psql's `LINE n:` context, e.g.:
+
+```
+! pg_restore: error: could not execute query: ERROR: schema "realtime" does not exist
+  Command was: CREATE FUNCTION public.audit_realtime(wal realtime.wal_rls) RETURNS integer ...
+```
+
+### 14.5 Verification
+
+| Check | Result |
+|---|---|
+| Supabase-shaped `realtime` fixture (52 TOC entries) | before: `restore: FAILED`, `schema "realtime" does not exist`; after: **no errors**, 17 of 52 kept, `byReason {schema: 32, "schema reference": 1, type: 2}`, `Hotel`=1 `Guest`=2, coverage PASS |
+| Same archive, `--profile supabase` | 52 of 52 kept, 0 skipped, restore finished with no errors — the profile is untouched |
+| 28-table chain archive | unchanged: 0 excluded of 237, checkpoint `saas_current`, 4/4 checks PASS |
+| Unit tests | 15 added to `archive-toc.test.ts` (46 in the file) |
+| End-to-end tests | two added, both gated on `REHEARSAL_TEST_BASE_URL`: the `realtime` case fails on the pre-fix code and passes after; the second pins the failure-reporting path |
+| Full suite | **768 passed, 4 skipped, 50 files**; `eslint` clean; manifest 19/19 |
+
+### 14.6 Known limitation
+
+A table of contents never contains an object's body. A dependency hidden inside one — a view that
+selects from `realtime.messages`, a table whose column type lives in an excluded schema, a `CREATE
+TYPE` attribute, or a function body — cannot be detected from `pg_restore --list`, and such an entry
+will still fail the restore. That case is covered by a regression test asserting the failure is
+reported with the offending statement (§14.4) rather than silently. Closing it would mean rendering
+the archive's SQL (`pg_restore --file=…`) and analysing statement bodies, which risks excluding
+valid application objects whose bodies merely mention a name.
+
+The owner's archive has **not** been restored here. What is established is that both failure modes it
+exhibited have reproduced causes, targeted fixes, and tests that fail without the fix.
+
+---
+
+## 15. History of this record
 
 * **Before 2026-10-30 — preparation only.** No `psql`, `postgres`, `initdb`, Docker or Podman
   existed in the sandbox, so the documented procedure was written but not executed, and the status
@@ -721,6 +808,13 @@ regression test that fails on the old code.
   dependency-aware for extension and schema comments/ACLs (§13), proved by a reproduction of the
   owner's exact error and a regression test that fails on the old code. The genuine archive is still
   un-restored here.
+
+* **2026-10-30 — the second genuine failure (`schema "realtime" does not exist`) was diagnosed and
+  fixed.** Two independent defects: multi-word TOC types (`ROW SECURITY`) were split after the schema
+  slot, and a retained `public` function whose signature names an excluded type was kept. Both were
+  reproduced statement-by-statement, fixed in `archive-toc.mjs`, and are covered by tests that fail on
+  the old code (§14). Publication membership entries now follow their publication. The genuine archive
+  remains un-restored here.
 
 The earlier record's inventory of "untracked proposals" is obsolete: all 19 migrations are tracked
 and checksum-pinned, and the stale `PROPOSAL ONLY` header was removed from
