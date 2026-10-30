@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
+import { recordAudit } from "@/lib/audit";
 import { HotelRole, MembershipStatus } from "@prisma/client";
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -193,6 +194,19 @@ export async function POST(req: Request) {
       }
       const newMembership = quotaResult.value;
 
+      await recordAudit({
+        hotelId: tenant.hotelId,
+        userId: tenant.userId,
+        action: "STAFF_MEMBER_ADDED",
+        entity: "HOTEL_MEMBERSHIP",
+        entityId: newMembership.id,
+        metadata: {
+          targetUserId: existingUser.id,
+          role: newMembership.role,
+          existingAccount: true,
+        },
+      });
+
       return NextResponse.json(
         {
           id: newMembership.id,
@@ -235,6 +249,19 @@ export async function POST(req: Request) {
       );
     }
     const result = quotaResult.value;
+
+    await recordAudit({
+      hotelId: tenant.hotelId,
+      userId: tenant.userId,
+      action: "STAFF_MEMBER_ADDED",
+      entity: "HOTEL_MEMBERSHIP",
+      entityId: result.membership.id,
+      metadata: {
+        targetUserId: result.user.id,
+        role: result.membership.role,
+        existingAccount: false,
+      },
+    });
 
     return NextResponse.json(
       {

@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
+import { recordAudit } from "@/lib/audit";
+import { normaliseBillingCurrency, priceForSubscription, BillingInterval } from "@/lib/plans";
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const SUPPORTED_CURRENCIES = ["KES", "USD", "EUR", "GBP", "TZS", "UGX", "RWF", "ZAR", "AED"];
@@ -123,26 +125,89 @@ export async function PATCH(req: Request) {
   }
 
   try {
-    const updated = await prisma.hotel.update({
+    const before = await prisma.hotel.findUnique({
       where: { id: tenant.hotelId },
-      data: updateData,
-      select: {
-        id: true,
-        name: true,
-        slug: true,
-        email: true,
-        phone: true,
-        address: true,
-        currency: true,
-        timezone: true,
-        status: true,
-        updatedAt: true,
-      },
+      select: { currency: true },
     });
+    const currencyChanges =
+      updateData.currency !== undefined && before?.currency !== updateData.currency;
+
+    // A currency change re-denominates the property. The subscription is still
+    // billed in KES or USD, so when the operation currency crosses that line the
+    // stored amount must be re-priced in the same transaction -- otherwise the
+    // hotel would keep paying the old currency's amount while every screen
+    // quotes the new one.
+    const subscriptionModel = (prisma as any).subscription;
+    const canTouchSubscription = typeof subscriptionModel?.findUnique === "function";
+
+    const applyChange = async (tx: any) => {
+      const updated = await tx.hotel.update({
+        where: { id: tenant.hotelId },
+        data: updateData,
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          email: true,
+          phone: true,
+          address: true,
+          currency: true,
+          timezone: true,
+          status: true,
+          updatedAt: true,
+        },
+      });
+
+      let repriced: { currency: string; amount: number } | null = null;
+      if (currencyChanges && canTouchSubscription) {
+        const sub = await tx.subscription.findUnique({ where: { hotelId: tenant.hotelId } });
+        if (sub) {
+          const nextCurrency = normaliseBillingCurrency(updated.currency);
+          if (nextCurrency !== normaliseBillingCurrency(sub.currency)) {
+            const nextAmount = priceForSubscription({
+              planId: sub.planId,
+              billingInterval: sub.billingInterval ?? BillingInterval.MONTHLY,
+              currency: nextCurrency,
+            });
+            if (nextAmount !== null && nextAmount !== sub.amount) {
+              await tx.subscription.update({
+                where: { hotelId: tenant.hotelId },
+                data: { currency: nextCurrency, amount: nextAmount },
+              });
+              repriced = { currency: nextCurrency, amount: nextAmount };
+            }
+          }
+        }
+      }
+
+      await recordAudit(
+        {
+          hotelId: tenant.hotelId,
+          userId: tenant.userId,
+          action: "HOTEL_SETTINGS_UPDATED",
+          entity: "HOTEL",
+          entityId: tenant.hotelId,
+          metadata: {
+            fields: Object.keys(updateData),
+            previousCurrency: before?.currency ?? null,
+            newCurrency: updated.currency,
+            subscriptionRepriced: repriced,
+          },
+        },
+        tx
+      );
+
+      return { updated, repriced };
+    };
+
+    const { updated, repriced } = canTouchSubscription
+      ? await prisma.$transaction(applyChange)
+      : { ...(await applyChange(prisma)), repriced: null };
 
     return NextResponse.json({
       hotel: updated,
       message: "Hotel settings updated successfully.",
+      ...(repriced ? { subscriptionRepriced: repriced } : {}),
     });
   } catch (error) {
     console.error("Failed to update hotel settings:", error);

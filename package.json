@@ -31,7 +31,8 @@
     "backup": "node scripts/backup-db.mjs",
     "backup:restore": "node scripts/restore-db.mjs",
     "backup:rehearse": "node scripts/restore-rehearsal.mjs",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "db:integrity": "node scripts/db-integrity.mjs"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
