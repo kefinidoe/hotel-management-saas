@@ -9,6 +9,10 @@
 import { readFileSync } from "node:fs";
 
 const BASE = process.env.BASE ?? "http://127.0.0.1:3100";
+// --read-only skips the one section that writes (creating and removing a
+// temporary receptionist), so the check can be re-run on a freshly reset
+// environment without changing the data the owner is about to test.
+const READ_ONLY = process.argv.includes("--read-only");
 const ORIGIN = process.env.ORIGIN ?? "https://3100-i7p2zy0ehr3jxqmk6adh0.e2b.app";
 const creds = JSON.parse(readFileSync(new URL("../../.owner-test/credentials.json", import.meta.url)));
 const passwordFor = (email) => creds.accounts.find((a) => a.email === email).password;
@@ -234,7 +238,7 @@ async function main() {
   }
 
   // 5. removing a staff member revokes access (temporary account, deleted again)
-  {
+  if (!READ_ONLY) {
     const owner = new Session("owner");
     await owner.login("owner@riverside-grand.demo", passwordFor("owner@riverside-grand.demo"));
     const memberships = await owner.get("/api/auth/memberships");
