@@ -372,7 +372,7 @@ Axis Hotel system was contacted, and no live data was read.
 | 13 | `npm run migration:adopt` (dry run) | **PASS** — "To be baselined: 19" | target had an empty ledger |
 | 14 | rehearsal of a **tool-check** archive (§5) | **PASS** — digest verified, 28 tables restored, scratch dropped | archive produced from the disposable cluster only, **not** the owner's backup. It proves the commands work; it is not evidence about the genuine archive |
 | 15 | Genuine `hotel-management-saas-20261028-140823.dump` restore | **BLOCKED** | the archive is not present in this environment; expected sha256 `F81566E9…B24A7` |
-| 16 | Browser walkthrough of §11 rows 9–12 | **NOT TESTED** | no browser/Playwright/Cypress in the environment; the app's UI was never rendered |
+| 16 | Browser walkthrough of §11 rows 9–12 | **NOT TESTED** | no browser/Playwright/Cypress in the environment at the time. Superseded in round 13: the whole browser suite ran, 25/25 — see §18 |
 
 ### The local Prisma client aid (not part of the product)
 
@@ -396,10 +396,42 @@ Consequences for reading the evidence above:
 ### What the end-to-end harness covers
 
 `scripts/e2e-smoke.mjs` signs in with real credentials, keeps per-user cookie jars, and sends `Origin`
-on every state-changing request (the CSRF guard rejects requests without it). Its 46 checks span:
+on every state-changing request (from round 13 the CSRF guard also accepts a same-origin request that
+carries `Sec-Fetch-Site: same-origin` and no `Origin`, which is what a browser sends — see
+`lib/request-origin.ts`). Its 46 checks span:
 sign-up and sign-in, hotel switching, membership and the invitation consent flow, role-denied requests,
 subscription limits, room types and rooms, reservations, check-in, folios and billing, payment
 settlement, check-out (refused while a balance is outstanding), POS pay-now with idempotency-key
 replay, inventory, wastage, housekeeping, maintenance and the reports endpoints. It asserts database
 state directly with `psql` for the idempotency and cross-tenant cases rather than trusting the API's
 own response.
+
+## 18. Verification performed (round 13, 2026-10-30)
+
+Round 13 re-ran every gate in §17 on the final code and closed the browser gap; the narrative,
+the defect list and the risk table are in
+[production-readiness-report-round13.md](production-readiness-report-round13.md), and the two remaining
+external prerequisites are in
+[handoff-production-verification.md](handoff-production-verification.md).
+
+| # | Command | Result | Note |
+|---|---|---|---|
+| 1 | `npx tsc --noEmit` | **PASS** — 0 errors | no suppression added |
+| 2 | `npm run lint` | **PASS** — 0 findings | |
+| 3 | `npx next build` | **PASS** | 41 route entries; WASM client aid still required here (§17) |
+| 4 | `npx vitest run` | **PASS** — 54 files, 823 tests | includes 8 new `request-origin` cases |
+| 5 | 19 migrations replayed into an empty database | **PASS** — 19/19 → 28 tables | disposable cluster, `hms_recovery` |
+| 6 | `node scripts/e2e-smoke.mjs --base http://127.0.0.1:3100` | **PASS** — 46/46 | |
+| 7 | `npm run test:browser -- --base http://127.0.0.1:3100` | **PASS** — 25/25 | real Chromium, two hotels, four roles; PNG per step in `docs/evidence/browser/`, `docs/evidence/browser-results.json` |
+| 8 | `node scripts/db-integrity.mjs --json` | **PASS** — 49 checks, 0 failures | |
+| 9 | `node scripts/native-engine-verify.mjs --json` | **BLOCKED** — exit 2 | engine artifact absent (4-byte placeholder); no reachable source for the pinned 5.17.0 binary here. Run it on the deployment image: handoff §2 |
+| 10 | Genuine `hotel-management-saas-20261028-140823.dump` restore | **BLOCKED** | bytes still absent; search repeated across filesystem, all remote branches, releases and prior patches. Four-command handoff in handoff §1 |
+| 11 | `npm run migration:readiness` | **BLOCKED** | archive, target credentials, engine; plus owner approval, which no tool can decide |
+
+The browser run found four product defects that no server-side harness could see — hotel switching
+refused with `403 CSRF_ORIGIN_INVALID` (Chromium omits `Origin` on same-origin `fetch`), invitations
+rendered as active staff with a required visible password, room types with no meal plan (so their rooms
+could not be reserved), and a POS menu that needed a manual reload before a new category or item
+appeared. Each is fixed in its own commit and the suite was re-run to green.
+
+**Deployment remains gated**: rows 9 and 10 must be PASS on the target host first.
