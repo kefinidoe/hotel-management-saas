@@ -22,6 +22,7 @@ describe("isSameOriginRequest", () => {
 
   afterAll(() => {
     delete process.env.NEXTAUTH_URL;
+    delete process.env.SAAS_ALLOW_REQUEST_HOST_ORIGIN;
   });
 
   it("accepts a same-origin fetch that carries Origin", () => {
@@ -66,6 +67,30 @@ describe("isSameOriginRequest", () => {
 
   it("fails closed when neither signal is present", () => {
     expect(isSameOriginRequest(request({}))).toBe(false);
+  });
+
+  it("rejects a host that only the request itself names, by default", () => {
+    // A hosted preview whose URL differs from NEXTAUTH_URL must not silently
+    // widen the check: same-origin only follows the configured origin unless the
+    // deployment opts in.
+    delete process.env.SAAS_ALLOW_REQUEST_HOST_ORIGIN;
+    process.env.NEXTAUTH_URL = "https://canonical.example";
+    expect(isSameOriginRequest(request({ origin: BASE, host: "127.0.0.1:3100" }))).toBe(false);
+    process.env.NEXTAUTH_URL = BASE;
+  });
+
+  it("accepts the request host as the origin when the preview opt-in is set", () => {
+    process.env.SAAS_ALLOW_REQUEST_HOST_ORIGIN = "true";
+    try {
+      process.env.NEXTAUTH_URL = "https://3100-sandbox.example";
+      expect(isSameOriginRequest(request({ origin: BASE, host: "127.0.0.1:3100" }))).toBe(true);
+      // The opt-in does not accept arbitrary origins.
+      expect(isSameOriginRequest(request({ origin: "https://evil.example" }))).toBe(false);
+      expect(isSameOriginRequest(request({ origin: BASE, "sec-fetch-site": "cross-site" }))).toBe(false);
+    } finally {
+      delete process.env.SAAS_ALLOW_REQUEST_HOST_ORIGIN;
+      process.env.NEXTAUTH_URL = BASE;
+    }
   });
 
   it("fails closed on a malformed Origin", () => {

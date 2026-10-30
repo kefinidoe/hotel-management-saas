@@ -16,7 +16,10 @@
  *
  * Rules:
  *   1. `Sec-Fetch-Site: cross-site` is decisive — reject, whatever Origin claims.
- *   2. If `Origin` is present it must match the configured origin exactly.
+ *   2. If `Origin` is present it must match the configured origin exactly. A
+ *      hosted preview served on a host that `NEXTAUTH_URL` does not name can
+ *      opt in (`SAAS_ALLOW_REQUEST_HOST_ORIGIN=true`) to accept the request's
+ *      own `Host` as the expected origin instead — see the note below.
  *   3. If `Origin` is absent, accept only `Sec-Fetch-Site: same-origin`, which is
  *      what a same-origin `fetch()` from the app carries.
  *   4. If both headers are absent, the request is not a cross-site browser
@@ -28,6 +31,25 @@
  * defends against (it would also carry the victim's cookies only if it already
  * had them).
  */
+/**
+ * Hosted previews are addressed by a host that changes with the deployment
+ * (a sandbox id, a tunnel URL) while `NEXTAUTH_URL` is fixed at start-up. If the
+ * two disagree, every same-origin `fetch()` from the app is answered with 403 —
+ * the failure looks like "switching hotels is broken", not like a config error.
+ *
+ * The escape hatch is opt-in and compares `Origin` with the request's own `Host`,
+ * which is still a same-origin test: a cross-site page cannot set either value.
+ * It stays off by default because it widens the check for deployments that share
+ * a cookie domain between subdomains — with the flag off, only the single
+ * configured origin is accepted.
+ */
+function requestHostIsAcceptableOrigin(originHost: string, request: Request): boolean {
+  if (process.env.SAAS_ALLOW_REQUEST_HOST_ORIGIN !== "true") return false;
+  const host = request.headers.get("host");
+  if (!host) return false;
+  return originHost === host;
+}
+
 export function isSameOriginRequest(request: Request): boolean {
   const origin = request.headers.get("origin");
   const fetchSite = request.headers.get("sec-fetch-site");
@@ -43,11 +65,11 @@ export function isSameOriginRequest(request: Request): boolean {
     } catch {
       return false;
     }
-    return (
+    const matchesConfigured =
       parsed.protocol === expected.protocol &&
       parsed.hostname === expected.hostname &&
-      parsed.port === expected.port
-    );
+      parsed.port === expected.port;
+    return matchesConfigured || requestHostIsAcceptableOrigin(parsed.host, request);
   }
 
   if (fetchSite) return fetchSite === "same-origin";

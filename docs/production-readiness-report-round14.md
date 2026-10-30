@@ -5,7 +5,7 @@ Date: 2026-10-30 · Branch `arena/c62d21c8-hotel-management-saas` · Base `main`
 This round finished the product rather than describing it: two module-level defects that made listed
 workflows impossible were found by driving the application in a browser and fixed, two missing features
 (notifications, audit trail) were implemented, a complete two-hotel testing environment was built and
-seeded, and the automated suite grew from 823 tests / 46 HTTP checks / 25 browser steps to **833 / 55 /
+seeded, and the automated suite grew from 823 tests / 46 HTTP checks / 25 browser steps to **835 / 55 /
 33** with everything green.
 
 **Nothing was deployed.** Production deployment is prepared and gated on the owner's acceptance testing
@@ -128,7 +128,7 @@ system was contacted.
 | `npx tsc --noEmit` | **PASS** — 0 errors | no suppression, no relaxed config |
 | `npm run lint` | **PASS** — 0 findings | |
 | `npx next build` | **PASS** | 41 route entries |
-| Unit + integration (vitest) | **PASS** — 55 files, **833 tests** (827 passed, 6 pre-existing skips), 0 failures | 10 new tests this round; the skips cover evidence tools that need the missing archive |
+| Unit + integration (vitest) | **PASS** — 55 files, **835 tests** (829 passed, 6 pre-existing skips), 0 failures | 12 new tests this round; the skips cover evidence tools that need the missing archive |
 | HTTP end-to-end | **PASS** — **55/55** | `docs/evidence/round14/http-e2e.json` (9 new checks) |
 | Browser end-to-end | **PASS** — **33/33** (93 s) | `docs/evidence/browser/` + `browser-results.json` (8 new steps) |
 | Database integrity | **PASS** — 49 checks, 0 failures | `docs/evidence/round14/db-integrity.json` |
@@ -136,7 +136,7 @@ system was contacted.
 | Native engine verification | **BLOCKED** | `docs/evidence/round14/native-engine.json` (verdict `BLOCKED`, exit 2) |
 | Genuine restore | **BLOCKED** | handoff §1 |
 
-Baseline preserved and extended: 823 → **833** vitest, 46 → **55** HTTP, 25 → **33** browser, 49
+Baseline preserved and extended: 823 → **835** vitest, 46 → **55** HTTP, 25 → **33** browser, 49
 integrity, 0 TypeScript, 0 ESLint, build PASS, 19/19 migrations. No test was removed, skipped or
 weakened; one assertion was corrected because it had pinned a payload that could not work.
 

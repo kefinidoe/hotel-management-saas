@@ -15,10 +15,12 @@ customer or financial data.
 **Option A — the hosted preview (nothing to install).**
 
 ```
-https://3100-iru3snk40hynjgpbxj60g.e2b.app
+https://3100-ilwxtdget5jfcl1k2xd0q.e2b.app
 ```
 
-The preview runs while this workspace is running. If it does not load, use option B.
+The preview runs while this workspace is running. That hostname contains the sandbox id, so it
+changes whenever the workspace is restarted — use whatever link the workspace shows you. If it does
+not load, use option B.
 
 **Option B — run it on your own machine.**
 
