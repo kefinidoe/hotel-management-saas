@@ -2,9 +2,14 @@
 
 This document is the operator's path back to a working system after a bad deploy, a bad delete,
 or a lost database. It describes what exists in this repository, what it does **not** cover, and the
-commands to run. Every command below has been exercised in this repository against a disposable
-PostgreSQL 17.11 instance unless the row says otherwise (see §11 for the checklist and §14 for the
+commands to run. Every command below was exercised against a disposable PostgreSQL 17.11 instance in
+round 12 — the evidence for each one is recorded in §17 — unless the row says otherwise (§14 lists the
 gaps).
+
+**What round 12 changed here:** the command names, flags and expected outputs in §5–§8 were re-run
+against a live server rather than carried over from reading the scripts. Two assumptions did not
+survive contact with the implementation and are corrected below: the ledger-adoption summary
+wording (§8), and the claim that `npm run build` needs nothing beyond `npm ci` (§7 step 3, §14).
 
 > **Application data only.** Everything here recovers the application's **PostgreSQL data** — the
 > 28 tables this repository owns. It does **not** recover a Supabase platform: `auth.users`,
@@ -104,6 +109,21 @@ reports per-table row counts, confirms the schema matches an approved checkpoint
 scratch database on every exit path. `--toc` proves the archive can be read and describes its
 contents without touching a database.
 
+Observed output on a 116 KB application archive (round 12, PostgreSQL 17.11):
+
+```
+--toc            → Schemas: public · Application tables: 28 in public · Looks like Supabase: no
+                   Recommended profile: plain
+--json           → ok: true · scratch { database: "rehearsal_restore_20261030_164405",
+                   created: true, kept: false } · restore { ok: true, kept: 237 entries,
+                   excluded: 0 } · inspection { publicTables: 28, ledgerExists: false,
+                   checkpoints: saas_current } · cleanup { dropped: true }
+```
+
+The scratch database is named `rehearsal_restore_<UTC timestamp>`; `kept: false` and
+`cleanup.dropped: true` are the proof that nothing was left behind. If a run is interrupted, drop any
+`rehearsal_restore_*` database by hand before retrying.
+
 ## 6. Restoring the database
 
 Restore into a **disposable** target first — always:
@@ -129,7 +149,10 @@ the production project — during a declared maintenance window, with the applic
 1. **Provision** the target (PostgreSQL 17, or a Supabase project of the same major version).
 2. **Configure** `.env` with `DATABASE_URL`, `DIRECT_URL`, `SAAS_ENVIRONMENT=saas`,
    `SAAS_DATABASE_IDENTIFIER`, `NEXTAUTH_SECRET`, `NEXTAUTH_URL`.
-3. **Install** dependencies: `npm ci` (runs `prisma generate` on install).
+3. **Install** dependencies: `npm ci` (its `postinstall` runs `prisma generate`). This step needs
+   network access to Prisma's engine host (`binaries.prisma.sh`); on a host that cannot reach it the
+   install fails before the application is ever built. That is a network prerequisite, not a code
+   problem — see §14.
 4. **Restore** the archive (§6) into the target.
 5. **Adopt or migrate** the migration ledger — see §8. A restored database has no
    `_prisma_migrations` table, so `prisma migrate deploy` must not be run against it before
@@ -139,6 +162,9 @@ the production project — during a declared maintenance window, with the applic
    node scripts/db-integrity.mjs --url "$DIRECT_URL"            # loopback target
    node scripts/db-integrity.mjs --url "$DIRECT_URL" --allow-remote-target   # remote
    ```
+   (`npm run db:integrity -- --json` is the same command through the package script; the JSON
+   document is printed to **stdout**, so redirect it — `> integrity.json` — and read
+   `results[]`, `verdict.ok` and `verdict.failures[]`.)
    The checker is read-only and refuses non-loopback hosts unless
    `--allow-remote-target` is passed, so it can never be aimed at an arbitrary
    server by accident.
@@ -151,17 +177,25 @@ the production project — during a declared maintenance window, with the applic
    node scripts/target-check.mjs --url "$DIRECT_URL"
    ```
    Read-only: it reports the ledger state, the matched checkpoint and a schema fingerprint.
-8. **Start** the application (`npm run build && npm start`), sign in, and walk §11.
+8. **Start** the application (`npm run build && npm start`), sign in, and walk §11. `npm run build`
+   is `prisma generate && next build`, so it needs the same engine-host access as `npm ci`.
+   With the server running, the scripted half of §11 can be executed instead of clicked:
+   `node scripts/e2e-smoke.mjs --base http://127.0.0.1:3100 --json e2e.json` (exit 0 = every check
+   passed; see §17 for what it covers and what it cannot).
 9. **Clean up** any scratch databases and temporary files created above.
 
 ## 8. Prisma generation and migrations
 
 ```bash
 npm ci                        # postinstall: prisma generate
-npx prisma validate           # schema is syntactically valid
-npm run migration:manifest    # every migration file matches its recorded sha256 (19/19)
-npm run migration:checkpoints # the approved schema checkpoint catalogue
+npx prisma validate           # "The schema at prisma/schema.prisma is valid 🚀"
+npm run migration:manifest    # "Release manifest matches 19 migration files."
+npm run migration:checkpoints # the approved schema checkpoint catalogue (JSON)
 ```
+
+`npx prisma validate` reads `DATABASE_URL` and `DIRECT_URL` from the environment and fails with
+`P1012 Environment variable not found` when they are absent — Prisma CLI loads `.env`, not
+`.env.local`, so export both explicitly when validating outside the app's runtime.
 
 Applying migrations to a database that has a ledger:
 
@@ -173,9 +207,14 @@ A restored database has **no** ledger. Never run `migrate deploy` against it dir
 replay every migration. Baseline it first:
 
 ```bash
-npm run migration:adopt                 # dry run, read-only: prints "19 to baseline, 0 to deploy"
+npm run migration:adopt                 # dry run, read-only: prints the checkpoint and
+                                        # "To be baselined : 19 migration(s)" plus the rows to write
 npm run migration:adopt -- --apply      # writes only the ledger rows, after approval
 ```
+
+Two details worth knowing before an incident: the dry run reports **"Already recorded: 0"** when the
+target has no ledger (or only an empty `_prisma_migrations` table), and `--apply` writes rows only —
+it never replays migration SQL.
 
 `prisma migrate dev` is a development-only command and must never be run against a restored or live
 database.
@@ -212,6 +251,7 @@ the restored rows are the source of truth for those accounts.
 | A staff member forgot their password | Account holder uses the reset flow; no hotel administrator may set another user's password (the staff API rejects `newPassword` with 403) |
 | Nobody can sign in | Break-glass CLI: `npm run reset-password -- admin@hotel.com` (generates a strong password) or `npm run reset-password -- admin@hotel.com 'NewPassword'`. It writes only a bcrypt hash and runs the fail-closed database target guard first |
 | Staff member has left | Hotel owner/admin removes the membership (`DELETE /api/staff/:id`); with history it is suspended, not deleted, to preserve audit trails |
+| New colleague already has an account | The administrator's "add staff" call creates an **invitation**: a `SUSPENDED` membership plus a `STAFF_INVITATION_CREATED` audit row, never access. The invitee accepts or declines from `/select-hotel` (`POST /api/auth/invitations/:id`), and the plan's staff limit is enforced at acceptance. Until then the membership is invisible to them. Detail and threat model: `docs/membership-invitations.md` |
 | Session must be invalidated | Rotate `NEXTAUTH_SECRET`; all existing JWTs become invalid immediately |
 | A user belongs to several hotels | Membership is per hotel; the active hotel is chosen through `POST /api/auth/switch-hotel` and re-validated server-side on every request |
 
@@ -233,6 +273,12 @@ Run in order; stop at the first failure.
 | 10 | Tenant isolation | sign in as Hotel B, open reservations/guests | none of Hotel A's records are visible |
 | 11 | Financial pages | as `ACCOUNTANT` / `MANAGER` | reports render; a role without `FINANCIAL_REPORTS` is refused |
 | 12 | Subscription state | open billing page | plan, status and limits match the pre-incident state |
+| 13 | Scripted end-to-end | `node scripts/e2e-smoke.mjs --base http://127.0.0.1:3100` | `Result: PASS`, exit 0 (auth, switching, membership/invitations, permissions, subscription, reservations, check-in/out, billing, payments, POS idempotency, inventory, housekeeping, maintenance, reports) |
+| 14 | Invitation consent | as an admin, add an account that already exists at another hotel; sign in as that account | `202` with `invitationPending: true`; the hotel is **not** in the invitee's switch list until they accept |
+
+Rows 1–8 and 13–14 are scriptable and were executed in round 12. Rows 9–12 (a human clicking through
+two hotels' pages in a browser) are **manual**; they are not covered by the HTTP harness, and in round
+12 they were **NOT TESTED** because no browser was available in the verification environment.
 
 ## 12. Rollback
 
@@ -269,6 +315,9 @@ and the current Prisma migration count.
 | Restore halts with `current transaction is aborted` | a filtered dependency failed mid-restore | read `restore.problems`, fix the filter, re-run; the scratch database is dropped automatically |
 | `P3005: database schema is not empty` | `migrate deploy` against a restored database | baseline it with `migration:adopt` first |
 | `P1001: can't reach database server` | pooled vs direct URL, or IP not allow-listed | use `DIRECT_URL` (5432) for admin work; check network restrictions |
+| `npm ci` / `npm run build` fails fetching `libquery_engine-*.so.node` (`ECONNRESET`, TLS reset, 403) | the host cannot reach `binaries.prisma.sh` | build on a host that can, or vendor the pinned engine (`.env` `PRISMA_QUERY_ENGINE_LIBRARY` + `prisma/migration-release-manifest.json` digests). Do **not** commit a dummy engine: `next build` fails during static generation with `PrismaClientInitializationError … file too short` |
+| Build succeeds but the app throws `PrismaClientInitializationError` at runtime | client generated against an engine file that is absent or a 0-byte stub | re-run `npx prisma generate` with the real engine present, then rebuild |
+| `db-integrity` exits with `Refusing to inspect a non-loopback target` | safety default | pass `--allow-remote-target` only after confirming the target is the intended restored database |
 | App shows stale hotel data | `active_hotel_id` cookie points at a hotel the user has left | sign out and back in; the server clears the cookie on an invalid membership |
 | `db-integrity` reports `hotel.orphans` | rows whose hotel was deleted outside the app | investigate before serving traffic; do not delete the rows to silence the check |
 
@@ -299,3 +348,58 @@ Known gaps, stated plainly:
 4. **Restore rehearsal is manual.** It is a single command, but nothing schedules it.
 5. **Encryption at rest** is inherited from the host filesystem / storage bucket; the scripts do not
    encrypt archives themselves.
+
+## 17. Verification performed (round 12, 2026-10-30)
+
+Everything in this section ran against a **disposable** PostgreSQL 17.11 cluster on `127.0.0.1:55432`
+(database `hms_recovery`) plus the built application on `127.0.0.1:3100`. No production, Supabase or
+Axis Hotel system was contacted, and no live data was read.
+
+| # | Command | Result | Note |
+|---|---|---|---|
+| 1 | `npx prisma validate` | **PASS** | needs `DATABASE_URL` + `DIRECT_URL` exported |
+| 2 | `npx prisma generate` | **PASS** | engine *files* could not be downloaded here; see 3 |
+| 3 | `npx tsc --noEmit` | **PASS** — 0 errors | the 297 errors reported in earlier rounds were all downstream of an ungenerated Prisma client. No `tsconfig` or `@ts-*` suppression was added at any point |
+| 4 | `npm run lint` | **PASS** — 0 findings | |
+| 5 | `npm run build` | **PASS** — 41 route entries | built with the local WASM client aid described below; the native-engine build is **BLOCKED** in this sandbox |
+| 6 | `npx vitest run` | **PASS** — 53 files, 815 tests, 0 failures, 0 skipped | with `REHEARSAL_TEST_BASE_URL` and PostgreSQL tools on `PATH`, the 6 archive/rehearsal tests that normally skip also run and pass |
+| 7 | 19 migrations replayed into an empty database | **PASS** — 19/19 | `scripts/db-integrity.mjs` then found 28/28 tables |
+| 8 | `node scripts/db-integrity.mjs --json` | **PASS** — 49 checks, 0 failures | after the 46-check end-to-end run, 24 of 28 tables carried rows (e.g. `Hotel=15`, `Guest=24`, `Payment=23`) |
+| 9 | `node scripts/e2e-smoke.mjs --base http://127.0.0.1:3100` | **PASS** — 46/46 | cookie-session HTTP harness against the built app |
+| 10 | `npm run migration:manifest` | **PASS** — 19 files match | |
+| 11 | `npm run migration:checkpoints` | **PASS** | catalogue printed |
+| 12 | `node scripts/target-check.mjs --url "$DIRECT_URL"` | **PASS** — checkpoint `saas_current` | read-only session enforced by the server |
+| 13 | `npm run migration:adopt` (dry run) | **PASS** — "To be baselined: 19" | target had an empty ledger |
+| 14 | rehearsal of a **tool-check** archive (§5) | **PASS** — digest verified, 28 tables restored, scratch dropped | archive produced from the disposable cluster only, **not** the owner's backup. It proves the commands work; it is not evidence about the genuine archive |
+| 15 | Genuine `hotel-management-saas-20261028-140823.dump` restore | **BLOCKED** | the archive is not present in this environment; expected sha256 `F81566E9…B24A7` |
+| 16 | Browser walkthrough of §11 rows 9–12 | **NOT TESTED** | no browser/Playwright/Cypress in the environment; the app's UI was never rendered |
+
+### The local Prisma client aid (not part of the product)
+
+This sandbox cannot reach `binaries.prisma.sh`, so the native query engine cannot be downloaded and
+`prisma generate` produces a client whose engine file is missing. To still build and execute the real
+application code, `scripts/wasm-runtime-shim.mjs` regenerates the client with `driverAdapters` and
+patches `node_modules/.prisma/client` to run Prisma's bundled WASM query engine through
+`@prisma/adapter-pg`. It touches only `node_modules` and never the repository's runtime code.
+
+Consequences for reading the evidence above:
+
+- The **TypeScript and lint** results are unaffected: types come from the schema, not from the engine.
+- The **build** result proves the application compiles and renders under the real Next.js toolchain,
+  but it does not prove the native-engine production path. That path is exercised only on a host with
+  engine-host access, and is recorded as **BLOCKED** rather than PASS.
+- The **HTTP end-to-end** result exercises the real route handlers, the real Prisma schema, the real
+  PostgreSQL database and the real SQL — only the engine binary that executes the SQL is different
+  (WASM instead of native). `scripts/db-integrity.mjs` and every `psql` assertion in the harness run
+  against the same server independently of Prisma, so the database state is not self-reported.
+
+### What the end-to-end harness covers
+
+`scripts/e2e-smoke.mjs` signs in with real credentials, keeps per-user cookie jars, and sends `Origin`
+on every state-changing request (the CSRF guard rejects requests without it). Its 46 checks span:
+sign-up and sign-in, hotel switching, membership and the invitation consent flow, role-denied requests,
+subscription limits, room types and rooms, reservations, check-in, folios and billing, payment
+settlement, check-out (refused while a balance is outstanding), POS pay-now with idempotency-key
+replay, inventory, wastage, housekeeping, maintenance and the reports endpoints. It asserts database
+state directly with `psql` for the idempotency and cross-tenant cases rather than trusting the API's
+own response.
