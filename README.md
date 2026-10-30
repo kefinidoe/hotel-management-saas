@@ -47,6 +47,20 @@ The migration history has been reviewed and the deployment path is documented in
 3. For an offline frontend preview, follow **Safe local frontend-only preview (no database)** above. Do not copy a database URL from another environment.
 4. Database-backed testing requires a separately provisioned local PostgreSQL instance. Apply the reviewed chain in `prisma/migrations` in order, or run `prisma migrate deploy` against a *fresh* local database. Do not run `prisma migrate dev`, `prisma db push`, or seed scripts against an existing or shared database; for a database that already has a schema but no ledger, use the adoption runbook in `docs/migration-strategy.md`.
 
+## Trying the product end to end
+
+Two complete demo hotels (18 staff accounts across every role) can be created on a separate, disposable
+database — nothing to do with production or any live system:
+
+```bash
+node scripts/owner-test-env.mjs setup    # PostgreSQL + migrations + demo data (once)
+node scripts/owner-test-env.mjs app      # build if needed, then start on http://localhost:3000
+node scripts/owner-test-env.mjs reset    # wipe the demo data and re-seed
+```
+
+Credentials are written to `.owner-test/CREDENTIALS.md` (Git-ignored, mode 600), and the testing script
+is [docs/OWNER-ACCEPTANCE-TESTING.md](docs/OWNER-ACCEPTANCE-TESTING.md).
+
 ## Verifying a change
 
 ```bash
