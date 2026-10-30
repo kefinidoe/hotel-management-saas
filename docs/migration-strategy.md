@@ -385,6 +385,102 @@ PRISMA_QUERY_ENGINE_LIBRARY=/path/to/libquery_engine-debian-openssl-3.0.x.so.nod
 npx prisma migrate deploy --schema prisma/schema.prisma   # against a restored copy, never the target first
 ```
 
+### 7.1.1 What the official distribution serves (measured, not remembered)
+
+The 5.17.0 engine is addressed by commit, not by version. The commit is already recorded in
+`package-lock.json` for `@prisma/engines@5.17.0`: **`393aa359c9ad4a4bb28630fb5613f9c281cde053`**.
+`@prisma/fetch-engine@5.17.0` builds every download URL from that commit:
+
+```
+https://binaries.prisma.sh/all_commits/393aa359c9ad4a4bb28630fb5613f9c281cde053/debian-openssl-3.0.x/schema-engine.gz.sha256
+https://binaries.prisma.sh/all_commits/393aa359c9ad4a4bb28630fb5613f9c281cde053/debian-openssl-3.0.x/schema-engine.sha256
+https://binaries.prisma.sh/all_commits/393aa359c9ad4a4bb28630fb5613f9c281cde053/debian-openssl-3.0.x/libquery_engine.so.node.gz.sha256
+https://binaries.prisma.sh/all_commits/393aa359c9ad4a4bb28630fb5613f9c281cde053/debian-openssl-3.0.x/libquery_engine.so.node.sha256
+```
+
+That list is not inferred. `PRISMA_ENGINES_MIRROR` was pointed at a local HTTP probe and
+`npx prisma -v` (5.17.0) was run against it; the probe logged exactly the four requests above and the
+client aborted on the first 404. The client therefore also accepts a mirror or an explicit binary:
+
+| Variable | Effect |
+|---|---|
+| `PRISMA_ENGINES_MIRROR` / `PRISMA_BINARIES_MIRROR` | replace `https://binaries.prisma.sh` as the download root |
+| `PRISMA_SCHEMA_ENGINE_BINARY` | use this `schema-engine` file instead of downloading one |
+| `PRISMA_QUERY_ENGINE_LIBRARY` | use this `libquery_engine.so.node` file instead of downloading one |
+
+Checksums for the `debian-openssl-3.0.x` artifacts (captured from the `.sha256` sidecars during the
+same probe, so they can be compared without trusting a download):
+
+| Artifact | SHA-256 |
+|---|---|
+| `schema-engine.gz` | `98ad433fd64da2ea1eb6d565553a9a4339ecf30f1c211b28b69690f591269a41` |
+| `schema-engine` (gunzipped) | `0a52943c68c41f28d00359001b6f271df7c0ad9a68aa32be2570f80594db956e` |
+| `libquery_engine.so.node.gz` | `125d75739bd7fcdb8eabb5428355b5be00f540043e6bc1f5b30268947afab1bd` |
+| `libquery_engine.so.node` (gunzipped) | not captured — the probe answered with 404 before the plain digest was read |
+
+Nothing in this environment can fetch those files: `binaries.prisma.sh` resets the TLS connection and
+every GitHub host is unreachable; only `registry.npmjs.org` and `pypi.org` respond. No npm or PyPI
+package ships the 5.17.0 native engines (checked: `prisma`, `@prisma/engines`, `@prisma/migrate`,
+`@prisma/client`, `@prisma/schema-engine-wasm`, `prisma-engines`, `prisma-binaries`, plus three
+third-party downloaders), and the local Prisma cache contains only WASM engines. The gap is an
+egress restriction, not a missing procedure.
+
+### 7.1.2 Recovering the engine where egress permits
+
+Run this on a machine that can reach `binaries.prisma.sh` (or the mirror the operator uses), and do
+not substitute a build from another commit:
+
+```bash
+COMMIT=393aa359c9ad4a4bb28630fb5613f9c281cde053     # @prisma/engines@5.17.0, from package-lock.json
+PLATFORM=debian-openssl-3.0.x                        # must match the deployment host
+BASE="https://binaries.prisma.sh/all_commits/$COMMIT/$PLATFORM"
+OUT="$HOME/.cache/prisma-engines/5.17.0/$PLATFORM"; mkdir -p "$OUT"
+
+for f in schema-engine libquery_engine.so.node; do
+  curl -fsSLO --output-dir "$OUT" "$BASE/$f.gz"
+  curl -fsSL "$BASE/$f.gz.sha256"                    # must equal the table in §7.1.1
+  gunzip -c "$OUT/$f.gz" > "$OUT/$f" && chmod +x "$OUT/$f"
+  sha256sum "$OUT/$f"                                # schema-engine: 0a52943c…956e
+done
+
+"$OUT/schema-engine" --version        # expect: schema-engine-cli 393aa359c9ad4a4bb28630fb5613f9c281cde053
+```
+
+The commit printed by `--version` is the check that matters: a binary from a different commit may
+still say `5.17.0`-ish in a filename, but the commit decides which SQL and ledger behaviour it has.
+
+### 7.1.3 Verifying the pinned engine against a restored disposable database
+
+The engine is only proven once it has run the migration set against a **restored copy**, never the
+target. With `PRISMA_SCHEMA_ENGINE_BINARY` and `PRISMA_QUERY_ENGINE_LIBRARY` exported (§7.1.2) and a
+scratch server:
+
+```bash
+# 1. restore the archive into a scratch database, digest-verified, and keep it
+npm run migration:restore-rehearsal -- \
+  --dump hotel-management-saas-20261028-140823.dump \
+  --expect-sha256 F81566E9CCBB511DD34D0FEA5076934CDFBB03CD8BCDE1B1611E8D0F77DB24A7 \
+  --database hms_engine_check --keep
+# 2. read the restored copy before deploying anything (read-only)
+SAAS_ENVIRONMENT=saas SAAS_DATABASE_IDENTIFIER=hms_engine_check \
+  DIRECT_URL='postgresql://…/hms_engine_check' npm run migration:adopt
+# 3. run §4.4–4.6 against that copy with the pinned engine in the environment
+npx prisma -v                                        # 5.17.0, commit 393aa359…
+npx prisma migrate status --schema prisma/schema.prisma
+```
+
+Acceptance criteria for closing gap 1 in §8, recorded verbatim in
+[saas-migration-rehearsal.md §9](saas-migration-rehearsal.md):
+
+1. `prisma -v` reports `5.17.0` and engine commit `393aa359…`.
+2. `migrate status` on the restored copy reports the full 19-migration history (after adoption) and
+   no failed migrations; `migrate deploy` applies exactly the pending migrations.
+3. Every ledger checksum equals `prisma/migration-release-manifest.json`.
+4. `npm run migration:target-check` on the restored copy reports the checkpoint the adoption run
+   expected, with `readOnly: on`.
+
+Until all four are recorded, §8 item 1 stands.
+
 ### 7.2 Setting up the verification environment
 
 The tool stack is installed outside the repository so the pinned `prisma@5.17.0` dependency and
@@ -454,17 +550,29 @@ Be explicit about this; do not let the rehearsal or engine evidence imply more t
    tool stack, because the 5.17.0 binaries are only published to a host this environment cannot reach
    and Prisma published no 5.x WebAssembly schema engine. The command set, the ledger format and the
    checksum algorithm are unchanged between those releases, and the 5.17.0 engine is still the one
-   production will run. Close this by running §4.2–4.6 once with `PRISMA_SCHEMA_ENGINE_BINARY` pointing
-   at the pinned binary (§7.1), on a **restored copy** first.
+   production will run. §7.1.1–7.1.3 record the exact artifacts, checksums and recovery commands, so
+   closing this is a matter of running them where `binaries.prisma.sh` is reachable and recording the
+   four acceptance results from §7.1.3.
 2. **The deployed database's checkpoint is inferred, not observed.** No connection to the Supabase
    target was made in this work — no `DIRECT_URL` or credentials were available, and connecting was
-   out of scope. §4.2 is read-only and settles it in one command:
-   `SAAS_ENVIRONMENT=saas SAAS_DATABASE_IDENTIFIER=<ref> npm run migration:adopt`.
-3. **The production archive has not been restored.** The restoration *procedure* is proven end to end
-   on a synthetic archive (§"Backup restoration rehearsal" in
-   [saas-migration-rehearsal.md](saas-migration-rehearsal.md)), but the archive referenced there
-   (`hotel-management-saas-20261028-140823.dump`, SHA-256 `F81566E9…24A7`) is not present in this
-   workspace, so it has not been restored, counted or rehearsed. Do that before §4.4.
+   out of scope. `npm run migration:target-check` settles it read-only: it has no write path, it sets
+   `default_transaction_read_only = on` on the session and refuses to report if the server did not
+   apply it, and it prints the checkpoint, the ledger-versus-manifest comparison and an md5
+   fingerprint of the public schema. §4.2 (`migration:adopt`, a dry run) answers the same question
+   with the adoption plan attached.
+3. **The production archive has not been restored.** The restoration *procedure* is now a single
+   command, `npm run migration:restore-rehearsal`, which verifies the archive's SHA-256 **before**
+   contacting the server, creates its own scratch database, restores, fingerprints the result
+   read-only and drops the database again. It is proven end to end on an archive built here (see
+   [saas-migration-rehearsal.md §9](saas-migration-rehearsal.md)), but
+   `hotel-management-saas-20261028-140823.dump` (384 096 bytes, SHA-256 `F81566E9…24A7`) is not
+   present in this workspace, so *that* archive has not been restored, counted or rehearsed. Run it
+   before §4.4:
+   ```bash
+   npm run migration:restore-rehearsal -- --dump hotel-management-saas-20261028-140823.dump \
+     --expect-sha256 F81566E9CCBB511DD34D0FEA5076934CDFBB03CD8BCDE1B1611E8D0F77DB24A7 \
+     --base-url "postgresql://…/postgres"
+   ```
 4. **Per-migration atomicity holds only as far as PostgreSQL's implicit transaction.** §7 shows the
    engine sends each migration as one multi-statement message (no explicit `BEGIN`/`COMMIT`), so a
    failure rolls the whole file back — demonstrated. That is a property of the simple-query protocol,
@@ -487,6 +595,9 @@ Be explicit about this; do not let the rehearsal or engine evidence imply more t
 | `scripts/migration-rehearsal.mjs` | Disposable PostgreSQL rehearsal driver |
 | `scripts/prisma-engine-verify.mjs` | Drives the real Prisma migration engine against disposable databases |
 | `scripts/backup-db.mjs` / `scripts/restore-db.mjs` | Verified custom-format backup and restore into a scratch database |
+| `scripts/restore-rehearsal.mjs` | Digest-verified restore into a self-created, self-dropped scratch database, with a read-only fingerprint of the result |
+| `scripts/target-check.mjs` | Read-only checkpoint, ledger-vs-manifest and schema-fingerprint check against a configured target |
 | `scripts/psql.mjs` | Explicit `psql` wrapper used by both tools |
 | `__tests__/schema/migration-adoption.test.ts` | Unit tests for checkpoints, planning and manifest |
 | `__tests__/schema/migrations.test.ts` | Chain, schema parity, legacy conversion, idempotency guards |
+| `__tests__/scripts/migration-evidence-tools.test.ts` | CLI-level refusals for `target-check` and `restore-rehearsal` (no database needed) |

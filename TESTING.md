@@ -2,7 +2,7 @@
 
 > ## Current verification status (2026-10-30)
 >
-> The latest full Vitest run passed **678/678 tests across 46 files**, and `npm run lint` passed.
+> The latest full Vitest run passed **693/693 tests across 47 files**, and `npm run lint` passed.
 > `npx tsc --noEmit` currently reports 296 diagnostics, all of them consequences of the Prisma
 > client not being generated in this sandbox (77 missing `@prisma/client` exports plus cascading
 > inference errors); none are in the migration, adoption or rehearsal code. Prisma generation,
@@ -14,13 +14,16 @@
 > guest lifecycle or those utility functions work end-to-end.
 >
 > The migration work is additionally covered by a **real PostgreSQL 17.11 rehearsal**
-> (`scripts/migration-rehearsal.mjs`, 7 scenarios, 61 assertions, all passing) that applies the
-> committed migrations, adopts ledgerless databases and proves the fail-closed paths. Details in
-> `docs/saas-migration-rehearsal.md`. `prisma migrate deploy` itself has still not been executed
-> anywhere, because of the engine-availability limitation above.
+> (`scripts/migration-rehearsal.mjs`, 8 scenarios, 83 assertions, all passing) that applies the
+> committed migrations, adopts ledgerless databases and proves the fail-closed paths, and by the
+> evidence tools `scripts/target-check.mjs` (read-only checkpoint/fingerprint) and
+> `scripts/restore-rehearsal.mjs` (digest-enforced restore into a scratch database). Details in
+> `docs/saas-migration-rehearsal.md`. The pinned 5.17.0 engine, the owner's archive and the live
+> target are still not exercised here, because of the engine-availability and credential limitations
+> above; production readiness is not claimed.
 
 ## Overview
-The current suite has **678 tests in 46 files**. It is green as a test suite, but mocked and
+The current suite has **693 tests in 47 files**. It is green as a test suite, but mocked and
 placeholder cases have limited reach. Relevant tenant and schema test groups include:
 
 | Suite | Tests | What it checks |
@@ -36,6 +39,7 @@ placeholder cases have limited reach. Relevant tenant and schema test groups inc
 | `subscriptions/subscription-entitlements.test.ts` | 48 | Subscription and entitlement behavior with mocked storage |
 | `scripts/cleanup-scope.test.ts` | 3 | Static guardrails against unscoped cleanup and non-transactional execution |
 | `scripts/database-target-safety.test.ts` | 4 | Identifier validation and wiring for standalone backup/restore target checks |
+| `scripts/migration-evidence-tools.test.ts` | 15 | CLI-level refusals for `target-check.mjs` (no write path, target binding, pooler port) and `restore-rehearsal.mjs` (digest, missing archive, shared host, reserved names) — no database needed |
 | `safety/offline-auth-routes.test.ts` | 3 | Offline 503 responses without importing Prisma-backed auth modules |
 
 Browser E2E, backup/restore against the real target, cleanup and seed against a real database were
@@ -220,8 +224,8 @@ npm run test:coverage
 Latest full run on the worktree:
 
 ```
-Test Files  46 passed (46)
-     Tests  678 passed (678)
+Test Files  47 passed (47)
+     Tests  693 passed (693)
 ```
 
 The PGlite schema/migration tests create disposable in-memory databases and close them after
@@ -229,6 +233,12 @@ use. They exercise the current migration files from a fresh schema and represent
 fixtures; they do not connect to an external database. The separate PostgreSQL rehearsal
 (`REHEARSAL_BASE_URL=postgresql://postgres@127.0.0.1:<port> npm run migration:rehearse`) covers a
 real server of the target major version and the ledgerless-adoption paths.
+
+The two evidence tools are also exercised end to end outside Vitest, on a disposable loopback
+PostgreSQL 17.11 server, in `docs/saas-migration-rehearsal.md` §9: a digest-verified restore of a
+94 951-byte archive (28 tables, data intact, scratch database dropped), a read-only checkpoint and
+fingerprint check against both a ledgerless copy and a 19-row ledger, and the refusal paths
+(wrong digest, missing archive, shared host, existing database name, tampered ledger).
 
 Beyond those two layers, `npm run migration:verify-engine` drives Prisma's own migrate implementation
 (`@prisma/migrate` + the official WebAssembly schema engine) against disposable PostgreSQL 17.11
@@ -246,7 +256,9 @@ Supabase target are still not exercised by any of these layers.
 - Registration/onboarding tests exercise mocked persistence and now cover invalid IANA time
   zones, uniqueness races, and blank-database responses.
 - Static maintenance-script tests guard cleanup scoping and database-target identifier checks.
-  Cleanup, backup, restore, reset-password, and seed scripts were not executed against any DB.
+  Cleanup, reset-password, and seed scripts were not executed against any DB.
+- `backup-db.mjs` and `restore-rehearsal.mjs` were executed against a disposable local PostgreSQL
+  17.11 server (never the target); `target-check.mjs` was executed read-only against local copies only.
 - `workflows/guest-lifecycle.test.ts` (36 tests) and `utilities/helpers.test.ts` (37 tests) are
   illustrative placeholders. They do not call application routes or the real utility functions.
 - Middleware matcher tests check route matching, not a full browser session or live middleware
@@ -257,9 +269,11 @@ Supabase target are still not exercised by any of these layers.
 - Prisma 5.17.0 client generation and schema validation passed with the pinned Linux engines.
 - Full TypeScript, lint, and production build checks passed.
 - Browser E2E was not run. Migration rehearsals did run, but only against disposable local
-  PostgreSQL 17.11 databases: the 8-scenario psql rehearsal, the 6-scenario real-engine run, and a
-  backup/restore cycle on a synthetic archive. No Supabase or shared database was contacted, the
-  live target's checkpoint has not been observed, and the owner's archive has not been restored.
+  PostgreSQL 17.11 databases: the 8-scenario psql rehearsal, the 6-scenario real-engine run, and
+  digest-verified backup/restore cycles on archives built here. No Supabase or shared database was
+  contacted, the live target's checkpoint has not been observed, the owner's archive has not been
+  restored, and the pinned 5.17.0 engine has not run (its artifacts and acceptance steps are
+  recorded in `docs/migration-strategy.md` §7.1.1–7.1.3).
 - The PGlite migration runner checks SQL behavior on fresh disposable in-memory databases only.
   It does not validate the target's migration ledger/checksums or Prisma deploy recovery semantics.
 
