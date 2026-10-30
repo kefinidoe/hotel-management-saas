@@ -63,7 +63,7 @@ PASS  [platform] platform admin lists the demo hotels — Lakeview Lodge, Rivers
 PASS  [switching] the owner has two workspaces — Lakeview Lodge | Riverside Grand Hotel
 PASS  [switching] owner switches to Lakeview Lodge — 200
 PASS  [switching] owner switches back to Riverside Grand — 200
-PASS  [revocation] owner creates a temporary receptionist — 201 {"id":"86fa338c-8f40-4fc2-bce9-b2a0afeddffd","userId":"69b4c8ec-94d2-4811-bfd8-9e50f1921d0d","name":"Temporary Revocatio
+PASS  [revocation] owner creates a temporary receptionist — 201 {"id":"d29d36bf-68c5-432c-a120-cd27b30a4436","userId":"a3b6fd4d-b2e4-4538-b024-7a84c66640b9","name":"Temporary Revocatio
 PASS  [revocation] the new receptionist can work before removal — 200/200
 PASS  [revocation] owner removes the receptionist — 200 {"ok":true,"mode":"deleted","name":"Temporary Revocation Check","message":"Temporary Revocation Check was removed from t
 PASS  [revocation] the removed receptionist loses access — 403
