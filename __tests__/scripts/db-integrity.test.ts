@@ -7,6 +7,7 @@ import {
   buildChecks,
   buildRowCountCheck,
   evaluateResults,
+  wrapAsJson,
   formatReport,
   EXPECTED_TABLES,
 } from "../../scripts/db-integrity.mjs";
@@ -190,5 +191,49 @@ describe("db-integrity — against the real migration chain (PGlite)", () => {
     // single-hotel conversion, so this is 2 seeded + 1 from migrations.
     expect(byTable.Hotel).toBe(3);
     expect(byTable.Guest).toBe(1);
+  });
+
+  it("returns a parseable array for a UNION of per-table counts", async () => {
+    const { rows } = await db.query<{ rows: any }>(wrapAsJson(buildChecks()[1].sql));
+    expect(Array.isArray(rows[0].rows)).toBe(true);
+    expect(rows[0].rows[0]).toHaveProperty("table_name");
+    expect(rows[0].rows[0]).toHaveProperty("violations");
+  });
+
+  it("returns a parseable array for a scalar count", async () => {
+    const countCheck = buildChecks().find((check) => check.id.startsWith("hotel.null:"))!;
+    const { rows } = await db.query<{ rows: any }>(wrapAsJson(countCheck.sql));
+    expect(Number(rows[0].rows[0].count)).toBe(0);
+  });
+
+});
+
+describe("CLI serialisation (the path a real psql run uses)", () => {
+  it("wraps every check in a JSON envelope so psql's text output can be parsed", () => {
+    const wrapped = wrapAsJson("SELECT 1 AS count");
+    expect(wrapped).toContain("json_agg(row_to_json(");
+    expect(wrapped).toContain("SELECT 1 AS count");
+    // Exactly one statement: a stray semicolon inside the envelope is a syntax error.
+    expect(wrapped.trim().endsWith("_check")).toBe(true);
+  });
+
+  it("strips a trailing semicolon from the wrapped statement", () => {
+    expect(wrapAsJson("SELECT 1;")).not.toMatch(/;\s*\)\s*_check/);
+  });
+
+  it("reports an inventory check without treating it as a completeness assertion", () => {
+    const verdict = evaluateResults([
+      { id: "row.counts", kind: "list", description: "row counts", rows: [{ table_name: "Hotel", rows: "3" }] },
+    ]);
+    expect(verdict.ok).toBe(true);
+    expect(verdict.checked).toBe(1);
+  });
+
+  it("still fails when a declared table is missing", () => {
+    const verdict = evaluateResults([
+      { id: "tables.present", kind: "list", description: "tables", expected: ["Hotel", "Ghost"], rows: [{ table_name: "Hotel" }] },
+    ]);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.failures[0].detail).toContain("Ghost");
   });
 });

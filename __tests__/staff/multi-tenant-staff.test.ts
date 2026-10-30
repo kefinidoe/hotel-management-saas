@@ -444,7 +444,7 @@ describe("Phase 5: Multi-Tenant Staff Management", () => {
       expect(db.users.get(data.userId).department).toBeUndefined();
     });
 
-    it("adds a shared existing account without changing global credentials or Hotel B membership", async () => {
+    it("invites a shared existing account without changing global credentials or Hotel B membership", async () => {
       mockTenantContext.role = HotelRole.HOTEL_ADMIN;
       const userBefore = { ...db.users.get("user-b-owner") };
       const hotelBMembershipBefore = { ...db.memberships.get("mem-b-owner") };
@@ -461,14 +461,18 @@ describe("Phase 5: Multi-Tenant Staff Management", () => {
       });
 
       const res = await postStaffRoute(req);
-      expect(res.status).toBe(201);
+      // An existing account is invited, not granted access: the membership is
+      // created SUSPENDED and only the account holder can accept it.
+      expect(res.status).toBe(202);
       const data = await res.json();
+      expect(data.invitationPending).toBe(true);
       const hotelAMembership = db.memberships.get(data.id);
       expect(hotelAMembership).toMatchObject({
         userId: "user-b-owner",
         hotelId: "hotel-a",
         role: "WAITER",
         department: "Kitchen",
+        status: "SUSPENDED",
       });
       expect(db.users.get("user-b-owner")).toEqual(userBefore);
       expect(db.memberships.get("mem-b-owner")).toEqual(hotelBMembershipBefore);

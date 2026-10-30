@@ -13,6 +13,7 @@ export async function GET() {
   // Avoid evaluating the database-backed auth and Prisma modules in offline preview.
   const { authOptions } = await import("@/lib/auth");
   const { prisma } = await import("@/lib/prisma");
+  const { listPendingInvitations } = await import("@/lib/invitations");
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) {
     return NextResponse.json({ error: "UNAUTHENTICATED" }, { status: 401 });
@@ -43,6 +44,10 @@ export async function GET() {
     },
   });
 
+  // Invitations are listed separately: they are memberships the signed-in user
+  // has been offered but has not accepted, so they must never be switchable.
+  const pendingInvitations = await listPendingInvitations(session.user.id);
+
   return NextResponse.json({
     memberships: memberships.map((m) => ({
       id: m.id,
@@ -52,5 +57,6 @@ export async function GET() {
       role: m.role,
       status: m.status,
     })),
+    pendingInvitations,
   });
 }
