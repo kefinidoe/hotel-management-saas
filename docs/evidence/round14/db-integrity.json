@@ -1400,7 +1400,7 @@
       "rows": [
         {
           "table_name": "AuditLog",
-          "rows": 0
+          "rows": 2
         },
         {
           "table_name": "Expense",
@@ -1424,7 +1424,7 @@
         },
         {
           "table_name": "HotelMembership",
-          "rows": 18
+          "rows": 19
         },
         {
           "table_name": "HousekeepingTask",
@@ -1504,7 +1504,7 @@
         },
         {
           "table_name": "User",
-          "rows": 19
+          "rows": 20
         },
         {
           "table_name": "Wastage",
