@@ -100,16 +100,29 @@ outside the working tree regardless.
 
 ## 3. Step 2 — analyse the archive (no database is created, nothing connects)
 
+Two entry points do the same thing. The standalone analyser needs only `pg_restore`, not `psql` or a
+running server:
+
 ```powershell
 cd $repo
+node scripts\archive-toc.mjs `
+  --dump "C:\hotel-saas-rehearsal\archive\hotel-management-saas-20261028-140823.dump" `
+  --expect-sha256 F81566E9CCBB511DD34D0FEA5076934CDFBB03CD8BCDE1B1611E8D0F77DB24A7
+```
+
+and the rehearsal tool's analysis mode:
+
+```powershell
 npm run migration:restore-rehearsal -- `
   --dump $archive `
   --expect-sha256 F81566E9CCBB511DD34D0FEA5076934CDFBB03CD8BCDE1B1611E8D0F77DB24A7 `
   --toc
 ```
 
-This reads the archive with `pg_restore --list` and exits. It does not create a database or open a
-connection. Expect output shaped like this (values from a Supabase-shaped fixture, not the owner's
+Either one reads the archive with `pg_restore --list` and exits. Neither creates a database or opens a
+connection. `--json` gives the machine-readable form, `--available-extension pgcrypto,plpgsql` lets the
+standalone analyser name extensions the target cannot install without querying a database, and
+`--help` lists the options. Expect output shaped like this (values from a Supabase-shaped fixture, not the owner's
 archive):
 
 ```
@@ -322,6 +335,7 @@ The archive is only read, never modified, so the second hash must still equal
 | `unsupported version (1.x) in file header` | `pg_restore` older than the dump | Install PostgreSQL 17 client tools |
 | `extension "…" is not available` | Extension the target cannot install | Expected; the filter skips it. Restore it only if the schema needs it |
 | `schema "auth" already exists` | Restoring without the filter | Use `--profile plain` (or `supabase` on a stack) |
+| `extension "x" does not exist` while running `COMMENT ON EXTENSION x` | A comment entry that depends on an excluded extension survived the filter | Fixed in `archive-toc.mjs` (§13 of the rehearsal record). If it reappears, check `restore.filter.byReason` for `extension comment` |
 | `role "supabase_admin" does not exist` | Archive objects owned by Supabase roles | `--profile plain` skips them; or use option A |
 | `permission denied for schema public` | PG 15+ `public` ownership | Connect as the database owner / `postgres` |
 | Checkpoint check `FAIL` with `Ledger: absent` | Archive is an older end-state | Re-run with the matching `--expect-checkpoint` |

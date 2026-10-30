@@ -552,6 +552,7 @@ missing, and a rehearsal that only checks the exit code can be misread as a pass
 |---|---|
 | `scripts/archive-toc.mjs` (new) | Pure parser/analyser for `pg_restore --list` output, plus the `--use-list` builder |
 | `--toc` on `restore-rehearsal` | Analyse the archive and exit; no database is created, nothing connects |
+| `archive-toc.mjs` CLI | The same analysis standalone: `node scripts/archive-toc.mjs --dump <archive> --toc [--json]` needs only `pg_restore` — no `psql`, no server |
 | `--profile auto\|plain\|supabase` | Choose how much of the archive to attempt: `plain` keeps the application schema, `supabase` assumes a local Supabase stack, `auto` decides from the archive plus whether the target has the `supabase_admin` role |
 | `--exclude-schema` | Add schemas to skip; refuses to drop `public` |
 | `--use-list` restore | The filtered TOC is written to a temp file, passed to `pg_restore`, and removed on both exit paths |
@@ -597,7 +598,89 @@ Supabase-shaped archive, including its failure mode.
 
 ---
 
-## 13. History of this record
+## 13. The genuine rehearsal's first real failure, and the fix (2026-10-30)
+
+### 13.1 What happened
+
+The first rehearsal of the owner's actual archive — 634 TOC entries, digest verified, scratch
+database created on an isolated PostgreSQL 17.11 server — aborted with:
+
+```
+pg_restore: error: could not execute query: ERROR:  extension "supabase_vault" does not exist
+```
+
+The `plain` profile had correctly commented out `EXTENSION - supabase_vault` (the target cannot
+install it), but the archive also carries a *dependent* entry:
+
+```
+2; 3079 16450 EXTENSION - supabase_vault
+2626; 0 0 COMMENT - EXTENSION supabase_vault
+```
+
+`pg_restore` runs the comment as `COMMENT ON EXTENSION supabase_vault IS '…'`. Nothing can comment on
+an extension that was deliberately not created, so the restore aborted under `--exit-on-error` and the
+scratch database was dropped.
+
+### 13.2 Root cause, reproduced
+
+`parseToc` read `COMMENT - EXTENSION supabase_vault` positionally, the way every non-schema entry is
+read: the object after the dash became `name: "EXTENSION"` and the extension name became `owner`.
+`buildFilteredToc` matched exclusions on `type`, `schema` and (for `EXTENSION` entries) `name`, so
+nothing matched a `COMMENT` entry and it stayed live.
+
+Reproduced on a disposable PostgreSQL 17.11 server with a stand-in `supabase_vault` extension (a
+`.control` file in the source's extension directory, removed before the restore to make it
+unavailable, exactly as a stock server would report it):
+
+| Use-list handed to `pg_restore` | Result |
+|---|---|
+| Extension entry commented, its comment left live (the shipped filter) | `ERROR: extension "supabase_vault" does not exist` / `Command was: COMMENT ON EXTENSION supabase_vault IS 'Supabase Vault extension';` — the owner's error, character for character |
+| Same, with `COMMENT - SCHEMA auth` also left live | `ERROR: schema "auth" does not exist` / `Command was: COMMENT ON SCHEMA auth IS 'Supabase auth schema';` — the same defect one level up |
+| After the fix | restore finished with no errors; `public` held `Hotel`=1, `Guest`=2; the retained `pgcrypto` comment was applied; the application's `COMMENT ON TABLE "Hotel"` was applied |
+
+The hypothesis in the report was correct, and the same class of defect also covered schema comments
+and ACLs.
+
+### 13.3 The fix
+
+`archive-toc.mjs` now captures the object a dependent entry acts on, and the filter excludes an entry
+whose object is excluded:
+
+| Entry | `objectType` / `objectName` | Excluded when |
+|---|---|---|
+| `COMMENT - EXTENSION supabase_vault` | `EXTENSION` / `supabase_vault` | that extension is excluded (typically: unavailable on the target) |
+| `COMMENT - SCHEMA auth` | `SCHEMA` / `auth` | that schema is excluded |
+| `ACL - SCHEMA auth`, `DEFAULT ACL - SCHEMA auth`, `SECURITY LABEL …` | `SCHEMA` / `auth` | that schema is excluded |
+| `COMMENT public TABLE "Hotel"` | none — the schema is already in `schema` | only if `public` were excluded (which is refused) |
+
+Deliberately narrow:
+
+* Only `COMMENT`, `ACL`, `DEFAULT ACL` and `SECURITY LABEL` entries are interpreted this way, and only
+  when the object follows the dash.
+* Exclusions are keyed to the specific extension or schema being dropped. A comment on a *retained*
+  extension, or on any application object, is left exactly as it was.
+* Nothing else changed: `plain`/`supabase` profile selection, extension availability probing, schema
+  and type exclusions, table coverage, digest enforcement and cleanup are untouched.
+* The report now names the dependency: `excluded` carries `objectType`/`objectName`, and `byReason`
+  gains `extension comment`, `schema comment`, `schema acl`.
+
+### 13.4 Verification
+
+| Check | Result |
+|---|---|
+| Owner-shaped archive with an unavailable extension (`/tmp/vault.dump`, 26 TOC entries) | before fix: `restore: FAILED`, exact owner error; after fix: `restore: finished with no errors`, coverage PASS, `Hotel`=1 `Guest`=2, `pgcrypto` and table comments applied, `byReason` `{schema: 4, "schema comment": 1, extension: 1, "extension comment": 1, type: 1}` |
+| 28-table chain archive | unchanged: 0 excluded of 237, checkpoint `saas_current`, 4/4 checks PASS |
+| New unit tests | 11 added to `archive-toc.test.ts` (27 in the file) |
+| New end-to-end test | `restore-rehearsal` against a live disposable server with a `COMMENT ON SCHEMA` entry; fails without the fix, passes with it. Skipped unless `REHEARSAL_TEST_BASE_URL` is set |
+| Full suite | **750 passed, 1 skipped, 50 files**; `eslint` clean; manifest 19/19 |
+
+The owner's archive itself has **not** been restored — its bytes are still not in this environment.
+What changed is that the specific failure it produced has a reproduced cause, a targeted fix and a
+regression test that fails on the old code.
+
+---
+
+## 14. History of this record
 
 * **Before 2026-10-30 — preparation only.** No `psql`, `postgres`, `initdb`, Docker or Podman
   existed in the sandbox, so the documented procedure was written but not executed, and the status
@@ -631,6 +714,13 @@ Supabase-shaped archive, including its failure mode.
   `--profile`/`--exclude-schema` and a full table-coverage check were added and verified against a
   Supabase-shaped fixture and the 28-table chain archive (§12). The genuine restore remains blocked on
   the missing archive bytes.
+
+* **2026-10-30 — the first genuine rehearsal failed, and the cause was fixed.** The `plain` profile
+  excluded `EXTENSION - supabase_vault` but not `COMMENT - EXTENSION supabase_vault`, so `pg_restore`
+  tried to comment on an extension it had deliberately not created. The filter is now
+  dependency-aware for extension and schema comments/ACLs (§13), proved by a reproduction of the
+  owner's exact error and a regression test that fails on the old code. The genuine archive is still
+  un-restored here.
 
 The earlier record's inventory of "untracked proposals" is obsolete: all 19 migrations are tracked
 and checksum-pinned, and the stale `PROPOSAL ONLY` header was removed from

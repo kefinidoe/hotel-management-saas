@@ -1,4 +1,9 @@
 import { describe, it, expect } from "vitest";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import {
   APPLICATION_SCHEMA,
@@ -190,4 +195,303 @@ describe("buildFilteredToc", () => {
     const lines = unfiltered.text.split("\n");
     expect(lines.filter((line) => line.startsWith(";"))).toEqual(parsed.header);
   });
+});
+
+/**
+ * Records from the first genuine rehearsal of the owner's backup, which aborted
+ * with:
+ *
+ *   pg_restore: error: could not execute query: ERROR:
+ *     extension "supabase_vault" does not exist
+ *   Command was: COMMENT ON EXTENSION supabase_vault IS 'Supabase Vault extension';
+ *
+ * The extension entry was commented out by the `plain` profile, but the comment
+ * entry that depends on it was not: positionally, `COMMENT - EXTENSION
+ * supabase_vault` reads as `{ type: "COMMENT", name: "EXTENSION", owner:
+ * "supabase_vault" }`, so nothing in the filter matched it. The TOC below is the
+ * shape `pg_dump -Fc` actually emits for that case, reproduced on PostgreSQL 17.11
+ * with a stand-in `supabase_vault` extension.
+ */
+const SUPABASE_TOC = `;
+; Archive created at 2026-10-30 14:03:43 UTC
+;     dbname: postgres
+;     TOC Entries: 26
+;     Dump Version: 1.16-0
+;     Format: CUSTOM
+;
+; Selected TOC Entries:
+;
+8; 2615 16418 SCHEMA - auth postgres
+2625; 0 0 COMMENT - SCHEMA auth postgres
+3310; 0 0 ACL - SCHEMA auth postgres
+2; 3079 16450 EXTENSION - supabase_vault
+2626; 0 0 COMMENT - EXTENSION supabase_vault
+3; 3079 16461 EXTENSION - pgcrypto
+2627; 0 0 COMMENT - EXTENSION pgcrypto
+4; 3079 16462 EXTENSION - "uuid-ossp"
+2628; 0 0 COMMENT - EXTENSION "uuid-ossp"
+221; 1259 16419 TABLE auth users postgres
+223; 1259 16428 TABLE public "Hotel" postgres
+2629; 0 0 COMMENT public TABLE "Hotel" postgres
+224; 1259 16436 TABLE public "Guest" postgres
+2614; 0 16419 TABLE DATA auth users postgres
+2616; 0 16428 TABLE DATA public "Hotel" postgres
+2618; 0 16437 TABLE DATA public "Guest" postgres
+2462; 2606 16435 CONSTRAINT public "Hotel" "Hotel_pkey" postgres
+2613; 6104 16498 PUBLICATION - supabase_realtime postgres
+`;
+
+const supabaseFiltered = buildFilteredToc(parseToc(SUPABASE_TOC), {
+  excludeSchemas: ["auth"],
+  excludeExtensions: ["supabase_vault", "uuid-ossp"],
+  excludeTypes: ["PUBLICATION"],
+});
+
+const liveLines = (text: string) => text.split("\n").filter((line) => line.trim() && !line.startsWith(";"));
+
+describe("dependency-aware filtering (the genuine-rehearsal failure)", () => {
+  it("parses a comment on an extension as a dependent object", () => {
+    const entry = parseToc(SUPABASE_TOC).entries.find((candidate) => candidate.raw.includes("COMMENT - EXTENSION supabase_vault"));
+    expect(entry).toMatchObject({ type: "COMMENT", objectType: "EXTENSION", objectName: "supabase_vault" });
+    // Still readable positionally, which is why type/name matching missed it.
+    expect(entry).toMatchObject({ schema: null, name: "EXTENSION", owner: "supabase_vault" });
+  });
+
+  it("parses a comment and an ACL on a schema as dependent objects", () => {
+    const comment = parseToc(SUPABASE_TOC).entries.find((entry) => entry.raw.includes("COMMENT - SCHEMA auth"));
+    const acl = parseToc(SUPABASE_TOC).entries.find((entry) => entry.raw.includes("ACL - SCHEMA auth"));
+    expect(comment).toMatchObject({ objectType: "SCHEMA", objectName: "auth" });
+    expect(acl).toMatchObject({ objectType: "SCHEMA", objectName: "auth" });
+  });
+
+  it("excludes an unavailable extension and its comment together", () => {
+    const lines = supabaseFiltered.text.split("\n");
+    expect(lines).toContain("; 2; 3079 16450 EXTENSION - supabase_vault");
+    expect(lines).toContain("; 2626; 0 0 COMMENT - EXTENSION supabase_vault");
+    // The exact property that failed: nothing executable may reference it.
+    expect(liveLines(supabaseFiltered.text).filter((line) => line.includes("supabase_vault"))).toEqual([]);
+  });
+
+  it("keeps a retained extension's creation and comment entries", () => {
+    const lines = supabaseFiltered.text.split("\n");
+    expect(lines).toContain("3; 3079 16461 EXTENSION - pgcrypto");
+    expect(lines).toContain("2627; 0 0 COMMENT - EXTENSION pgcrypto");
+  });
+
+  it("keeps comments on application objects", () => {
+    expect(liveLines(supabaseFiltered.text)).toContain('2629; 0 0 COMMENT public TABLE "Hotel" postgres');
+  });
+
+  it("excludes a comment and an ACL belonging to an excluded schema", () => {
+    const lines = supabaseFiltered.text.split("\n");
+    expect(lines).toContain("; 2625; 0 0 COMMENT - SCHEMA auth postgres");
+    expect(lines).toContain("; 3310; 0 0 ACL - SCHEMA auth postgres");
+    expect(liveLines(supabaseFiltered.text).filter((line) => line.includes("SCHEMA auth"))).toEqual([]);
+  });
+
+  it("handles quoted extension names", () => {
+    const lines = supabaseFiltered.text.split("\n");
+    expect(lines).toContain('; 4; 3079 16462 EXTENSION - "uuid-ossp"');
+    expect(lines).toContain('; 2628; 0 0 COMMENT - EXTENSION "uuid-ossp"');
+  });
+
+  it("leaves every other extension entry untouched", () => {
+    expect(liveLines(supabaseFiltered.text).filter((line) => line.includes("EXTENSION")).sort()).toEqual([
+      "2627; 0 0 COMMENT - EXTENSION pgcrypto",
+      "3; 3079 16461 EXTENSION - pgcrypto",
+    ]);
+  });
+
+  it("labels the dependency in the report instead of hiding it", () => {
+    const reasons = supabaseFiltered.excluded.map((entry) => `${entry.reason}:${entry.objectName ?? entry.name}`).sort();
+    expect(reasons).toEqual([
+      "extension comment:supabase_vault",
+      "extension comment:uuid-ossp",
+      "extension:supabase_vault",
+      "extension:uuid-ossp",
+      "schema acl:auth",
+      "schema comment:auth",
+      "schema:auth",
+      "schema:users",
+      "schema:users",
+      "type:supabase_realtime",
+    ]);
+  });
+
+  it("writes a use-list whose every live line is restorable", () => {
+    // The generated file is what pg_restore receives, so assert its literal
+    // content: header preserved, excluded entries commented, order unchanged.
+    const expected = [
+      ";",
+      "; Archive created at 2026-10-30 14:03:43 UTC",
+      ";     dbname: postgres",
+      ";     TOC Entries: 26",
+      ";     Dump Version: 1.16-0",
+      ";     Format: CUSTOM",
+      ";",
+      "; Selected TOC Entries:",
+      ";",
+      "; 8; 2615 16418 SCHEMA - auth postgres",
+      "; 2625; 0 0 COMMENT - SCHEMA auth postgres",
+      "; 3310; 0 0 ACL - SCHEMA auth postgres",
+      "; 2; 3079 16450 EXTENSION - supabase_vault",
+      "; 2626; 0 0 COMMENT - EXTENSION supabase_vault",
+      "3; 3079 16461 EXTENSION - pgcrypto",
+      "2627; 0 0 COMMENT - EXTENSION pgcrypto",
+      '; 4; 3079 16462 EXTENSION - "uuid-ossp"',
+      '; 2628; 0 0 COMMENT - EXTENSION "uuid-ossp"',
+      "; 221; 1259 16419 TABLE auth users postgres",
+      '223; 1259 16428 TABLE public "Hotel" postgres',
+      '2629; 0 0 COMMENT public TABLE "Hotel" postgres',
+      '224; 1259 16436 TABLE public "Guest" postgres',
+      "; 2614; 0 16419 TABLE DATA auth users postgres",
+      '2616; 0 16428 TABLE DATA public "Hotel" postgres',
+      '2618; 0 16437 TABLE DATA public "Guest" postgres',
+      '2462; 2606 16435 CONSTRAINT public "Hotel" "Hotel_pkey" postgres',
+      "; 2613; 6104 16498 PUBLICATION - supabase_realtime postgres",
+      "",
+    ].join("\n");
+    expect(supabaseFiltered.text).toBe(expected);
+  });
+
+  it("does not change any entry when no extension or schema is excluded", () => {
+    const unfiltered = buildFilteredToc(parseToc(SUPABASE_TOC));
+    expect(unfiltered.excluded).toEqual([]);
+    expect(unfiltered.text.split("\n").filter((line) => line.startsWith(";"))).toEqual(parseToc(SUPABASE_TOC).header);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// CLI. The parser and filter are libraries; this is the operator-facing entry
+// point, and its two failure modes both look like success if unhandled: no
+// output at all (the module is imported, nothing runs) or a silent exit 0.
+// ---------------------------------------------------------------------------
+const repoRoot = path.resolve(__dirname, "../..");
+const cli = (args: string[]) =>
+  spawnSync(process.execPath, [path.join(repoRoot, "scripts", "archive-toc.mjs"), ...args], { encoding: "utf8" });
+
+const digest = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
+
+const pgRestoreAvailable = spawnSync("pg_restore", ["--version"], { encoding: "utf8" }).status === 0;
+const rehearsalBaseUrl = process.env.REHEARSAL_TEST_BASE_URL;
+
+describe("scripts/archive-toc.mjs — CLI", () => {
+  it("prints usage and exits 0 for --help", () => {
+    const { status, stdout } = cli(["--help"]);
+    expect(status).toBe(0);
+    expect(stdout).toContain("Usage: node scripts/archive-toc.mjs --dump <path>");
+    expect(stdout).toContain("--toc");
+    expect(stdout).toContain("--expect-sha256");
+    expect(stdout).toContain("--json");
+  });
+
+  it("explains the missing --dump instead of doing nothing", () => {
+    const { status, stdout, stderr } = cli([]);
+    expect(status).toBe(2);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("--dump is required");
+    expect(stderr).toContain("Usage:");
+  });
+
+  it("rejects an unknown option", () => {
+    const { status, stderr } = cli(["--nope"]);
+    expect(status).toBe(2);
+    expect(stderr).toContain("Unknown option '--nope'");
+  });
+
+  it("rejects a flag used as a value", () => {
+    const { status, stderr } = cli(["--dump", "--json"]);
+    expect(status).toBe(2);
+    expect(stderr).toContain("--dump requires a value");
+  });
+
+  it("rejects a malformed digest", () => {
+    const { status, stderr } = cli(["--dump", "whatever.dump", "--expect-sha256", "abc"]);
+    expect(status).toBe(2);
+    expect(stderr).toContain("64-character hex digest");
+  });
+
+  it("reports a missing archive and never creates one", () => {
+    const { status, stderr } = cli(["--dump", path.join(tmpdir(), "definitely-not-here.dump")]);
+    expect(status).toBe(1);
+    expect(stderr).toContain("No such archive");
+    expect(stderr).toContain("never creates one");
+  });
+
+  it("refuses a file that is not a custom-format archive", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "archive-toc-cli-"));
+    const file = path.join(dir, "plain.sql");
+    writeFileSync(file, "CREATE TABLE t (id int);\n");
+    const { status, stderr } = cli(["--dump", file]);
+    expect(status).toBe(1);
+    expect(stderr).toContain("Not a PostgreSQL custom-format archive");
+  });
+
+  it("stops on a digest mismatch before parsing anything", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "archive-toc-digest-"));
+    const file = path.join(dir, "looks-custom.dump");
+    writeFileSync(file, Buffer.concat([Buffer.from("PGDMP", "latin1"), Buffer.from("body")]));
+    const { status, stderr } = cli(["--dump", file, "--expect-sha256", "0".repeat(64)]);
+    expect(status).toBe(1);
+    expect(stderr).toContain("does not match the recorded value");
+    // The real digest is reported so the operator can correct the record.
+    expect(stderr).toContain(digest(file));
+  });
+
+  it.skipIf(!pgRestoreAvailable || !rehearsalBaseUrl)(
+    "analyses a real archive and prints the report",
+    () => {
+      const base = (rehearsalBaseUrl as string).replace(/\/+$/, "");
+      const source = `toc_cli_source_${Date.now()}`;
+      const dir = mkdtempSync(path.join(tmpdir(), "archive-toc-cli-real-"));
+      const dump = path.join(dir, "cli.dump");
+      const psql = (args: string[]) => spawnSync("psql", args, { encoding: "utf8" });
+      try {
+        const created = psql(["-d", base, "-q", "-c", `CREATE DATABASE ${source}`]);
+        expect(created.status, created.stderr).toBe(0);
+        const built = psql([
+          "-d",
+          `${base}/${source}`,
+          "-q",
+          "-v",
+          "ON_ERROR_STOP=1",
+          "-c",
+          "CREATE SCHEMA auth",
+          "-c",
+          "CREATE TABLE auth.users (id int primary key)",
+          "-c",
+          'CREATE TABLE public."Hotel" (id int primary key)',
+          "-c",
+          'CREATE TABLE public."Guest" (id int primary key, "hotelId" int references public."Hotel"(id))',
+          "-c",
+          'COMMENT ON TABLE public."Hotel" IS \'kept\'',
+        ]);
+        expect(built.status, built.stderr).toBe(0);
+        const dumped = spawnSync("pg_dump", ["-Fc", "-d", `${base}/${source}`, "-f", dump], { encoding: "utf8" });
+        expect(dumped.status, dumped.stderr).toBe(0);
+
+        const { status, stdout } = cli(["--dump", dump, "--expect-sha256", digest(dump).toUpperCase()]);
+        expect(status).toBe(0);
+        expect(stdout).toContain("Archive analysis (no database is created)");
+        expect(stdout).toContain("Digest verified    : yes");
+        expect(stdout).toContain("Schemas            : auth, public");
+        expect(stdout).toContain("Supabase schemas   : auth");
+        expect(stdout).toContain("Looks like Supabase: yes");
+        expect(stdout).toContain("Application tables : 2 in public (Guest, Hotel)");
+        // `OWNED` is not a schema: `SEQUENCE OWNED BY` must not be parsed as one.
+        expect(stdout).not.toContain("OWNED");
+
+        const json = cli(["--dump", dump, "--json"]);
+        expect(json.status).toBe(0);
+        const report = JSON.parse(json.stdout);
+        expect(report.analysis.entries).toBeGreaterThan(10);
+        expect(report.analysis.applicationTables).toEqual(["Guest", "Hotel"]);
+        expect(report.archive.sha256).toBe(digest(dump));
+      } finally {
+        psql(["-d", base, "-q", "-c", `DROP DATABASE IF EXISTS ${source}`]);
+      }
+    },
+    60_000
+  );
 });
