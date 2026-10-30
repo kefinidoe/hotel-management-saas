@@ -100,7 +100,7 @@ database named `hotel_saas_demo_*` with `SAAS_ENVIRONMENT=local`.
 
 | | Riverside Grand Hotel (Nakuru) | Lakeview Lodge (Naivasha) |
 |---|---|---|
-| Plan | PROFESSIONAL | STARTER |
+| Plan | GROWTH (legacy tier, 50-room band) | STARTER (legacy tier, 15-room band) |
 | Rooms | 8 (Single/Double/Twin × meal plans) | 6 |
 | Staff accounts | 9 — owner, admin, manager, receptionist, accountant, waiter, cashier, housekeeper, technician | 9, different people |
 | Live data | in-house guest with an outstanding balance, arrival today, future booking, cancelled booking, checked-out stay with history | own guests, menu, stock |
