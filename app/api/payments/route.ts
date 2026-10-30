@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { recordAudit } from "@/lib/audit";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { folioTotals, parseMoney, roundMoney } from "@/lib/billing";
 
@@ -235,6 +236,15 @@ export async function POST(req: Request) {
         timeout: 10_000,
       }
     );
+
+    await recordAudit({
+      hotelId,
+      userId: tenant.userId,
+      action: "PAYMENT_RECORDED",
+      entity: "Payment",
+      entityId: result.id,
+      metadata: { folioId: body.folioId, amount: result.paid, reference: body.reference ?? null },
+    });
 
     return NextResponse.json(result, { status: 201 });
   } catch (error) {

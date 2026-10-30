@@ -10,6 +10,7 @@ import {
   round2,
 } from "@/lib/restaurant";
 import { deductRecipeStock } from "@/lib/inventory";
+import { syncLowStockAlerts } from "@/lib/notifications";
 
 type ChargeToRoomResult = {
   operation: "CHARGE_TO_ROOM";
@@ -331,6 +332,8 @@ export async function POST(req: Request) {
         timeout: 15000,
       },
     );
+
+    await syncLowStockAlerts(hotelId);
 
     return NextResponse.json({ ok: true, ...result }, { status: 201 });
   } catch (error) {
