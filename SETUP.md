@@ -73,7 +73,8 @@ There are 19 reviewed migrations, checksum-pinned in `prisma/migration-release-m
     npm run migration:adopt
   ```
   The full runbook is `docs/migration-strategy.md`; the rehearsal evidence is
-  `docs/saas-migration-rehearsal.md`. A rehearsal needs an explicitly approved, disposable local
+  `docs/saas-migration-rehearsal.md`; restoring the owner's Supabase backup is
+  `docs/rehearsal-supabase-archive.md`. A rehearsal needs an explicitly approved, disposable local
   target (`npm run migration:rehearse`, loopback only).
 - **Against the real Prisma migration engine:** `npm run migration:verify-engine` deploys,
   baselines, detects drift and recovers using Prisma's own migrate implementation. It needs a

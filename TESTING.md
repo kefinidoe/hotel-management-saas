@@ -2,7 +2,7 @@
 
 > ## Current verification status (2026-10-30)
 >
-> The latest full Vitest run passed **719/719 tests across 49 files**, and `npm run lint` passed.
+> The latest full Vitest run passed **739/739 tests across 50 files**, and `npm run lint` passed.
 > `npx tsc --noEmit` currently reports 296 diagnostics, all of them consequences of the Prisma
 > client not being generated in this sandbox (77 missing `@prisma/client` exports plus cascading
 > inference errors); none are in the migration, adoption or rehearsal code. Prisma generation,
@@ -23,7 +23,7 @@
 > above; production readiness is not claimed.
 
 ## Overview
-The current suite has **719 tests in 49 files**. It is green as a test suite, but mocked and
+The current suite has **739 tests in 50 files**. It is green as a test suite, but mocked and
 placeholder cases have limited reach. Relevant tenant and schema test groups include:
 
 | Suite | Tests | What it checks |
@@ -41,7 +41,8 @@ placeholder cases have limited reach. Relevant tenant and schema test groups inc
 | `scripts/database-target-safety.test.ts` | 4 | Identifier validation and wiring for standalone backup/restore target checks |
 | `scripts/migration-readiness.test.ts` | 9 | The three prerequisites are reported individually with the PASS / BLOCKED / FAIL vocabulary; approval is always PENDING APPROVAL; decision is the worst prerequisite |
 | `scripts/prisma-engine-pin.test.ts` | 16 | Pinned Prisma 5.17.0 digests and commit: parser, match/mismatch/missing paths, and the `verify-pin` CLI refusals |
-| `scripts/migration-evidence-tools.test.ts` | 16 | CLI-level refusals for `target-check.mjs` (no write path, target binding, pooler port) and `restore-rehearsal.mjs` (digest, missing archive, corrupt archive preflight, shared host, reserved names) — no database needed; the corrupt-archive case skips when `psql`/`pg_restore` are not installed |
+| `scripts/archive-toc.test.ts` | 16 | The `pg_restore --list` parser and the `--use-list` filter: Supabase-schema detection, extension/type exclusion, and the `SCHEMA`-name regression that let `auth` survive filtering (pure, no database) |
+| `scripts/migration-evidence-tools.test.ts` | 20 | CLI-level refusals for `target-check.mjs` (no write path, target binding, pooler port) and `restore-rehearsal.mjs` (digest, missing archive, corrupt archive preflight, shared host, reserved names, unknown `--profile`, `--exclude-schema public`, plain-SQL `--toc`) — no database needed; the two archive-reading cases skip when `psql`/`pg_restore` are not installed |
 | `safety/offline-auth-routes.test.ts` | 3 | Offline 503 responses without importing Prisma-backed auth modules |
 
 Browser E2E, backup/restore against the real target, cleanup and seed against a real database were
@@ -226,8 +227,8 @@ npm run test:coverage
 Latest full run on the worktree:
 
 ```
-Test Files  49 passed (49)
-     Tests  719 passed (719)
+Test Files  50 passed (50)
+     Tests  739 passed (739)
 ```
 
 The PGlite schema/migration tests create disposable in-memory databases and close them after

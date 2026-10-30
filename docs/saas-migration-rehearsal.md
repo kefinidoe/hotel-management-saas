@@ -452,7 +452,7 @@ decision is FAIL, not BLOCKED, because that is a check that ran and failed.
 | `migration:target-check` on the ledgerless full-schema copy | **PASS** — fingerprint `cd13215577c5b085e071c9a131c30790`, ledger ABSENT, checkpoint `saas_current` |
 | `migration:readiness` (with archive + credentials, `--check-target`) | archive PASS, credentials PASS, engine BLOCKED, decision BLOCKED |
 | Prisma 5.17.0 schema validation (`@prisma/internals@5.17.0` WASM parser) | **28 models, 19 enums, datasource postgresql, 0 P1012 errors** ([migration-strategy §7.5](migration-strategy.md)) |
-| `vitest run` | **718/718 in 49 files** |
+| `vitest run` | **739/739 in 50 files** (§12 run) |
 | `eslint` | clean |
 | `migration:manifest` | 19/19 files match |
 | `prisma validate` / `prisma generate` | blocked — fetch `libquery_engine…sha256` from `binaries.prisma.sh` (§7.1.1) |
@@ -525,9 +525,79 @@ npm run migration:restore-rehearsal -- \
 cleanup) without committing anything. The archive itself stays outside the repository; `*.dump` is
 ignored, so it cannot be committed by accident.
 
+Add `--toc` to step 1 for a side-effect-free description of the archive's contents (schemas, extension
+list, application-table count), and read
+[rehearsal-supabase-archive.md](rehearsal-supabase-archive.md) before running step 2 — the owner's
+archive is a Supabase dump, so step 2 must choose a restore profile (§12).
+
 ---
 
-## 12. History of this record
+## 12. Supabase archives and restore filtering (2026-10-30, later pass)
+
+### 12.1 The problem the previous procedure would have hit
+
+The previous rounds rehearsed with archives produced by `scripts/backup-db.mjs` from a plain
+PostgreSQL database. The owner's archive is not that: it comes from a Supabase project, so its table of
+contents also carries `auth`, `storage`, `realtime`, `vault`, `graphql`, `supabase_migrations`, `net`
+and `cron` schemas, a `supabase_realtime` publication, event triggers, and `CREATE EXTENSION` calls for
+extensions only a Supabase stack ships.
+
+Restoring that wholesale into a stock PostgreSQL server does not fail cleanly. It fails *partway*, and
+the failure mode that matters is the quiet one: `public` is populated, the platform objects are
+missing, and a rehearsal that only checks the exit code can be misread as a pass.
+
+### 12.2 What was built
+
+| Piece | Purpose |
+|---|---|
+| `scripts/archive-toc.mjs` (new) | Pure parser/analyser for `pg_restore --list` output, plus the `--use-list` builder |
+| `--toc` on `restore-rehearsal` | Analyse the archive and exit; no database is created, nothing connects |
+| `--profile auto\|plain\|supabase` | Choose how much of the archive to attempt: `plain` keeps the application schema, `supabase` assumes a local Supabase stack, `auto` decides from the archive plus whether the target has the `supabase_admin` role |
+| `--exclude-schema` | Add schemas to skip; refuses to drop `public` |
+| `--use-list` restore | The filtered TOC is written to a temp file, passed to `pg_restore`, and removed on both exit paths |
+| Full table coverage check | Every `public` table in the archive must exist in the restored copy; `missingTables`/`extraTables` are reported per table |
+
+Filtering decisions are recorded in the report under `restore.filter` (profile, kept/excluded counts,
+a by-reason breakdown, and the exact schema/extension/type lists), so a filtered run states what it did
+not restore instead of hiding it.
+
+### 12.3 Verified on a disposable PostgreSQL 17.11 server
+
+Two archives were rehearsed on a loopback server in this environment (`127.0.0.1:55432`):
+
+| Run | Archive | Result |
+|---|---|---|
+| Supabase-shaped fixture | 6,107 B, SHA-256 `b2e6b0ac…f7e06`, containing `auth`/`extensions`/`supabase_migrations` schemas, `pgcrypto`, publication `supabase_realtime`, `public.Hotel` (1 row) and `public.Guest` (2 rows) | `--toc` reported 19 entries, 3 schemas, `Looks like Supabase: yes`. Restore chose profile `plain`, kept 10 of 19 TOC entries (skipped 9: schema 8, type 1). No restore errors; `public` held exactly 2 tables with `Hotel=1`, `Guest=2`; coverage PASS; only the checkpoint check failed, correctly, because the fixture matches no approved checkpoint — exit 1 |
+| 28-table chain | Built from all 19 migrations, `pg_dump -Fc`, SHA-256 `8c721ed7…d079` | Profile `plain`, **0 excluded, 237 of 237 TOC entries kept** — filtering is a no-op for a non-Supabase archive — 28 tables, checkpoint `saas_current`, all four checks PASS, exit 0, scratch database dropped |
+
+Two defects were found and fixed while doing this:
+
+* **The schema survived its own exclusion.** `SCHEMA` entries carry the schema name in the *name*
+  field (`SCHEMA - auth supabase_admin`), not in `schema`. The first filtered run therefore still
+  created `auth` and `supabase_migrations` and failed on their first object. Fixed in
+  `archive-toc.mjs`; the case is now a regression test.
+* **Excluding `extensions` breaks the restore.** Supabase installs its extensions into that schema, so
+  `CREATE EXTENSION ... SCHEMA extensions` fails when the schema is filtered out. `extensions` is now
+  always kept; the *extensions* themselves are kept only when `pg_available_extensions` says the
+  target can install them.
+* Also hardened: `--toc` on a plain SQL archive now refuses with a clear message instead of throwing
+  (`a plain SQL archive has no table of contents`), and `--exclude-schema public` is rejected.
+
+### 12.4 Windows runbook for the owner's archive
+
+[rehearsal-supabase-archive.md](rehearsal-supabase-archive.md) is the step-by-step procedure:
+digest verification with `Get-FileHash`, the `--toc` analysis, the two target choices (local Supabase
+stack with Docker, or stock PostgreSQL 17 with `--profile plain`), the rehearsal command, how to read
+each check, cleanup verification, and a failure playbook. It scripts exactly what is blocked here,
+because the archive bytes are still absent from this environment.
+
+The restoration prerequisite therefore stays **BLOCKED**, and no readiness claim is made. What changed
+is that the command an operator will run is now the command that has been rehearsed — against a
+Supabase-shaped archive, including its failure mode.
+
+---
+
+## 13. History of this record
 
 * **Before 2026-10-30 — preparation only.** No `psql`, `postgres`, `initdb`, Docker or Podman
   existed in the sandbox, so the documented procedure was written but not executed, and the status
@@ -555,6 +625,12 @@ ignored, so it cannot be committed by accident.
   read-only before reporting. Both were exercised end to end on local PostgreSQL 17.11 (14 runs,
   including the refusal paths and a tampered-ledger detection). The owner's archive, the target
   credentials and a reachable 5.17.0 engine are still absent; §10 records exactly what each is.
+
+* **2026-10-30 — Supabase archive filtering.** The owner's archive is a Supabase dump; a wholesale
+  restore fails partway and can look successful. `scripts/archive-toc.mjs`, `--toc`,
+  `--profile`/`--exclude-schema` and a full table-coverage check were added and verified against a
+  Supabase-shaped fixture and the 28-table chain archive (§12). The genuine restore remains blocked on
+  the missing archive bytes.
 
 The earlier record's inventory of "untracked proposals" is obsolete: all 19 migrations are tracked
 and checksum-pinned, and the stale `PROPOSAL ONLY` header was removed from
