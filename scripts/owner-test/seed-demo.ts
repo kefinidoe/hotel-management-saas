@@ -28,6 +28,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generatePassword } from "../../lib/password";
 import { assertLocalDemoSeedTarget } from "../local-demo-seed-safety";
+import { SUBSCRIPTION_PLANS } from "../../lib/plans";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const prisma = new PrismaClient();
@@ -63,6 +64,15 @@ const CREDENTIALS: Array<{
 async function main() {
   assertLocalDemoSeedTarget();
 
+  // An unknown plan id is not a cosmetic problem: every entitlement check fails
+  // closed with SUBSCRIPTION_STATUS_UNAVAILABLE and the dashboard bounces to the
+  // subscription page, so the demo would be unusable. Fail here instead.
+  for (const planId of ["GROWTH", "STARTER"]) {
+    if (!SUBSCRIPTION_PLANS[planId]) {
+      throw new Error(`Demo seed uses plan "${planId}", which is not in lib/plans.ts.`);
+    }
+  }
+
   const passwordHash = await bcrypt.hash(PASSWORD, 10);
   const platformAdmin = await prisma.user.upsert({
     where: { email: "platform@demo.test" },
@@ -88,7 +98,7 @@ async function main() {
     email: "frontdesk@riverside-grand.demo",
     phone: "+254 700 000 101",
     address: "Kenyatta Avenue, Nakuru",
-    planId: "PROFESSIONAL",
+    planId: "GROWTH",
     roomRates: { single: 6500, double: 9500, twin: 9000 },
     rooms: [
       ["101", "1", "Single"],
@@ -270,7 +280,11 @@ async function seedHotel(spec: HotelSpec) {
       trialEndsAt: daysFromToday(-31),
       currentPeriodStartsAt: daysFromToday(-15),
       currentPeriodEndsAt: daysFromToday(15),
-      amount: spec.planId === "PROFESSIONAL" ? 9500 : 4500,
+      // Plan ids must exist in lib/plans.ts (STARTER, GROWTH, ENTERPRISE,
+      // LEGACY_BASIC); an unknown id makes every entitlement check fail closed
+      // with SUBSCRIPTION_STATUS_UNAVAILABLE and bounces the dashboard to the
+      // subscription page.
+      amount: spec.planId === "GROWTH" ? 9500 : 4500,
       currency: "KES",
       billingInterval: "MONTHLY",
     },
