@@ -1,31 +1,30 @@
 # HMS Testing Documentation
 
-> ## Current verification status (2026-10-27)
+> ## Current verification status (2026-10-30)
 >
-> The full Vitest run on the current worktree passed **540/540 tests across 39 files**.
-> `npm run lint` passed, and `git diff --check` passed. The suite includes mocked route and
-> tenant-isolation tests plus disposable in-memory PGlite migration/schema tests; it does not
-> connect to any configured PostgreSQL/Supabase database or verify a deployed migration history.
+> The latest full Vitest run passed **647/647 tests across 45 files**. `npm run lint`,
+> `npx tsc --noEmit`, Prisma Client generation, Prisma schema validation, and the Next.js
+> production build also passed. The test suite uses mocks and disposable in-memory PGlite
+> databases; it does not verify a deployed migration history or substitute for a real
+> PostgreSQL rehearsal.
 >
 > **73 tests remain illustrative placeholders**: 36 in `workflows/guest-lifecycle.test.ts` and
 > 37 in `utilities/helpers.test.ts`. Their passing result is not evidence that the complete
 > guest lifecycle or those utility functions work end-to-end.
 >
-> `npx tsc --noEmit` and the production build remain blocked because Prisma Client is not
-> generated in this workspace. Dependencies were installed with lifecycle scripts disabled,
-> and Prisma engine binaries are absent. Do not download engines or generate/apply against a
-> database as a workaround. The live preview verified `/login` and `/register` render, but
-> database-backed route execution is unavailable until a safe client-generation path exists.
+> Tooling checks/builds used only dummy URLs at `127.0.0.1:1`; no database was contacted and
+> no migration, seed, restore, reset, or database write was run. Vite emits an existing,
+> non-blocking config-loader warning during tests.
 
 ## Overview
-The current suite has **540 tests in 39 files**. It is green as a test suite, but mocked and
+The current suite has **647 tests in 45 files**. It is green as a test suite, but mocked and
 placeholder cases have limited reach. Relevant tenant and schema test groups include:
 
 | Suite | Tests | What it checks |
 |---|---:|---|
-| `schema/migrations.test.ts` | 5 | Migration chain and legacy conversion using disposable PGlite instances |
+| `schema/migrations.test.ts` | 7 | Migration chain, legacy conversion, and proposal checks using disposable PGlite instances |
 | `schema/multi-tenant-schema.test.ts` | 9 | Tenant-scoped schema constraints |
-| `schema/cross-tenant-integrity.test.ts` | 21 | Cross-tenant foreign-key and integrity rules |
+| `schema/cross-tenant-integrity.test.ts` | 24 | Cross-tenant foreign-key and integrity rules |
 | `tenant-isolation/affected-routes.test.ts` | 29 | Tenant isolation across route handlers with mocks |
 | `platform/platform-administration.test.ts` | 23 | Platform administration behavior with in-memory mocks |
 | `auth/tenant-auth.test.ts` | 19 | Tenant selection, role authorization, and hotel switching |
@@ -54,7 +53,7 @@ __tests__/
 │   ├── seed.test.ts                   # REAL: runs prisma/seed.ts (8 tests)
 │   └── cleanup-guard.test.ts          # REAL: destructive-cleanup rules (24 tests)
 ├── schema/
-│   └── migrations.test.ts             # REAL: migrations vs Postgres vs schema.prisma (4 tests)
+│   └── migrations.test.ts             # REAL: migration/schema checks in PGlite (7 tests)
 ├── middleware/
 │   └── matcher.test.ts                # REAL: verifies middleware.ts matcher (4 tests)
 ├── rooms/
@@ -212,8 +211,8 @@ npm run test:coverage
 Latest full run on the worktree:
 
 ```
-Test Files  39 passed (39)
-     Tests  540 passed (540)
+Test Files  45 passed (45)
+     Tests  647 passed (647)
 ```
 
 The PGlite schema/migration tests create disposable in-memory databases and close them after
@@ -235,18 +234,14 @@ compatibility, or establish whether an older migration has already been applied 
 - Middleware matcher tests check route matching, not a full browser session or live middleware
   behavior.
 
-### Checks not completed
+### Checks and limits
 
-- TypeScript and production build: blocked by missing generated Prisma Client. `npm ci --ignore-scripts`
-  intentionally skipped Prisma generation; the Prisma engine binaries are absent. An earlier
-  engine download failed, and no retry was made.
-- Browser E2E: no automated browser runner was available. The live dev preview returned 200 for
-  `/login` and `/register`, redirected `/` to login and unauthenticated `/dashboard` to login.
-  API route execution returned 500 because the generated Prisma Client module is missing; this
-  is an environment limitation, not evidence about a configured database.
-- External PostgreSQL/Supabase, migration application/history, and backup/restore drills: not run
-  because the target database identity and history are unverified and no DB operations are
-  authorized.
+- Prisma 5.17.0 client generation and schema validation passed with the pinned Linux engines.
+- Full TypeScript, lint, and production build checks passed.
+- Browser E2E was not run. PostgreSQL/Supabase migration application/history and backup/restore
+  rehearsals were not run; no database was contacted.
+- The PGlite migration runner checks SQL behavior on fresh disposable in-memory databases only.
+  It does not validate the target's migration ledger/checksums or Prisma deploy recovery semantics.
 
 Before any non-test database operation, independently verify the exact project/host, the
 `_prisma_migrations` history and checksums, and that the target is an approved isolated SaaS

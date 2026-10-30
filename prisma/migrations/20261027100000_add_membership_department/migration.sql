@@ -1,4 +1,4 @@
--- PROPOSAL ONLY — untracked migration draft; not applied or approved for deployment.
+-- PROPOSAL ONLY — tracked draft; not applied or approved for deployment.
 -- Department is hotel-specific staff metadata, not a global user profile field.
 -- Add it as nullable; keep User.department for compatibility during transition.
 ALTER TABLE "HotelMembership" ADD COLUMN "department" TEXT;
