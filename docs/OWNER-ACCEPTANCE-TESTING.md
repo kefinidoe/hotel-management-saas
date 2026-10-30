@@ -81,7 +81,9 @@ working.
 The demo owner accounts belong to one hotel each. To test switching *within one account*, accept an
 invitation: see §5, which invites `receptionist@riverside-grand.demo` into Lakeview as well.
 
-To see the platform console, sign in as `platform@demo.test` and open the shield icon in the top bar.
+To see the platform console, sign in as `platform@demo.test` and open the shield icon in the top bar. The
+console lists a third hotel, **Legacy Hotel** — it is a fixture created by a database migration with no
+staff and no data. Ignore it; it is not one of your test hotels.
 
 ---
 
