@@ -204,7 +204,7 @@ describe("core frontend API integrations", () => {
     expect((await screen.findByRole("alert")).textContent).toContain("Room type not found.");
     expect(fetchMock).toHaveBeenCalledWith("/api/room-types/type-a", expect.objectContaining({
       method: "PUT",
-      body: JSON.stringify({ name: "Standard Plus", baseRate: 5000, capacity: 2 }),
+      body: JSON.stringify({ name: "Standard Plus", baseRate: 5000, capacity: 2, mealPlan: "BED_ONLY" }),
     }));
   });
 

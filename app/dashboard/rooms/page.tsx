@@ -36,6 +36,7 @@ export default async function RoomsPage() {
     description: rt.description,
     baseRate: Number(rt.baseRate),
     capacity: rt.capacity,
+    mealPlan: rt.mealPlan,
   }));
 
   return (
