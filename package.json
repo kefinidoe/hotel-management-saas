@@ -21,6 +21,7 @@
     "migration:checkpoints": "node scripts/migration-ledger.mjs checkpoints",
     "migration:adopt": "node scripts/migrate-adopt.mjs",
     "migration:rehearse": "node scripts/migration-rehearsal.mjs",
+    "migration:verify-engine": "node scripts/prisma-engine-verify.mjs",
     "db:clean": "tsx scripts/clean-test-data.ts",
     "reset-password": "tsx scripts/reset-password.ts",
     "backup": "node scripts/backup-db.mjs",

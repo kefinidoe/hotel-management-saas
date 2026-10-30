@@ -75,6 +75,10 @@ There are 19 reviewed migrations, checksum-pinned in `prisma/migration-release-m
   The full runbook is `docs/migration-strategy.md`; the rehearsal evidence is
   `docs/saas-migration-rehearsal.md`. A rehearsal needs an explicitly approved, disposable local
   target (`npm run migration:rehearse`, loopback only).
+- **Against the real Prisma migration engine:** `npm run migration:verify-engine` deploys,
+  baselines, detects drift and recovers using Prisma's own migrate implementation. It needs a
+  verification-only tool stack outside the repository (`docs/migration-strategy.md` §7.2) and a
+  disposable PostgreSQL server; it never touches the app's pinned `prisma@5.17.0` dependency.
 
 Never run `migrate dev`, `db push`, `migrate resolve`, or reset against Supabase or any
 populated/shared database.

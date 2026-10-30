@@ -228,8 +228,15 @@ The PGlite schema/migration tests create disposable in-memory databases and clos
 use. They exercise the current migration files from a fresh schema and representative legacy
 fixtures; they do not connect to an external database. The separate PostgreSQL rehearsal
 (`REHEARSAL_BASE_URL=postgresql://postgres@127.0.0.1:<port> npm run migration:rehearse`) covers a
-real server of the target major version and the ledgerless-adoption paths, but still not
-`prisma migrate deploy` itself.
+real server of the target major version and the ledgerless-adoption paths.
+
+Beyond those two layers, `npm run migration:verify-engine` drives Prisma's own migrate implementation
+(`@prisma/migrate` + the official WebAssembly schema engine) against disposable PostgreSQL 17.11
+databases: 6 scenarios, 37 assertions covering deploy, `migrate resolve --applied`,
+`migrate resolve --rolled-back`, drift detection and adoption-tool interop. It runs out of process
+with a verification-only tool stack and is not part of the vitest suite; see
+[docs/migration-strategy.md §7](docs/migration-strategy.md). The pinned 5.17.0 engine and the real
+Supabase target are still not exercised by any of these layers.
 
 ### Coverage notes
 
@@ -249,8 +256,10 @@ real server of the target major version and the ledgerless-adoption paths, but s
 
 - Prisma 5.17.0 client generation and schema validation passed with the pinned Linux engines.
 - Full TypeScript, lint, and production build checks passed.
-- Browser E2E was not run. PostgreSQL/Supabase migration application/history and backup/restore
-  rehearsals were not run; no database was contacted.
+- Browser E2E was not run. Migration rehearsals did run, but only against disposable local
+  PostgreSQL 17.11 databases: the 8-scenario psql rehearsal, the 6-scenario real-engine run, and a
+  backup/restore cycle on a synthetic archive. No Supabase or shared database was contacted, the
+  live target's checkpoint has not been observed, and the owner's archive has not been restored.
 - The PGlite migration runner checks SQL behavior on fresh disposable in-memory databases only.
   It does not validate the target's migration ledger/checksums or Prisma deploy recovery semantics.
 

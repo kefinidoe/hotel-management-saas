@@ -1,8 +1,9 @@
 # Database migration strategy (decision record)
 
-**Status: adopted 2026-10-30. Rehearsed against PostgreSQL 17.11 (fresh + upgrade paths, 7 scenarios).**
+**Status: adopted 2026-10-30. Rehearsed against PostgreSQL 17.11 (8 psql scenarios) and executed by the
+real Prisma migration engine (6 scenarios, 37 assertions).**
 **Still required before touching the deployed database:** owner approval, a verified backup of the
-target, and the remaining gate in [§7](#7-what-is-still-unproven).**
+target, and the remaining gates in [§8](#8-what-is-still-unproven).**
 
 This document is the authoritative answer to three questions that blocked the SaaS release:
 
@@ -345,29 +346,136 @@ Results, versions and the exact commands are recorded in
 
 ---
 
-## 7. What is still unproven
+## 7. Engine verification (real Prisma migration engine)
 
-Be explicit about this; do not let the rehearsal evidence imply more than it shows.
+§6 proves the SQL, the ledger shape, the ordering and the checkpoints with `psql`. It cannot prove what
+Prisma's own runner does with the same files: which ledger rows it writes, which checksum it records,
+what it does with a baseline, and what a failed migration leaves behind.
 
-1. **Real `prisma migrate deploy` has not executed anywhere in this work.** The pinned Prisma 5.17.0
-   schema engine is downloaded from `binaries.prisma.sh`, which this environment cannot reach, and
-   the client cannot be generated without it. The SQL, the ledger rows and the deploy ordering are
-   proven on PostgreSQL 17.11; Prisma's own runner is not. Run §4.2–4.6 on a machine with the
-   pinned engines, against a **restored copy** first, before the production target.
-2. **The deployed database's checkpoint is inferred, not observed.** Nobody has run the checkpoints
-   against the live target in this session. §4.2 is read-only and settles it.
-3. **Backup/restore of the target is unverified.** The archive evidence in
-   [saas-migration-rehearsal.md](saas-migration-rehearsal.md) establishes that a dump exists and what
-   its header says; it does not establish that it restores cleanly, nor its scope.
-4. **Prisma's per-migration transaction atomicity** could not be demonstrated (see 1). The
-   migrations are written to be re-runnable so that either behaviour converges, and the
-   `partial-rerun` scenario checks the re-runnable property itself.
+`scripts/prisma-engine-verify.mjs` closes that gap. It drives the command implementations behind
+`prisma migrate deploy`, `prisma migrate resolve --applied`, `migrate resolve --rolled-back` and
+`migrate status` (`@prisma/migrate`) against the official Schema Engine compiled to WebAssembly, and
+asserts on the resulting ledger, schema fingerprint and adoption-tool interop.
+
+### 7.1 Which engine, and why it is not 5.17.0
+
+The application stays pinned to `prisma@5.17.0`; the verification tool stack is separate. That
+version distinction is deliberate and has a hard cause:
+
+| Attempt to get a 5.17.0 engine | Result |
+|---|---|
+| `binaries.prisma.sh` (the only official distribution host) | unreachable from this environment (TLS reset); `@prisma/engines@5.17.0` on npm is 24 KB of postinstall scripts, no binaries |
+| `@prisma/schema-engine-wasm` 5.x | does not exist — the package starts at 6.10.0, so a 5.17 CLI has no WebAssembly engine to load |
+| any bundled engine in the 5.x npm tarballs (`prisma`, `@prisma/migrate`, `@prisma/client`) | none contain `schema-engine`/`libquery_engine` binaries |
+| PyPI / GitHub mirrors of the 5.17.0 artifact | no package or mirror publishes it under a reachable host |
+
+Prisma 6.19.0 ships the same Rust schema engine inside the npm package
+(`prisma/build/schema_engine_bg.wasm`, SHA-256 `febbb50ef48a4e577b6d3652841166fac47eb129e63f727f9c9401f3d4b84bf1`,
+byte-identical to `@prisma/schema-engine-wasm@6.19.0-26.2ba551f…`), and `@prisma/migrate@6.19.0` issues
+the same engine commands as 5.17.0 (`applyMigrations`, `markMigrationApplied`,
+`markMigrationRolledBack`, `diagnoseMigrationHistory`). So the migration files, the ledger rows, the
+SHA-256 checksums, the ordering, the baseline semantics and the drift detection are exercised by real
+Prisma code — one engine generation removed from the pinned release.
+
+**The 5.17.0 binary itself is still unexercised.** When it is available, the remaining gap closes with:
+
+```bash
+PRISMA_SCHEMA_ENGINE_BINARY=/path/to/schema-engine-debian-openssl-3.0.x \
+PRISMA_QUERY_ENGINE_LIBRARY=/path/to/libquery_engine-debian-openssl-3.0.x.so.node \
+npx prisma migrate deploy --schema prisma/schema.prisma   # against a restored copy, never the target first
+```
+
+### 7.2 Setting up the verification environment
+
+The tool stack is installed outside the repository so the pinned `prisma@5.17.0` dependency and
+`package-lock.json` stay untouched:
+
+```bash
+mkdir -p /tmp/prisma-engine-verify && cd /tmp/prisma-engine-verify
+npm init -y
+npm install --ignore-scripts prisma@6.19.0 @prisma/migrate@6.19.0 @prisma/internals@6.19.0 \
+  @prisma/adapter-pg@7.10.1 @prisma/driver-adapter-utils@6.19.0 pg@8.13.1
+```
+
+Then, against a disposable PostgreSQL server:
+
+```bash
+VERIFY_BASE_URL=postgresql://postgres@127.0.0.1:55432 \
+VERIFY_MODULES=/tmp/prisma-engine-verify/node_modules \
+VERIFY_PSQL=/path/to/pg17/bin/psql \
+npm run migration:verify-engine            # or: node scripts/prisma-engine-verify.mjs all
+```
+
+The harness creates and drops its own `prisma_engine_verify_*` databases (`VERIFY_KEEP=1` keeps them).
+
+### 7.3 Two deviations, both deliberate and documented
+
+| Deviation | Why | Effect on the evidence |
+|---|---|---|
+| `@prisma/adapter-pg@7.10.1` instead of `6.19.x` | 6.19.x throws `Unsupported column type 'name'` (OID 19) while the engine initialises the ledger, so no migration could run at all. 7.10.1 adds the missing OID mapping; the driver-adapter protocol is unchanged | none for the ledger; it only makes PostgreSQL's `information_schema` queries readable |
+| `executeScript` sends the whole migration script as one multi-statement query | `adapter-pg` implements `executeScript` as `script.split(";")`, which corrupts any migration whose comments or literals contain a semicolon (`20261001120000_add_wastage_accountability` does). The engine hands the adapter the complete script in one call, and the native engine's `raw_cmd` also sends it in one call | the engine executes the migration file bytes verbatim — asserted per file in the `fresh` scenario |
+
+`@prisma/internals` also expects the WASM engine at `@prisma/internals/build/schema_engine_bg.wasm`,
+which the published tarball omits; the harness copies the byte-identical file into place and refuses
+to run if the copies disagree.
+
+### 7.4 Results (PostgreSQL 17.11, `@prisma/migrate` 6.19.0, WASM schema engine)
+
+| Scenario | Proves | Assertions |
+|---|---|---|
+| `fresh` | The engine applies all 19 files verbatim, in directory order, and writes 19 finished ledger rows whose checksums equal `prisma/migration-release-manifest.json`; `applied_steps_count` is recorded; the fingerprint is `saas_current`; **the ledger DDL the engine creates is column-for-column identical to `PRISMA_LEDGER_DDL`** | 9 |
+| `legacy` | A single-hotel database (migrations 1-11, no ledger) is adopted with `markMigrationApplied` (11 baselines, `applied_steps_count = 0`), then `applyMigrations` deploys exactly the 8 pending files; a second deploy is a no-op | 7 |
+| `saas18` | A database that predates migrations 18-19 baselines 18 and deploys exactly one | 2 |
+| `interop` | A ledger written by `scripts/migrate-adopt.mjs` (not by the engine) is accepted by the engine: it finds nothing to deploy, reports `hasMigrationsTable`, no edited and no failed migrations, and the checksums match the manifest | 8 |
+| `conflict` | A tampered checksum is detected twice: the engine lists the migration in `editedMigrationNames`, and `migrate-adopt` exits 1 naming the file | 3 |
+| `failure` | Migration 19's own tenant precheck aborts the deploy; the last good migration stays recorded, the failed one is recorded with `finished_at IS NULL` and the engine error in `logs`, **no partial schema change survives**, and `markMigrationRolledBack` + redeploy converges to `saas_current` | 8 |
+
+Run result: **6 scenarios, 37 assertions, no failures** (~50 s). The `failure` scenario also documents
+Prisma's real recovery path, which §4.7 describes: a failed migration row blocks the next deploy
+until it is marked rolled back.
+
+Two operational facts came out of the run:
+
+* Each migration script is executed as a **single multi-statement statement** with no explicit
+  `BEGIN`/`COMMIT`; PostgreSQL wraps such a message in an implicit transaction, which is why the
+  aborted migration 19 left the previously dropped constraints in place.
+* With a driver adapter, the engine reports a failed statement as `external connector error` with an
+  error id and stores the same text in `_prisma_migrations.logs`; the human-readable PostgreSQL
+  message (`Tenant-integrity precheck failed: ReservationRoom …`) is only visible on the adapter side.
+  Do not expect the ledger to explain *why* in prose.
+
+---
+
+## 8. What is still unproven
+
+Be explicit about this; do not let the rehearsal or engine evidence imply more than it shows.
+
+1. **The pinned Prisma 5.17.0 engine has not run.** §7 exercises the real engine, but from the 6.19.0
+   tool stack, because the 5.17.0 binaries are only published to a host this environment cannot reach
+   and Prisma published no 5.x WebAssembly schema engine. The command set, the ledger format and the
+   checksum algorithm are unchanged between those releases, and the 5.17.0 engine is still the one
+   production will run. Close this by running §4.2–4.6 once with `PRISMA_SCHEMA_ENGINE_BINARY` pointing
+   at the pinned binary (§7.1), on a **restored copy** first.
+2. **The deployed database's checkpoint is inferred, not observed.** No connection to the Supabase
+   target was made in this work — no `DIRECT_URL` or credentials were available, and connecting was
+   out of scope. §4.2 is read-only and settles it in one command:
+   `SAAS_ENVIRONMENT=saas SAAS_DATABASE_IDENTIFIER=<ref> npm run migration:adopt`.
+3. **The production archive has not been restored.** The restoration *procedure* is proven end to end
+   on a synthetic archive (§"Backup restoration rehearsal" in
+   [saas-migration-rehearsal.md](saas-migration-rehearsal.md)), but the archive referenced there
+   (`hotel-management-saas-20261028-140823.dump`, SHA-256 `F81566E9…24A7`) is not present in this
+   workspace, so it has not been restored, counted or rehearsed. Do that before §4.4.
+4. **Per-migration atomicity holds only as far as PostgreSQL's implicit transaction.** §7 shows the
+   engine sends each migration as one multi-statement message (no explicit `BEGIN`/`COMMIT`), so a
+   failure rolls the whole file back — demonstrated. That is a property of the simple-query protocol,
+   not of Prisma, and it does not cover operator interruption of the connection mid-file. The
+   migrations stay written to be re-runnable, and `partial-rerun` checks that property.
 5. **The Axis-specific Half Board tariff rows** inserted by migration 12 remain a product decision,
    not a technical one; they are harmless for other hotels but should be confirmed by the owner.
 
 ---
 
-## 8. Files
+## 9. Files
 
 | Path | Role |
 |---|---|
@@ -377,6 +485,8 @@ Be explicit about this; do not let the rehearsal evidence imply more than it sho
 | `scripts/migration-ledger.mjs` | Checkpoints, feature probes, manifest, adoption planner (pure) |
 | `scripts/migrate-adopt.mjs` | Ledgerless-target adoption CLI (dry-run by default) |
 | `scripts/migration-rehearsal.mjs` | Disposable PostgreSQL rehearsal driver |
+| `scripts/prisma-engine-verify.mjs` | Drives the real Prisma migration engine against disposable databases |
+| `scripts/backup-db.mjs` / `scripts/restore-db.mjs` | Verified custom-format backup and restore into a scratch database |
 | `scripts/psql.mjs` | Explicit `psql` wrapper used by both tools |
 | `__tests__/schema/migration-adoption.test.ts` | Unit tests for checkpoints, planning and manifest |
 | `__tests__/schema/migrations.test.ts` | Chain, schema parity, legacy conversion, idempotency guards |
