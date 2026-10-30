@@ -322,6 +322,7 @@ The archive is only read, never modified, so the second hash must still equal
 | `unsupported version (1.x) in file header` | `pg_restore` older than the dump | Install PostgreSQL 17 client tools |
 | `extension "…" is not available` | Extension the target cannot install | Expected; the filter skips it. Restore it only if the schema needs it |
 | `schema "auth" already exists` | Restoring without the filter | Use `--profile plain` (or `supabase` on a stack) |
+| `extension "x" does not exist` while running `COMMENT ON EXTENSION x` | A comment entry that depends on an excluded extension survived the filter | Fixed in `archive-toc.mjs` (§13 of the rehearsal record). If it reappears, check `restore.filter.byReason` for `extension comment` |
 | `role "supabase_admin" does not exist` | Archive objects owned by Supabase roles | `--profile plain` skips them; or use option A |
 | `permission denied for schema public` | PG 15+ `public` ownership | Connect as the database owner / `postgres` |
 | Checkpoint check `FAIL` with `Ledger: absent` | Archive is an older end-state | Re-run with the matching `--expect-checkpoint` |

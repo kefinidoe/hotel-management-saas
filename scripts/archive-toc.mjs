@@ -28,7 +28,7 @@
  *
  * i.e. `<dumpId>; <catalogOid> <oid> <TYPE> [<schema>] <name> [<owner>]`.
  *
- * Two entries do not follow the positional reading, and both matter here:
+ * Three entries do not follow the positional reading, and all three matter here:
  *
  *  - `SCHEMA - auth supabase_admin` names the schema itself in `name`; the
  *    `schema` field is null. Filtering a schema out by matching `schema` alone
@@ -36,6 +36,15 @@
  *    the restore fails on its first object instead of being skipped cleanly.
  *  - `CONSTRAINT`/`FK CONSTRAINT` entries name a table and then the constraint,
  *    so the constraint lands in `owner` (`name` is the table).
+ *  - `COMMENT`/`ACL` entries that act on an extension or a schema put the object
+ *    after the dash: `COMMENT - EXTENSION supabase_vault`, `ACL - SCHEMA auth`.
+ *    Positionally that reads as `name: "EXTENSION", owner: "supabase_vault"`, so
+ *    filtering on `type`/`name` never matches it. Left live, `pg_restore` runs
+ *    `COMMENT ON EXTENSION supabase_vault ...` against a database where that
+ *    extension was deliberately not created, and the whole restore aborts with
+ *    `ERROR: extension "supabase_vault" does not exist` -- the failure seen in
+ *    the first genuine rehearsal of the owner's backup. `objectType`/`objectName`
+ *    expose the dependency so it can be excluded with its object.
  */
 
 /** Schemas that belong to the Supabase platform rather than to this application. */
@@ -74,6 +83,14 @@ const TWO_WORD_TYPES = new Set([
   "BLOB METADATA",
   "SEQUENCE SET",
 ]);
+
+/**
+ * TOC types that name a *dependent* object after the `-` placeholder, e.g.
+ * `COMMENT - EXTENSION pgcrypto` or `ACL - SCHEMA auth`. Excluding the object
+ * (the extension or schema) without excluding these leaves executable SQL behind
+ * that references an object the restore never created.
+ */
+const DEPENDENT_OBJECT_TYPES = new Set(["COMMENT", "ACL", "DEFAULT ACL", "SECURITY LABEL"]);
 
 /**
  * Object types Supabase adds that have no meaning (and no dependencies) on a
@@ -118,7 +135,18 @@ export function parseToc(text) {
 
     const match = line.match(/^(\d+);\s+(\d+)\s+(\d+)\s+(\S+)(?:\s+(.*))?$/);
     if (!match) {
-      entries.push({ id: null, catalogOid: null, oid: null, type: "UNPARSED", schema: null, name: null, owner: null, raw: line });
+      entries.push({
+        id: null,
+        catalogOid: null,
+        oid: null,
+        type: "UNPARSED",
+        schema: null,
+        name: null,
+        owner: null,
+        objectType: null,
+        objectName: null,
+        raw: line,
+      });
       continue;
     }
 
@@ -136,6 +164,8 @@ export function parseToc(text) {
     let schema = null;
     let name = null;
     let owner = null;
+    let objectType = null;
+    let objectName = null;
 
     if (type === "SCHEMA") {
       // SCHEMA - public postgres
@@ -147,7 +177,26 @@ export function parseToc(text) {
       owner = parts[2] ?? null;
     }
 
-    entries.push({ id: Number(id), catalogOid: Number(catalogOid), oid: Number(oid), type, schema, name, owner, raw: line });
+    // `COMMENT - EXTENSION supabase_vault`, `ACL - SCHEMA auth`: the object this
+    // entry acts on is named after the dash, not in `schema`/`name`. Captured
+    // separately so the filter can drop it together with that object.
+    if (DEPENDENT_OBJECT_TYPES.has(type) && parts[0] === "-" && parts.length >= 3) {
+      objectType = parts[1];
+      objectName = unquote(parts[2]);
+    }
+
+    entries.push({
+      id: Number(id),
+      catalogOid: Number(catalogOid),
+      oid: Number(oid),
+      type,
+      schema,
+      name,
+      owner,
+      objectType,
+      objectName,
+      raw: line,
+    });
   }
 
   return { header, entries };
@@ -231,8 +280,30 @@ export function buildFilteredToc(parsed, { excludeSchemas = [], excludeExtension
     const excludedBySchema = owningSchema !== null && schemaSet.has(owningSchema);
     const excludedByType = typeSet.has(entry.type);
     const excludedByExtension = entry.type === "EXTENSION" && extensionSet.has(entry.name);
-    if (excludedBySchema || excludedByType || excludedByExtension) {
-      excluded.push({ type: entry.type, schema: entry.schema, name: entry.name, reason: excludedBySchema ? "schema" : excludedByType ? "type" : "extension" });
+    // A comment or ACL on an excluded object is executable SQL against something
+    // this restore deliberately does not create: `COMMENT ON EXTENSION
+    // supabase_vault`, `COMMENT ON SCHEMA auth`, `GRANT ... ON SCHEMA auth`. The
+    // object's own entry being commented out is not enough -- that is exactly the
+    // failure the first genuine rehearsal hit.
+    const excludedByDependency =
+      entry.objectType === "EXTENSION"
+        ? extensionSet.has(entry.objectName)
+        : entry.objectType === "SCHEMA"
+          ? schemaSet.has(entry.objectName)
+          : false;
+    const reason = excludedBySchema
+      ? "schema"
+      : excludedByType
+        ? "type"
+        : excludedByExtension
+          ? "extension"
+          : excludedByDependency
+            ? entry.type === "COMMENT"
+              ? `${entry.objectType.toLowerCase()} comment`
+              : `${entry.objectType.toLowerCase()} ${entry.type.toLowerCase()}`
+            : null;
+    if (reason) {
+      excluded.push({ type: entry.type, schema: entry.schema, name: entry.name, objectType: entry.objectType, objectName: entry.objectName, reason });
       lines.push(`; ${entry.raw}`);
     } else {
       lines.push(entry.raw);

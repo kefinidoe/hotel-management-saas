@@ -191,3 +191,167 @@ describe("buildFilteredToc", () => {
     expect(lines.filter((line) => line.startsWith(";"))).toEqual(parsed.header);
   });
 });
+
+/**
+ * Records from the first genuine rehearsal of the owner's backup, which aborted
+ * with:
+ *
+ *   pg_restore: error: could not execute query: ERROR:
+ *     extension "supabase_vault" does not exist
+ *   Command was: COMMENT ON EXTENSION supabase_vault IS 'Supabase Vault extension';
+ *
+ * The extension entry was commented out by the `plain` profile, but the comment
+ * entry that depends on it was not: positionally, `COMMENT - EXTENSION
+ * supabase_vault` reads as `{ type: "COMMENT", name: "EXTENSION", owner:
+ * "supabase_vault" }`, so nothing in the filter matched it. The TOC below is the
+ * shape `pg_dump -Fc` actually emits for that case, reproduced on PostgreSQL 17.11
+ * with a stand-in `supabase_vault` extension.
+ */
+const SUPABASE_TOC = `;
+; Archive created at 2026-10-30 14:03:43 UTC
+;     dbname: postgres
+;     TOC Entries: 26
+;     Dump Version: 1.16-0
+;     Format: CUSTOM
+;
+; Selected TOC Entries:
+;
+8; 2615 16418 SCHEMA - auth postgres
+2625; 0 0 COMMENT - SCHEMA auth postgres
+3310; 0 0 ACL - SCHEMA auth postgres
+2; 3079 16450 EXTENSION - supabase_vault
+2626; 0 0 COMMENT - EXTENSION supabase_vault
+3; 3079 16461 EXTENSION - pgcrypto
+2627; 0 0 COMMENT - EXTENSION pgcrypto
+4; 3079 16462 EXTENSION - "uuid-ossp"
+2628; 0 0 COMMENT - EXTENSION "uuid-ossp"
+221; 1259 16419 TABLE auth users postgres
+223; 1259 16428 TABLE public "Hotel" postgres
+2629; 0 0 COMMENT public TABLE "Hotel" postgres
+224; 1259 16436 TABLE public "Guest" postgres
+2614; 0 16419 TABLE DATA auth users postgres
+2616; 0 16428 TABLE DATA public "Hotel" postgres
+2618; 0 16437 TABLE DATA public "Guest" postgres
+2462; 2606 16435 CONSTRAINT public "Hotel" "Hotel_pkey" postgres
+2613; 6104 16498 PUBLICATION - supabase_realtime postgres
+`;
+
+const supabaseFiltered = buildFilteredToc(parseToc(SUPABASE_TOC), {
+  excludeSchemas: ["auth"],
+  excludeExtensions: ["supabase_vault", "uuid-ossp"],
+  excludeTypes: ["PUBLICATION"],
+});
+
+const liveLines = (text: string) => text.split("\n").filter((line) => line.trim() && !line.startsWith(";"));
+
+describe("dependency-aware filtering (the genuine-rehearsal failure)", () => {
+  it("parses a comment on an extension as a dependent object", () => {
+    const entry = parseToc(SUPABASE_TOC).entries.find((candidate) => candidate.raw.includes("COMMENT - EXTENSION supabase_vault"));
+    expect(entry).toMatchObject({ type: "COMMENT", objectType: "EXTENSION", objectName: "supabase_vault" });
+    // Still readable positionally, which is why type/name matching missed it.
+    expect(entry).toMatchObject({ schema: null, name: "EXTENSION", owner: "supabase_vault" });
+  });
+
+  it("parses a comment and an ACL on a schema as dependent objects", () => {
+    const comment = parseToc(SUPABASE_TOC).entries.find((entry) => entry.raw.includes("COMMENT - SCHEMA auth"));
+    const acl = parseToc(SUPABASE_TOC).entries.find((entry) => entry.raw.includes("ACL - SCHEMA auth"));
+    expect(comment).toMatchObject({ objectType: "SCHEMA", objectName: "auth" });
+    expect(acl).toMatchObject({ objectType: "SCHEMA", objectName: "auth" });
+  });
+
+  it("excludes an unavailable extension and its comment together", () => {
+    const lines = supabaseFiltered.text.split("\n");
+    expect(lines).toContain("; 2; 3079 16450 EXTENSION - supabase_vault");
+    expect(lines).toContain("; 2626; 0 0 COMMENT - EXTENSION supabase_vault");
+    // The exact property that failed: nothing executable may reference it.
+    expect(liveLines(supabaseFiltered.text).filter((line) => line.includes("supabase_vault"))).toEqual([]);
+  });
+
+  it("keeps a retained extension's creation and comment entries", () => {
+    const lines = supabaseFiltered.text.split("\n");
+    expect(lines).toContain("3; 3079 16461 EXTENSION - pgcrypto");
+    expect(lines).toContain("2627; 0 0 COMMENT - EXTENSION pgcrypto");
+  });
+
+  it("keeps comments on application objects", () => {
+    expect(liveLines(supabaseFiltered.text)).toContain('2629; 0 0 COMMENT public TABLE "Hotel" postgres');
+  });
+
+  it("excludes a comment and an ACL belonging to an excluded schema", () => {
+    const lines = supabaseFiltered.text.split("\n");
+    expect(lines).toContain("; 2625; 0 0 COMMENT - SCHEMA auth postgres");
+    expect(lines).toContain("; 3310; 0 0 ACL - SCHEMA auth postgres");
+    expect(liveLines(supabaseFiltered.text).filter((line) => line.includes("SCHEMA auth"))).toEqual([]);
+  });
+
+  it("handles quoted extension names", () => {
+    const lines = supabaseFiltered.text.split("\n");
+    expect(lines).toContain('; 4; 3079 16462 EXTENSION - "uuid-ossp"');
+    expect(lines).toContain('; 2628; 0 0 COMMENT - EXTENSION "uuid-ossp"');
+  });
+
+  it("leaves every other extension entry untouched", () => {
+    expect(liveLines(supabaseFiltered.text).filter((line) => line.includes("EXTENSION")).sort()).toEqual([
+      "2627; 0 0 COMMENT - EXTENSION pgcrypto",
+      "3; 3079 16461 EXTENSION - pgcrypto",
+    ]);
+  });
+
+  it("labels the dependency in the report instead of hiding it", () => {
+    const reasons = supabaseFiltered.excluded.map((entry) => `${entry.reason}:${entry.objectName ?? entry.name}`).sort();
+    expect(reasons).toEqual([
+      "extension comment:supabase_vault",
+      "extension comment:uuid-ossp",
+      "extension:supabase_vault",
+      "extension:uuid-ossp",
+      "schema acl:auth",
+      "schema comment:auth",
+      "schema:auth",
+      "schema:users",
+      "schema:users",
+      "type:supabase_realtime",
+    ]);
+  });
+
+  it("writes a use-list whose every live line is restorable", () => {
+    // The generated file is what pg_restore receives, so assert its literal
+    // content: header preserved, excluded entries commented, order unchanged.
+    const expected = [
+      ";",
+      "; Archive created at 2026-10-30 14:03:43 UTC",
+      ";     dbname: postgres",
+      ";     TOC Entries: 26",
+      ";     Dump Version: 1.16-0",
+      ";     Format: CUSTOM",
+      ";",
+      "; Selected TOC Entries:",
+      ";",
+      "; 8; 2615 16418 SCHEMA - auth postgres",
+      "; 2625; 0 0 COMMENT - SCHEMA auth postgres",
+      "; 3310; 0 0 ACL - SCHEMA auth postgres",
+      "; 2; 3079 16450 EXTENSION - supabase_vault",
+      "; 2626; 0 0 COMMENT - EXTENSION supabase_vault",
+      "3; 3079 16461 EXTENSION - pgcrypto",
+      "2627; 0 0 COMMENT - EXTENSION pgcrypto",
+      '; 4; 3079 16462 EXTENSION - "uuid-ossp"',
+      '; 2628; 0 0 COMMENT - EXTENSION "uuid-ossp"',
+      "; 221; 1259 16419 TABLE auth users postgres",
+      '223; 1259 16428 TABLE public "Hotel" postgres',
+      '2629; 0 0 COMMENT public TABLE "Hotel" postgres',
+      '224; 1259 16436 TABLE public "Guest" postgres',
+      "; 2614; 0 16419 TABLE DATA auth users postgres",
+      '2616; 0 16428 TABLE DATA public "Hotel" postgres',
+      '2618; 0 16437 TABLE DATA public "Guest" postgres',
+      '2462; 2606 16435 CONSTRAINT public "Hotel" "Hotel_pkey" postgres',
+      "; 2613; 6104 16498 PUBLICATION - supabase_realtime postgres",
+      "",
+    ].join("\n");
+    expect(supabaseFiltered.text).toBe(expected);
+  });
+
+  it("does not change any entry when no extension or schema is excluded", () => {
+    const unfiltered = buildFilteredToc(parseToc(SUPABASE_TOC));
+    expect(unfiltered.excluded).toEqual([]);
+    expect(unfiltered.text.split("\n").filter((line) => line.startsWith(";"))).toEqual(parseToc(SUPABASE_TOC).header);
+  });
+});

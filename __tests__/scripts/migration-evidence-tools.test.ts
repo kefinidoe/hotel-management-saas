@@ -264,3 +264,93 @@ describe("scripts/restore-rehearsal.mjs — refusals before the server is contac
     expect(stderr).toContain("configured to use");
   });
 });
+
+// ---------------------------------------------------------------------------
+// End-to-end regression for the dependency-aware filter.
+//
+// The genuine rehearsal failed on `COMMENT ON EXTENSION supabase_vault` because
+// the extension was filtered out and its comment was not. The same dependency
+// exists for schemas, and that variant can be built without any Supabase
+// extension: a schema plus `COMMENT ON SCHEMA` produces the identical
+// `COMMENT - SCHEMA auth` entry shape in the archive.
+//
+// This test needs a disposable PostgreSQL server, so it runs only when
+// REHEARSAL_TEST_BASE_URL points at one (never in CI):
+//   REHEARSAL_TEST_BASE_URL=postgresql://postgres@127.0.0.1:55432 npm run test:run
+// ---------------------------------------------------------------------------
+const rehearsalBaseUrl = process.env.REHEARSAL_TEST_BASE_URL;
+
+describe("scripts/restore-rehearsal.mjs — dependent comments survive filtering", () => {
+  it.skipIf(!pgToolsAvailable || !rehearsalBaseUrl)(
+    "restores an archive whose schema comment refers to an excluded schema",
+    () => {
+      const base = (rehearsalBaseUrl as string).replace(/\/+$/, "");
+      const source = `toc_dep_source_${Date.now()}`;
+      const dir = mkdtempSync(path.join(tmpdir(), "restore-rehearsal-dep-"));
+      const dump = path.join(dir, "dependent-comment.dump");
+
+      const psql = (args: string[]) => spawnSync("psql", args, { encoding: "utf8", env: cleanEnv() });
+      try {
+        const created = spawnSync("psql", ["-d", base, "-q", "-c", `CREATE DATABASE ${source}`], { encoding: "utf8" });
+        expect(created.status, created.stderr).toBe(0);
+        const build = psql([
+          "-d",
+          `${base}/${source}`,
+          "-v",
+          "ON_ERROR_STOP=1",
+          "-q",
+          "-c",
+          "CREATE SCHEMA auth",
+          "-c",
+          "CREATE TABLE auth.users (id int primary key)",
+          "-c",
+          'CREATE TABLE public."Hotel" (id int primary key)',
+          "-c",
+          'CREATE TABLE public."Guest" (id int primary key, "hotelId" int references public."Hotel"(id))',
+          "-c",
+          'INSERT INTO public."Hotel" VALUES (1)',
+          "-c",
+          'INSERT INTO public."Guest" VALUES (1, 1)',
+          "-c",
+          "COMMENT ON SCHEMA auth IS 'excluded schema comment'",
+          "-c",
+          'COMMENT ON TABLE public."Hotel" IS \'kept table comment\'',
+        ]);
+        expect(build.status, build.stderr).toBe(0);
+
+        const dumped = spawnSync("pg_dump", ["-Fc", "-d", `${base}/${source}`, "-f", dump], {
+          encoding: "utf8",
+        });
+        expect(dumped.status, dumped.stderr).toBe(0);
+
+        const digest = createHash("sha256").update(readFileSync(dump)).digest("hex");
+        const { status, stdout } = run("restore-rehearsal.mjs", [
+          "--dump",
+          dump,
+          "--expect-sha256",
+          digest,
+          "--base-url",
+          base,
+          "--profile",
+          "plain",
+          "--json",
+        ]);
+
+        const report = JSON.parse(stdout);
+        // The fixture schema matches no approved checkpoint, so the exit code is 1
+        // by design; what matters is that the restore itself completed cleanly.
+        expect(status).toBe(1);
+        expect(report.restore.ok).toBe(true);
+        expect(report.restore.problems).toEqual([]);
+        expect(report.restore.filter.byReason).toMatchObject({ "schema comment": 1 });
+        expect(report.inspection.tables).toEqual(["Guest", "Hotel"]);
+        expect(report.inspection.rowCounts).toEqual({ Hotel: 1, Guest: 1 });
+        const restoreCheck = report.checks.find((check: { name: string }) => check.name.startsWith("restore finished"));
+        expect(restoreCheck.ok).toBe(true);
+      } finally {
+        psql(["-d", base, "-c", `DROP DATABASE IF EXISTS ${source}`]);
+      }
+    },
+    60_000
+  );
+});
