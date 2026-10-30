@@ -127,6 +127,15 @@ export const TENANT_RELATIONS = [
 const q = (identifier) => `"${identifier}"`;
 
 /**
+ * psql prints rows as text, one tuple per line. Every check is therefore run
+ * inside a JSON envelope so the CLI can parse it deterministically, whatever
+ * the check returns (a list, a single count, or a UNION of per-table counts).
+ */
+export function wrapAsJson(sql) {
+  return `SELECT coalesce(json_agg(row_to_json(_check)), '[]'::json) AS rows FROM (\n${sql.trim().replace(/;\s*$/, "")}\n) _check`;
+}
+
+/**
  * The checks, as data. `kind: "count"` means a non-zero result is a failure;
  * `kind: "list"` returns rows that are reported as-is (missing tables).
  */
@@ -236,6 +245,9 @@ export function evaluateResults(results) {
     }
 
     if (result.kind === "list") {
+      // `list` checks without `expected` are inventories (row counts), not
+      // completeness assertions: they are reported, never failed on.
+      if (!Array.isArray(result.expected)) continue;
       const present = new Set(result.rows.map((row) => row.table_name));
       const missing = result.expected.filter((table) => !present.has(table));
       if (missing.length) {
@@ -380,13 +392,8 @@ function main(argv) {
     const results = [];
     const checks = [...buildChecks(), buildRowCountCheck()];
     for (const check of checks) {
-      if (check.kind === "count" && check.unioned) {
-        results.push({ ...check, rows: queryJson({ ...psqlArgs, sql: check.sql }) });
-      } else if (check.kind === "count") {
-        results.push({ ...check, rows: [{ count: queryScalar({ ...psqlArgs, sql: check.sql }) }] });
-      } else {
-        results.push({ ...check, rows: queryJson({ ...psqlArgs, sql: check.sql }) });
-      }
+      const document = queryJson({ ...psqlArgs, sql: wrapAsJson(check.sql) });
+      results.push({ ...check, rows: Array.isArray(document) ? document : document.rows ?? [] });
     }
 
     const verdict = evaluateResults(results);
