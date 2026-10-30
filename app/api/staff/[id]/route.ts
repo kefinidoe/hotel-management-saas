@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
+import { recordAudit } from "@/lib/audit";
 import { HotelRole, MembershipStatus } from "@prisma/client";
 
 const PERMITTED_HOTEL_ROLES = Object.values(HotelRole);
@@ -200,6 +201,22 @@ export async function PATCH(
     updatedMembership = await prisma.$transaction((tx) => updateStaff(tx));
   }
 
+  await recordAudit({
+    hotelId: tenant.hotelId,
+    userId: tenant.userId,
+    action: "STAFF_MEMBERSHIP_UPDATED",
+    entity: "HOTEL_MEMBERSHIP",
+    entityId: updatedMembership.id,
+    metadata: {
+      targetUserId: updatedMembership.user.id,
+      previousRole: targetMembership.role,
+      role: updatedMembership.role,
+      previousStatus: targetMembership.status,
+      status: updatedMembership.status,
+      department: updatedMembership.department,
+    },
+  });
+
   return NextResponse.json({
     id: updatedMembership.id,
     userId: updatedMembership.user.id,
@@ -300,6 +317,19 @@ export async function DELETE(
       data: { status: MembershipStatus.SUSPENDED },
     });
 
+    await recordAudit({
+      hotelId: tenant.hotelId,
+      userId: tenant.userId,
+      action: "STAFF_MEMBERSHIP_SUSPENDED",
+      entity: "HOTEL_MEMBERSHIP",
+      entityId: targetMembership.id,
+      metadata: {
+        targetUserId: targetMembership.userId,
+        role: targetMembership.role,
+        reason: "Existing activity in this hotel",
+      },
+    });
+
     return NextResponse.json({
       ok: true,
       mode: "suspended",
@@ -311,6 +341,18 @@ export async function DELETE(
   // Clean delete if no transaction history exists in this hotel
   await prisma.hotelMembership.delete({
     where: { id: targetMembership.id },
+  });
+
+  await recordAudit({
+    hotelId: tenant.hotelId,
+    userId: tenant.userId,
+    action: "STAFF_MEMBERSHIP_REMOVED",
+    entity: "HOTEL_MEMBERSHIP",
+    entityId: targetMembership.id,
+    metadata: {
+      targetUserId: targetMembership.userId,
+      role: targetMembership.role,
+    },
   });
 
   return NextResponse.json({
