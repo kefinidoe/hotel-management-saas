@@ -39,9 +39,28 @@
  */
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { closeSync, createReadStream, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import {
+  closeSync,
+  createReadStream,
+  existsSync,
+  mkdtempSync,
+  openSync,
+  readdirSync,
+  readSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
+import {
+  APPLICATION_SCHEMA,
+  SUPABASE_ONLY_TYPES,
+  buildFilteredToc,
+  parseToc,
+  summariseToc,
+} from "./archive-toc.mjs";
 import { buildFeatureQuery, evaluateCheckpoints } from "./migration-ledger.mjs";
 import { psqlVersion, queryJson, queryScalar, PsqlError, resolvePsql, runPsql } from "./psql.mjs";
 import { sanitiseForPgTools } from "./pg-url.mjs";
@@ -71,6 +90,18 @@ Options:
                              sibling of psql, then pg_restore on PATH).
   --expect-checkpoint <ids>  Comma-separated acceptable checkpoint ids for the
                              restored schema.
+  --profile <auto|plain|supabase>
+                             How much of the archive to restore. 'plain' (the
+                             default when the archive carries Supabase schemas and
+                             the target is a stock server) restores the application
+                             schema and skips Supabase-managed schemas, event
+                             triggers and extensions the target does not have.
+                             'supabase' assumes a local Supabase stack.
+                             'auto' decides from the archive and the server.
+  --exclude-schema <names>   Extra schemas to skip (comma-separated), in addition
+                             to the Supabase-managed ones.
+  --toc                      Analyse the archive's table of contents and exit;
+                             no database is created and nothing is restored.
   --keep                     Keep the restored database (its name is printed).
   --allow-remote-target      Permit a non-loopback --base-url.
   --json                     Print the report as JSON.
@@ -91,6 +122,19 @@ const READ_ONLY_OPTION = "-c default_transaction_read_only=on";
  * "disposable" quietly stops being true.
  */
 let scratchToClean = null;
+
+/** Temporary files/directories created for a --use-list restore; removed on exit. */
+const tempPathsToClean = [];
+
+function cleanTempPaths() {
+  for (const target of tempPathsToClean.splice(0)) {
+    try {
+      rmSync(target, { recursive: true, force: true });
+    } catch {
+      // Leaving a temp lint file behind is not worth failing the run over.
+    }
+  }
+}
 
 // Tables fingerprinting tries to count. Absent tables are skipped, so this list
 // can cover both the pre-tenancy and the current schema.
@@ -119,6 +163,9 @@ function parseArgs(argv) {
     psql: undefined,
     pgRestore: undefined,
     expectCheckpoint: undefined,
+    profile: "auto",
+    excludeSchemas: [],
+    toc: false,
     keep: false,
     allowRemote: false,
     json: false,
@@ -166,6 +213,28 @@ function parseArgs(argv) {
           .split(",")
           .map((entry) => entry.trim())
           .filter(Boolean);
+        break;
+      case "--profile": {
+        const value = takeValue(arg, i++);
+        if (!["auto", "plain", "supabase"].includes(value)) throw new Error("--profile accepts auto, plain or supabase.");
+        options.profile = value;
+        break;
+      }
+      case "--exclude-schema": {
+        const schemas = takeValue(arg, i++)
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter(Boolean);
+        // Excluding `public` would drop every table this application owns, leaving
+        // a rehearsal that restores nothing and proves nothing.
+        if (schemas.includes(APPLICATION_SCHEMA)) {
+          throw new Error(`--exclude-schema cannot drop '${APPLICATION_SCHEMA}': that is the schema the application owns.`);
+        }
+        options.excludeSchemas = schemas;
+        break;
+      }
+      case "--toc":
+        options.toc = true;
         break;
       case "--keep":
         options.keep = true;
@@ -321,7 +390,13 @@ function inspectRestored(url, psqlBin) {
   const checkpoints = evaluateCheckpoints(features);
 
   const present = new Set(identity.tables ?? []);
-  const wanted = KEY_TABLES.filter((name) => present.has(name));
+  // Every public table, not a hard-coded shortlist: a backup rehearsal has to
+  // account for all of the owner's tables, including ones this repository does
+  // not know about. `KEY_TABLES` only decides the order in the human summary.
+  const wanted = [...present].sort((a, b) => {
+    const rank = (name) => (KEY_TABLES.includes(name) ? KEY_TABLES.indexOf(name) : KEY_TABLES.length);
+    return rank(a) - rank(b) || a.localeCompare(b);
+  });
   const rowCounts = {};
   if (wanted.length > 0) {
     // Column names deliberately differ from the subquery alias (`t`): naming a
@@ -354,6 +429,38 @@ function inspectRestored(url, psqlBin) {
     checkpoints,
     rowCounts,
   };
+}
+
+/** Extensions this server can install, regardless of whether they are installed. */
+function availableExtensions(url, psqlBin) {
+  const raw = queryScalar({
+    url,
+    psqlBin,
+    sql: "SELECT coalesce(json_agg(name)::text, '[]') FROM pg_available_extensions;",
+  });
+  return JSON.parse(raw || "[]");
+}
+
+/** Does this server have Supabase's role? i.e. is it a local Supabase stack? */
+function targetHasRole(url, psqlBin, role) {
+  const count = queryScalar({
+    url,
+    psqlBin,
+    sql: `SELECT count(*) FROM pg_roles WHERE rolname = '${String(role).replace(/'/g, "''")}';`,
+  });
+  return Number(count) > 0;
+}
+
+/**
+ * Write a `pg_restore --use-list` file outside the repository and return its path.
+ * It is deleted with the scratch database; it contains object names, not data.
+ */
+function writeUseList(text) {
+  const dir = mkdtempSync(path.join(tmpdir(), "restore-uselist-"));
+  const file = path.join(dir, "toc.list");
+  writeFileSync(file, text);
+  tempPathsToClean.push(dir);
+  return file;
 }
 
 /**
@@ -398,6 +505,17 @@ function printHumanReport(report) {
   lines.push(`Base server          : ${report.server.host} (maintenance db: ${report.server.maintenanceDatabase})`);
   lines.push(`psql / pg_restore    : ${report.server.psqlVersion} / ${report.server.pgRestoreVersion}`);
   lines.push(`Scratch database     : ${report.scratch.database}${report.scratch.created ? "" : " (not created)"}`);
+  if (report.restore.filter) {
+    const filter = report.restore.filter;
+    lines.push(
+      `Restore profile      : ${filter.profile} — kept ${filter.kept} of ${
+        report.archive.tocEntries ?? filter.kept + filter.excluded
+      } TOC entries, skipped ${filter.excluded}` +
+        (filter.excluded > 0 ? ` (${Object.entries(filter.byReason).map(([reason, count]) => `${reason}: ${count}`).join(", ")})` : "")
+    );
+    if (filter.excludeSchemas?.length) lines.push(`Skipped schemas      : ${filter.excludeSchemas.join(", ")}`);
+    if (filter.excludeExtensions?.length) lines.push(`Skipped extensions   : ${filter.excludeExtensions.join(", ")}`);
+  }
   lines.push("");
   lines.push(`Restore              : ${report.restore.ok ? "finished with no errors" : "FAILED"}`);
   if (report.restore.problems.length > 0) {
@@ -414,9 +532,16 @@ function printHumanReport(report) {
       `  Ledger             : ${inspection.ledgerExists ? `present, ${inspection.ledgerRows} row(s), ${inspection.failedLedgerRows} unfinished` : "absent (pre-ledger backup)"}`
     );
     lines.push(`  Detected checkpoint: ${inspection.checkpoints.length ? inspection.checkpoints.join(", ") : "none matched"}`);
+    if (inspection.missingTables) {
+      lines.push(
+        `  Table coverage     : ${inspection.missingTables.length === 0 ? "every archive table restored" : `MISSING ${inspection.missingTables.join(", ")}`}`
+      );
+      if (inspection.extraTables.length > 0) lines.push(`  Extra tables       : ${inspection.extraTables.join(", ")}`);
+    }
     const counts = Object.entries(inspection.rowCounts);
     if (counts.length > 0) {
-      lines.push(`  Row counts         : ${counts.map(([name, rows]) => `${name}=${rows}`).join(", ")}`);
+      lines.push(`  Row counts (${counts.length} tables):`);
+      for (const [name, rows] of counts) lines.push(`    ${name.padEnd(28)} ${rows}`);
     }
   }
 
@@ -555,6 +680,9 @@ async function main() {
   // clean up -- the previous behaviour created the scratch database first and
   // only discovered the corruption inside pg_restore.
   let tocEntries = null;
+  let parsedToc = null;
+  let tocSummary = null;
+  let listingText = null;
   if (format !== "plain") {
     const listing = spawnSync(pgRestoreBin, ["--list", dumpPath], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
     if (listing.error) {
@@ -568,10 +696,59 @@ async function main() {
       );
       return 1;
     }
-    tocEntries = (listing.stdout ?? "")
-      .split("\n")
-      .filter((line) => line && !line.startsWith(";"))
-      .length;
+    listingText = listing.stdout ?? "";
+    parsedToc = parseToc(listingText);
+    tocSummary = summariseToc(parsedToc);
+    tocEntries = tocSummary.entries;
+  }
+
+  if (options.toc) {
+    // Analysis only: no database is created, nothing is restored. This is the
+    // step that tells an operator whether the archive is a Supabase dump and what
+    // a plain PostgreSQL server will and will not be able to take from it.
+    if (format === "plain" || !tocSummary) {
+      process.stderr.write(
+        "A plain SQL archive has no table of contents, so there is nothing to analyse.\n" +
+          "This mode reads the archive the way the restore does: with pg_restore --list.\n" +
+          "Use the custom or directory format (pg_dump -Fc / -Fd) for an analysable archive.\n"
+      );
+      return 1;
+    }
+    const summary = {
+      mode: "archive-analysis",
+      archive: {
+        path: dumpPath,
+        size: stats.isDirectory() ? null : stats.size,
+        format,
+        sha256,
+        expectedSha256: options.expectSha256 ?? null,
+        digestVerified,
+        entries: tocEntries,
+      },
+      analysis: tocSummary,
+    };
+    if (options.json) {
+      process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+    } else {
+      const lines = [];
+      lines.push("");
+      lines.push("Archive analysis (no database is created)");
+      lines.push("----------------------------------------");
+      lines.push(`Archive            : ${dumpPath}`);
+      lines.push(`Size / SHA-256     : ${stats.isDirectory() ? "directory archive" : formatBytes(stats.size)} / ${sha256}`);
+      lines.push(`Digest verified    : ${digestVerified ? "yes" : options.expectSha256 ? "NO" : "no (no --expect-sha256)"}`);
+      lines.push(`TOC entries        : ${tocSummary.entries}`);
+      lines.push(`Schemas            : ${tocSummary.schemas.join(", ") || "none"}`);
+      lines.push(`Application tables : ${tocSummary.applicationTables.length} in ${APPLICATION_SCHEMA}`);
+      lines.push(`Extensions         : ${tocSummary.extensions.join(", ") || "none"}`);
+      lines.push(`Supabase schemas   : ${tocSummary.supabaseSchemas.join(", ") || "none"}`);
+      lines.push(`Looks like Supabase: ${tocSummary.looksLikeSupabase ? "yes" : "no"}`);
+      lines.push(
+        `Recommended profile: ${tocSummary.looksLikeSupabase ? "plain (application schema only) unless the target is a local Supabase stack" : "plain"}`
+      );
+      process.stdout.write(`${lines.join("\n")}\n`);
+    }
+    return digestVerified || !options.expectSha256 ? 0 : 1;
   }
 
   const maintenanceUrl = withDatabase(baseUrl.toString(), options.maintenanceDb);
@@ -587,6 +764,7 @@ async function main() {
       expectedSha256: options.expectSha256 ?? null,
       digestVerified,
       tocEntries,
+      analysis: tocSummary,
     },
     server: {
       host: baseUrl.hostname,
@@ -628,11 +806,65 @@ async function main() {
     throw error;
   }
 
+  // Decide how much of the archive this target can actually take. A Supabase
+  // archive restored wholesale into a stock server fails partway through, which
+  // leaves a half-restored database that proves nothing. `plain` keeps the
+  // application schema and drops the platform schemas the server cannot satisfy.
+  let restoreProfile = options.profile;
+  let restoreFilter = null;
+  let useListPath = null;
+  if (format !== "plain" && parsedToc) {
+    let available = [];
+    try {
+      available = availableExtensions(scratchUrl, psqlBin);
+    } catch (error) {
+      if (!(error instanceof PsqlError)) throw error;
+      available = [];
+    }
+    tocSummary = summariseToc(parsedToc, { availableExtensions: available });
+    report.archive.analysis = tocSummary;
+
+    if (restoreProfile === "auto") {
+      const isSupabaseStack = tocSummary.looksLikeSupabase && targetHasRole(scratchUrl, psqlBin, "supabase_admin");
+      restoreProfile = isSupabaseStack ? "supabase" : "plain";
+    }
+
+    if (restoreProfile === "plain") {
+      // `extensions` is kept even on a plain server: Supabase installs its
+      // extensions there, and `CREATE EXTENSION ... SCHEMA extensions` fails if
+      // the schema is missing. The extensions themselves are kept only when this
+      // server can actually install them.
+      const excludeSchemas = [
+        ...new Set([
+          ...tocSummary.supabaseSchemas.filter((name) => name !== "extensions"),
+          ...options.excludeSchemas,
+        ]),
+      ];
+      const excludeExtensions = tocSummary.extensions.filter((name) => !available.includes(name));
+      const excludeTypes = SUPABASE_ONLY_TYPES.filter((type) => (tocSummary.byType[type] ?? 0) > 0);
+      const filtered = buildFilteredToc(parsedToc, { excludeSchemas, excludeExtensions, excludeTypes });
+      useListPath = writeUseList(filtered.text);
+      const byReason = {};
+      for (const entry of filtered.excluded) byReason[entry.reason] = (byReason[entry.reason] ?? 0) + 1;
+      restoreFilter = {
+        profile: restoreProfile,
+        excluded: filtered.excluded.length,
+        kept: filtered.kept,
+        byReason,
+        excludeSchemas,
+        excludeExtensions,
+        excludeTypes,
+      };
+    } else {
+      restoreFilter = { profile: restoreProfile, excluded: 0, kept: tocSummary.entries, byReason: {} };
+    }
+  }
+
   let inspection = null;
   try {
     if (format === "plain") {
       runPsql({ url: scratchUrl, psqlBin, file: dumpPath });
-      report.restore = { ok: true, problems: [] };
+      report.restore = { ok: true, problems: [], filter: null };
     } else {
       // --clean --if-exists: a freshly created database still owns a `public`
       // schema, and the archive's `CREATE SCHEMA public` would otherwise fail.
@@ -647,13 +879,19 @@ async function main() {
         "--no-privileges",
         "--single-transaction",
         "--exit-on-error",
+        ...(useListPath ? ["--use-list", useListPath] : []),
         dumpPath,
       ];
       const result = runPgRestore(pgRestoreBin, args);
       const problems = result.stderr
         .split(/\r?\n/)
         .filter((line) => /error:/i.test(line) && !/does not exist, skipping/i.test(line));
-      report.restore = { ok: result.status === 0 && problems.length === 0, problems, status: result.status };
+      report.restore = {
+        ok: result.status === 0 && problems.length === 0,
+        problems,
+        status: result.status,
+        filter: restoreFilter,
+      };
     }
   } catch (error) {
     if (error instanceof PsqlError) {
@@ -686,6 +924,19 @@ async function main() {
   });
 
   if (inspection) {
+    const archiveTables = tocSummary?.applicationTables ?? null;
+    const restoredTables = (inspection.tables ?? []).filter((name) => !name.startsWith("_prisma"));
+    if (archiveTables) {
+      inspection.missingTables = archiveTables.filter((name) => !restoredTables.includes(name));
+      inspection.extraTables = restoredTables.filter((name) => !archiveTables.includes(name));
+      report.checks.push({
+        name: "every application table in the archive was restored",
+        ok: inspection.missingTables.length === 0,
+        detail: inspection.missingTables.length
+          ? `missing: ${inspection.missingTables.join(", ")}`
+          : `${archiveTables.length} of ${archiveTables.length} table(s)`,
+      });
+    }
     report.checks.push({
       name: "restored schema matches a known checkpoint",
       ok: inspection.checkpoints.length > 0,
@@ -730,6 +981,8 @@ async function main() {
     }
   }
 
+  cleanTempPaths();
+
   const checksOk = report.checks.every((check) => check.ok);
   report.ok = report.restore.ok && checksOk && report.cleanup.ok === true;
 
@@ -743,6 +996,7 @@ main()
   })
   .catch((error) => {
     process.stderr.write(`${error?.message ?? error}\n`);
+    cleanTempPaths();
     if (scratchToClean) {
       try {
         dropScratchDatabase(scratchToClean);

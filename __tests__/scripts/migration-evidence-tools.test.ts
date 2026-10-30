@@ -168,6 +168,57 @@ describe("scripts/restore-rehearsal.mjs — refusals before the server is contac
     expect(stderr).toContain("no database was created");
   });
 
+  it("documents the archive-analysis and filtering flags", () => {
+    const { status, stdout } = run("restore-rehearsal.mjs", ["--help"]);
+    expect(status).toBe(0);
+    expect(stdout).toContain("--profile");
+    expect(stdout).toContain("--toc");
+    expect(stdout).toContain("--exclude-schema");
+  });
+
+  it("rejects an unknown restore profile before reading the archive", () => {
+    const { status, stderr } = run("restore-rehearsal.mjs", [
+      "--dump",
+      scratchDump.file,
+      "--expect-sha256",
+      scratchDump.digest,
+      "--profile",
+      "nonsense",
+    ]);
+    expect(status).toBe(2);
+    expect(stderr).toContain("--profile accepts auto, plain or supabase");
+  });
+
+  it("refuses to exclude the application's own schema", () => {
+    const { status, stderr } = run("restore-rehearsal.mjs", [
+      "--dump",
+      scratchDump.file,
+      "--expect-sha256",
+      scratchDump.digest,
+      "--exclude-schema",
+      "auth,public",
+    ]);
+    expect(status).toBe(2);
+    expect(stderr).toContain("--exclude-schema cannot drop 'public'");
+  });
+
+  it.skipIf(!pgToolsAvailable)("refuses to analyse a plain SQL archive", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "restore-rehearsal-plain-"));
+    const file = path.join(dir, "plain.sql");
+    writeFileSync(file, "CREATE TABLE t (id int);\n");
+    const digest = createHash("sha256").update(readFileSync(file)).digest("hex");
+
+    const { status, stderr } = run("restore-rehearsal.mjs", [
+      "--dump",
+      file,
+      "--expect-sha256",
+      digest,
+      "--toc",
+    ]);
+    expect(status).toBe(1);
+    expect(stderr).toContain("plain SQL archive has no table of contents");
+  });
+
   it("rejects a malformed --expect-sha256", () => {
     const { status, stderr } = run("restore-rehearsal.mjs", ["--dump", scratchDump.file, "--expect-sha256", "abc"]);
     expect(status).toBe(2);

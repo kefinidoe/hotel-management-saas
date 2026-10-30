@@ -644,8 +644,15 @@ cannot produce PASS for any of them.
    ```bash
    npm run migration:restore-rehearsal -- --dump hotel-management-saas-20261028-140823.dump \
      --expect-sha256 F81566E9CCBB511DD34D0FEA5076934CDFBB03CD8BCDE1B1611E8D0F77DB24A7 \
-     --base-url "postgresql://…/postgres"
+     --base-url "postgresql://…/postgres" --toc        # then, without --toc, the rehearsal itself
    ```
+
+   That archive is a **Supabase** dump, so it needs a restore profile: `--profile plain` (the default
+   `auto` picks it for a stock server) restores the application schema and skips Supabase's `auth`,
+   `storage`, `realtime`, `vault`, `supabase_migrations` schemas and any extension the target lacks,
+   while still requiring every archive table to exist afterwards. `--toc` describes the archive without
+   connecting to anything. The Windows runbook is
+   [rehearsal-supabase-archive.md](rehearsal-supabase-archive.md).
 4. **Per-migration atomicity holds only as far as PostgreSQL's implicit transaction.** §7 shows the
    engine sends each migration as one multi-statement message (no explicit `BEGIN`/`COMMIT`), so a
    failure rolls the whole file back — demonstrated. That is a property of the simple-query protocol,
