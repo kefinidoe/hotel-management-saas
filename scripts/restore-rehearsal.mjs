@@ -123,6 +123,38 @@ const READ_ONLY_OPTION = "-c default_transaction_read_only=on";
  */
 let scratchToClean = null;
 
+/**
+ * Turn pg_restore's stderr into report lines that name the failing statement.
+ *
+ * pg_restore prints the offending SQL on the lines after the error:
+ *
+ *   pg_restore: error: could not execute query: ERROR:  schema "realtime" does not exist
+ *   Command was: CREATE FUNCTION public.audit_realtime(wal realtime.wal_rls) ...
+ *
+ * Keeping only the `error:` line says what broke but not which object caused it,
+ * which is exactly the information needed to decide whether the filter missed a
+ * dependency or the archive is genuinely damaged.
+ */
+function extractRestoreProblems(stderr) {
+  const lines = String(stderr ?? "").split(/\r?\n/);
+  const problems = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/error:/i.test(lines[i]) || /does not exist, skipping/i.test(lines[i])) continue;
+    const parts = [lines[i].trim()];
+    for (let j = i + 1; j < lines.length; j++) {
+      const next = lines[j];
+      if (!next.trim() || /^\s*pg_restore:/.test(next)) break;
+      i = j;
+      // psql-style error context (`LINE 4: ...` and the caret under it) is noise
+      // once the error text and the statement are on one line.
+      if (/^\s*LINE \d+:/.test(next) || /^\s*[~^]+\s*$/.test(next)) continue;
+      parts.push(next.trim());
+    }
+    problems.push(parts.join(" ").replace(/\s+/g, " ").slice(0, 800));
+  }
+  return problems;
+}
+
 /** Temporary files/directories created for a --use-list restore; removed on exit. */
 const tempPathsToClean = [];
 
@@ -883,9 +915,7 @@ async function main() {
         dumpPath,
       ];
       const result = runPgRestore(pgRestoreBin, args);
-      const problems = result.stderr
-        .split(/\r?\n/)
-        .filter((line) => /error:/i.test(line) && !/does not exist, skipping/i.test(line));
+      const problems = extractRestoreProblems(result.stderr);
       report.restore = {
         ok: result.status === 0 && problems.length === 0,
         problems,

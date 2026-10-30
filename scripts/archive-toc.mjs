@@ -45,6 +45,26 @@
  *    `ERROR: extension "supabase_vault" does not exist` -- the failure seen in
  *    the first genuine rehearsal of the owner's backup. `objectType`/`objectName`
  *    expose the dependency so it can be excluded with its object.
+ *
+ * Three further ways an entry depends on a schema it does not belong to, all of
+ * which produced real restore failures:
+ *
+ *  - Object types that are several words long must be split before the schema
+ *    field, or the type name's tail is read as the schema. `ROW SECURITY realtime
+ *    messages postgres` read as `{ type: "ROW", schema: "SECURITY", name:
+ *    "realtime" }` and survived the `realtime` exclusion, so the restore ran
+ *    `ALTER TABLE realtime.messages ENABLE ROW LEVEL SECURITY` and died with
+ *    `ERROR: schema "realtime" does not exist`.
+ *  - A function in a *retained* schema can carry an excluded schema in its
+ *    argument list: `FUNCTION public audit_realtime(realtime.wal_rls)`. The entry
+ *    belongs to `public`, so it was kept, and `CREATE FUNCTION` failed on the
+ *    unresolved argument type with the same error.
+ *  - Publication membership (`PUBLICATION TABLE ...`) depends on the publication;
+ *    excluding the publication alone leaves an `ALTER PUBLICATION` that refers to
+ *    an object that was never created.
+ *
+ * Hence `OBJECT_TYPE_PHRASES` below (the full set of multi-word TOC types) and
+ * the schema-reference scan in `buildFilteredToc`.
  */
 
 import { spawnSync } from "node:child_process";
@@ -77,21 +97,62 @@ export const SUPABASE_MANAGED_SCHEMAS = [
 /** The schema this application actually owns. */
 export const APPLICATION_SCHEMA = "public";
 
-/** TOC types that name their object in three words (`SEQUENCE OWNED BY public s`). */
-const THREE_WORD_TYPES = new Set(["SEQUENCE OWNED BY"]);
-
-/** TOC types that name their object in two words. */
-const TWO_WORD_TYPES = new Set([
-  "TABLE DATA",
+/**
+ * Every pg_dump TOC object type that is more than one word, sorted longest
+ * first at load so `MATERIALIZED VIEW DATA` is tried before `MATERIALIZED VIEW`.
+ *
+ * The parser splits `<TYPE> <schema> <name> [<owner>]`, so a type missing from
+ * here hands its own tail to the schema slot. `ROW SECURITY realtime messages`
+ * becoming `{ type: "ROW", schema: "SECURITY" }` is exactly how a `realtime`
+ * object survived the `realtime` exclusion. Comparisons are case-sensitive
+ * against these upper-case type names, so a schema or table called `data` cannot
+ * be mistaken for `TABLE DATA`.
+ */
+const OBJECT_TYPE_PHRASES = [
+  "PUBLICATION TABLES IN SCHEMA",
+  "TEXT SEARCH CONFIGURATION",
+  "TEXT SEARCH DICTIONARY",
+  "TEXT SEARCH TEMPLATE",
+  "TEXT SEARCH PARSER",
+  "MATERIALIZED VIEW DATA",
+  "FOREIGN TABLE DATA",
+  "SEQUENCE OWNED BY",
+  "PUBLICATION TABLE",
+  "DATABASE PROPERTIES",
+  "STATISTICS EXTENDED",
+  "MATERIALIZED VIEW",
+  "CHECK CONSTRAINT",
+  "OPERATOR CLASS",
+  "OPERATOR FAMILY",
+  "ACCESS METHOD",
   "TABLE ATTACH",
-  "FK CONSTRAINT",
+  "BLOB METADATA",
+  "BLOB COMMENTS",
+  "LARGE OBJECT",
+  "INDEX ATTACH",
   "DEFAULT ACL",
   "EVENT TRIGGER",
-  "MATERIALIZED VIEW",
   "USER MAPPING",
-  "BLOB METADATA",
+  "ROW SECURITY",
   "SEQUENCE SET",
-]);
+  "FK CONSTRAINT",
+  "SHELL TYPE",
+  "TABLE DATA",
+].sort((a, b) => b.split(" ").length - a.split(" ").length);
+
+/** Longest matching type phrase at the start of `tokens`, or 0. */
+function matchObjectType(firstWord, tokens) {
+  for (const phrase of OBJECT_TYPE_PHRASES) {
+    const words = phrase.split(" ");
+    if (words[0] !== firstWord) continue;
+    let matches = words.length - 1 <= tokens.length;
+    for (let i = 1; matches && i < words.length; i++) {
+      if (tokens[i - 1] !== words[i]) matches = false;
+    }
+    if (matches) return words.length;
+  }
+  return 0;
+}
 
 /**
  * TOC types that name a *dependent* object after the `-` placeholder, e.g.
@@ -112,6 +173,10 @@ export const SUPABASE_ONLY_TYPES = [
   "SERVER",
   "USER MAPPING",
   "PUBLICATION",
+  // Membership entries depend on the publication: skipping `PUBLICATION` alone
+  // would leave `ALTER PUBLICATION ... ADD TABLE` pointing at nothing.
+  "PUBLICATION TABLE",
+  "PUBLICATION TABLES IN SCHEMA",
   "SUBSCRIPTION",
 ];
 
@@ -163,18 +228,13 @@ export function parseToc(text) {
     let type = firstWord;
     let remainder = rest.trim();
 
-    // `SEQUENCE OWNED BY public Guest_id_seq postgres` reads as a three-word type;
-    // without this the parser called `OWNED` a schema and the analysis reported it
-    // as one.
+    // Split multi-word types (`ROW SECURITY`, `SEQUENCE OWNED BY`, `TABLE DATA`)
+    // before the schema slot, or the type's own tail is read as the schema.
     const words = remainder ? remainder.split(/\s+/) : [];
-    const threeWord = words.length >= 2 ? `${firstWord} ${words[0]} ${words[1]}` : "";
-    const twoWord = words.length >= 1 ? `${firstWord} ${words[0]}` : "";
-    if (THREE_WORD_TYPES.has(threeWord)) {
-      type = threeWord;
-      remainder = words.slice(2).join(" ").trim();
-    } else if (TWO_WORD_TYPES.has(twoWord)) {
-      type = twoWord;
-      remainder = words.slice(1).join(" ").trim();
+    const typeWords = matchObjectType(firstWord, words);
+    if (typeWords > 0) {
+      type = [firstWord, ...words.slice(0, typeWords - 1)].join(" ");
+      remainder = words.slice(typeWords - 1).join(" ").trim();
     }
 
     const parts = remainder ? remainder.split(/\s+/) : [];
@@ -234,6 +294,10 @@ export function relationsIn(parsed, schema) {
  * `availableExtensions` is optional; when given, extensions missing from the
  * target are listed as `unavailableExtensions`.
  */
+/**
+ * @param {{ header: string[], entries: Array<Record<string, unknown>> }} parsed
+ * @param {{ availableExtensions?: string[] | null }} [options]
+ */
 export function summariseToc(parsed, { availableExtensions = null } = {}) {
   const byType = {};
   const bySchema = {};
@@ -272,6 +336,39 @@ export function summariseToc(parsed, { availableExtensions = null } = {}) {
   };
 }
 
+/** Escape a schema name for use inside a regular expression. */
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Does this TOC line name an object inside one of `schemas`?
+ *
+ * Matches a qualified reference (`realtime.wal_rls`, `"realtime"."x"`) but not a
+ * bare word that merely contains the schema name: `supabase_realtime` has no dot
+ * after it, and `_realtime.messages` has `_` before it.
+ *
+ * This is what catches `FUNCTION public audit_realtime(realtime.wal_rls)`: the
+ * entry belongs to `public` and would otherwise be restored, then fail when
+ * PostgreSQL cannot resolve the argument type.
+ */
+/**
+ * @param {string} text
+ * @param {Iterable<string>} schemas
+ * @returns {boolean}
+ */
+export function referencesSchema(text, schemas) {
+  if (!text) return false;
+  for (const schema of schemas) {
+    if (!schema) continue;
+    // Optional surrounding quotes, and a guard so `_realtime` is not read as
+    // `realtime`.
+    const pattern = new RegExp('(^|[^\\w$])"?' + escapeRegExp(schema) + '"?\\s*\\.');
+    if (pattern.test(text)) return true;
+  }
+  return false;
+}
+
 /**
  * Produce a `pg_restore --use-list` file that restores everything except the
  * entries the caller excluded.
@@ -280,6 +377,10 @@ export function summariseToc(parsed, { availableExtensions = null } = {}) {
  * `pg_restore` treats as "do not restore this entry". Header lines are preserved
  * verbatim, and the original order is kept so dependencies between kept entries
  * stay intact.
+ */
+/**
+ * @param {{ header: string[], entries: Array<Record<string, unknown>> }} parsed
+ * @param {{ excludeSchemas?: string[], excludeExtensions?: string[], excludeTypes?: string[] }} [options]
  */
 export function buildFilteredToc(parsed, { excludeSchemas = [], excludeExtensions = [], excludeTypes = [] } = {}) {
   const schemaSet = new Set(excludeSchemas);
@@ -308,6 +409,13 @@ export function buildFilteredToc(parsed, { excludeSchemas = [], excludeExtension
         : entry.objectType === "SCHEMA"
           ? schemaSet.has(entry.objectName)
           : false;
+    // Anything else that names an object in an excluded schema -- typically a
+    // retained function whose signature uses an excluded type, e.g.
+    // `FUNCTION public audit_realtime(realtime.wal_rls)`. The entry's own schema
+    // is `public`, so only its text reveals the dependency.
+    const excludedByReference = !excludedBySchema && !excludedByType && !excludedByExtension && !excludedByDependency
+      ? referencesSchema(entry.raw, schemaSet)
+      : false;
     const reason = excludedBySchema
       ? "schema"
       : excludedByType
@@ -318,7 +426,9 @@ export function buildFilteredToc(parsed, { excludeSchemas = [], excludeExtension
             ? entry.type === "COMMENT"
               ? `${entry.objectType.toLowerCase()} comment`
               : `${entry.objectType.toLowerCase()} ${entry.type.toLowerCase()}`
-            : null;
+            : excludedByReference
+              ? "schema reference"
+              : null;
     if (reason) {
       excluded.push({ type: entry.type, schema: entry.schema, name: entry.name, objectType: entry.objectType, objectName: entry.objectName, reason });
       lines.push(`; ${entry.raw}`);
