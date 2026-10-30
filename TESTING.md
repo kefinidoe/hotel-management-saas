@@ -2,27 +2,31 @@
 
 > ## Current verification status (2026-10-30)
 >
-> The latest full Vitest run passed **647/647 tests across 45 files**. `npm run lint`,
-> `npx tsc --noEmit`, Prisma Client generation, Prisma schema validation, and the Next.js
-> production build also passed. The test suite uses mocks and disposable in-memory PGlite
-> databases; it does not verify a deployed migration history or substitute for a real
-> PostgreSQL rehearsal.
+> The latest full Vitest run passed **678/678 tests across 46 files**, and `npm run lint` passed.
+> `npx tsc --noEmit` currently reports 296 diagnostics, all of them consequences of the Prisma
+> client not being generated in this sandbox (77 missing `@prisma/client` exports plus cascading
+> inference errors); none are in the migration, adoption or rehearsal code. Prisma generation,
+> schema validation and the Next.js production build could not run here because Prisma fetches its
+> engines from `binaries.prisma.sh`, which this sandbox cannot reach.
 >
 > **73 tests remain illustrative placeholders**: 36 in `workflows/guest-lifecycle.test.ts` and
 > 37 in `utilities/helpers.test.ts`. Their passing result is not evidence that the complete
 > guest lifecycle or those utility functions work end-to-end.
 >
-> Tooling checks/builds used only dummy URLs at `127.0.0.1:1`; no database was contacted and
-> no migration, seed, restore, reset, or database write was run. Vite emits an existing,
-> non-blocking config-loader warning during tests.
+> The migration work is additionally covered by a **real PostgreSQL 17.11 rehearsal**
+> (`scripts/migration-rehearsal.mjs`, 7 scenarios, 61 assertions, all passing) that applies the
+> committed migrations, adopts ledgerless databases and proves the fail-closed paths. Details in
+> `docs/saas-migration-rehearsal.md`. `prisma migrate deploy` itself has still not been executed
+> anywhere, because of the engine-availability limitation above.
 
 ## Overview
-The current suite has **647 tests in 45 files**. It is green as a test suite, but mocked and
+The current suite has **678 tests in 46 files**. It is green as a test suite, but mocked and
 placeholder cases have limited reach. Relevant tenant and schema test groups include:
 
 | Suite | Tests | What it checks |
 |---|---:|---|
-| `schema/migrations.test.ts` | 7 | Migration chain, legacy conversion, and proposal checks using disposable PGlite instances |
+| `schema/migrations.test.ts` | 12 | Migration chain, schema parity, legacy conversion, tenant join-key prechecks, idempotency guards (disposable PGlite) |
+| `schema/migration-adoption.test.ts` | 26 | Release manifest, checkpoint classification and ledgerless-adoption planning (pure, no database) |
 | `schema/multi-tenant-schema.test.ts` | 9 | Tenant-scoped schema constraints |
 | `schema/cross-tenant-integrity.test.ts` | 24 | Cross-tenant foreign-key and integrity rules |
 | `tenant-isolation/affected-routes.test.ts` | 29 | Tenant isolation across route handlers with mocks |
@@ -34,10 +38,13 @@ placeholder cases have limited reach. Relevant tenant and schema test groups inc
 | `scripts/database-target-safety.test.ts` | 4 | Identifier validation and wiring for standalone backup/restore target checks |
 | `safety/offline-auth-routes.test.ts` | 3 | Offline 503 responses without importing Prisma-backed auth modules |
 
-Real database integration, deployed migration-history comparison, browser E2E, backup/restore,
-cleanup, and seed against a real database were **not run**. The migration suite proves only that
-the current migration files execute against fresh disposable in-memory databases and satisfy its
-fixtures; it cannot establish that rewriting an older migration is safe for a deployed target.
+Browser E2E, backup/restore against the real target, cleanup and seed against a real database were
+**not run**. The PGlite suite proves that the current migration files execute against fresh
+disposable in-memory databases and satisfy their fixtures. It is complemented by
+`scripts/migration-rehearsal.mjs`, which was run against a real PostgreSQL 17.11 server and covers
+the fresh chain, the legacy upgrade, ledgerless adoption, the fail-closed conflict path and re-run
+idempotency. Neither establishes that `prisma migrate deploy` behaves identically, because the
+pinned Prisma engines are unavailable here.
 
 ## Test Framework
 - **Vitest** - Modern, fast test runner with Vue/React support
@@ -53,7 +60,9 @@ __tests__/
 │   ├── seed.test.ts                   # REAL: runs prisma/seed.ts (8 tests)
 │   └── cleanup-guard.test.ts          # REAL: destructive-cleanup rules (24 tests)
 ├── schema/
-│   └── migrations.test.ts             # REAL: migration/schema checks in PGlite (7 tests)
+│   ├── migrations.test.ts             # REAL: migration/schema checks in PGlite (12 tests)
+│   ├── migration-adoption.test.ts     # REAL: manifest + ledgerless adoption planning (26 tests)
+│   └── migration-runner.ts            # PGlite chain runner used by the migration tests
 ├── middleware/
 │   └── matcher.test.ts                # REAL: verifies middleware.ts matcher (4 tests)
 ├── rooms/
@@ -211,14 +220,16 @@ npm run test:coverage
 Latest full run on the worktree:
 
 ```
-Test Files  45 passed (45)
-     Tests  647 passed (647)
+Test Files  46 passed (46)
+     Tests  678 passed (678)
 ```
 
 The PGlite schema/migration tests create disposable in-memory databases and close them after
 use. They exercise the current migration files from a fresh schema and representative legacy
-fixtures. They do not connect to an external database, validate PostgreSQL/Supabase version
-compatibility, or establish whether an older migration has already been applied elsewhere.
+fixtures; they do not connect to an external database. The separate PostgreSQL rehearsal
+(`REHEARSAL_BASE_URL=postgresql://postgres@127.0.0.1:<port> npm run migration:rehearse`) covers a
+real server of the target major version and the ledgerless-adoption paths, but still not
+`prisma migrate deploy` itself.
 
 ### Coverage notes
 

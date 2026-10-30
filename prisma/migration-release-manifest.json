@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Reviewed migration release artifacts. `node scripts/migrate-adopt.mjs` refuses to baseline a migration whose file no longer matches this manifest.",
+  "prismaVersion": "5.17.0",
+  "migrations": [
+    {
+      "name": "20260915161717_init",
+      "sha256": "286afd77a3e2fb51e4a862c5d44a94687a86e937382e240b2e5b2c44e28a78fd"
+    },
+    {
+      "name": "20260919202946_add_guest_archive",
+      "sha256": "806e603f747aaef94f75643073c81195c5f11a0972a87b5c9df031364fc30e3f"
+    },
+    {
+      "name": "20260920051027_add_inventory_recipes_purchases_wastage",
+      "sha256": "a9821a002cced08b6dd012130e68e6a8cef2c666b6a27f63794ac049d92e4706"
+    },
+    {
+      "name": "20260927141709_add_inventory_item_active",
+      "sha256": "bb41e3c113f8688815a4bb1f8f0a5a7f08f5cca55978e3dc19084c61b0d6d4c9"
+    },
+    {
+      "name": "20260929182000_add_room_is_twin",
+      "sha256": "0389ac85a87eaad02560de75dfd4a6158ce5cdd1d5b362f151d26fb2119125ff"
+    },
+    {
+      "name": "20261001120000_add_wastage_accountability",
+      "sha256": "b3656e3152670ff778c498f4f1dcdf2a1511fde858e68a04cb518f3db47412f7"
+    },
+    {
+      "name": "20261001140000_normalize_restaurant_menu_categories",
+      "sha256": "c674e4ca534d5448ec1228cb9a6c0a4174e83c9cd23818534ebbf3284716744e"
+    },
+    {
+      "name": "20261001160000_add_dashboard_query_indexes",
+      "sha256": "fa0d4ae5ab7232e70181e0b960147dc53aa2523a172389f7a5fd76ed92cad576"
+    },
+    {
+      "name": "20261001180000_add_room_active_status",
+      "sha256": "4160536ebf785d59fd8ab03cdc855d1a0eeba07bdf45e44ce1b7367c275c65f1"
+    },
+    {
+      "name": "20261002090000_remove_room_is_twin",
+      "sha256": "0706ad6e45a010c35c816b501a4f4fa572fa0922ae27c3b14677922086239019"
+    },
+    {
+      "name": "20261002090100_add_half_board_meal_plan",
+      "sha256": "d0b63ca8bbb9407a10aa0c7a9252791c9d491c7f29085bfa096b65c9be6386f9"
+    },
+    {
+      "name": "20261002090200_add_half_board_tariffs",
+      "sha256": "8b53d7bdbb230b8e89ea4c0465ae16dad7a19741858db9f66aae9b3ab0fb4f46"
+    },
+    {
+      "name": "20261008123000_multi_tenant_saas_init",
+      "sha256": "1699ad5263e6870210b92292bfde03aa10fb173f3ca4d39a59036a00f602663a"
+    },
+    {
+      "name": "20261012063000_add_payment_idempotency_key",
+      "sha256": "2683be13a89c9a8c0b4d2b238246a35ff7c5e9c66371943aa8f29168c1603b46"
+    },
+    {
+      "name": "20261014020000_add_payment_request_fingerprint",
+      "sha256": "1f30e7497b0eabec94f1d8c9433a4bc2f7ff839d155e52f89ca3d74dae48c164"
+    },
+    {
+      "name": "20261019000000_add_saas_subscription",
+      "sha256": "3735b733c5c6a4698deec0a383ad8f1f8ef364c4e0498bdd1bb9e420496a7d02"
+    },
+    {
+      "name": "20261027100000_add_membership_department",
+      "sha256": "55f96198ca2c6ac796f5c8b994df6cdf792b7f093d20d8e8451a7a43c72845fa"
+    },
+    {
+      "name": "20261029120000_add_pos_charge_to_room_idempotency",
+      "sha256": "9def0c0754c81f821ac6842ae33eda8153c1473c0c564aa3098c97c0b9dd377e"
+    },
+    {
+      "name": "20261029130000_add_tenant_composite_join_fks",
+      "sha256": "f2c5e918f612eb6ce7e5a1aaa12315821ef5f881ffb3c64dc77b472806abfab8"
+    }
+  ]
+}
