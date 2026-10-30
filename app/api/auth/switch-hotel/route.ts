@@ -1,39 +1,12 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { isDatabaseConfigured } from "@/lib/db-safety-guard";
-
-function validateOrigin(req: Request): boolean {
-  const origin = req.headers.get("origin");
-  if (!origin) {
-    // Browsers must provide Origin on POST requests
-    return false;
-  }
-
-  let parsedOrigin: URL;
-  try {
-    parsedOrigin = new URL(origin);
-  } catch {
-    return false;
-  }
-
-  const expectedUrl = process.env.NEXTAUTH_URL || "http://localhost:3000";
-  let expectedOrigin: URL;
-  try {
-    expectedOrigin = new URL(expectedUrl);
-  } catch {
-    return false;
-  }
-
-  return (
-    parsedOrigin.protocol === expectedOrigin.protocol &&
-    parsedOrigin.hostname === expectedOrigin.hostname &&
-    parsedOrigin.port === expectedOrigin.port
-  );
-}
+import { isSameOriginRequest } from "@/lib/request-origin";
 
 export async function POST(req: Request) {
-  // 1. Strict Origin / CSRF Enforcement
-  if (!validateOrigin(req)) {
+  // 1. Same-origin enforcement (see lib/request-origin.ts: Chromium omits
+  //    Origin on same-origin POSTs, so Sec-Fetch-Site is part of the check).
+  if (!isSameOriginRequest(req)) {
     return NextResponse.json(
       { error: "CSRF_ORIGIN_INVALID", message: "Cross-origin request rejected" },
       { status: 403 }
