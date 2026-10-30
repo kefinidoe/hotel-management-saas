@@ -68,3 +68,6 @@ backups/
 # Additional recovery copies - keep local, do not commit
 *.recovery-copy
 *.pre-rewrite-backup
+
+# Owner acceptance-testing environment (local, disposable, never committed)
+.owner-test/

@@ -34,7 +34,8 @@
     "postinstall": "prisma generate",
     "db:integrity": "node scripts/db-integrity.mjs",
     "test:browser": "node scripts/browser-e2e.mjs",
-    "native-engine:verify": "node scripts/native-engine-verify.mjs"
+    "native-engine:verify": "node scripts/native-engine-verify.mjs",
+    "owner:env": "node scripts/owner-test-env.mjs"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
