@@ -47,6 +47,28 @@ The migration history has been reviewed and the deployment path is documented in
 3. For an offline frontend preview, follow **Safe local frontend-only preview (no database)** above. Do not copy a database URL from another environment.
 4. Database-backed testing requires a separately provisioned local PostgreSQL instance. Apply the reviewed chain in `prisma/migrations` in order, or run `prisma migrate deploy` against a *fresh* local database. Do not run `prisma migrate dev`, `prisma db push`, or seed scripts against an existing or shared database; for a database that already has a schema but no ledger, use the adoption runbook in `docs/migration-strategy.md`.
 
+## Verifying a change
+
+```bash
+npx tsc --noEmit && npm run lint          # types and lint
+env -u DATABASE_URL -u SAAS_ENVIRONMENT -u SAAS_DATABASE_IDENTIFIER -u DIRECT_URL \
+  npm run test:run                        # unit + integration (vitest)
+npm run build                             # production build
+node scripts/e2e-smoke.mjs --base http://127.0.0.1:3000 --json          # 46 HTTP checks
+npm run test:browser -- --base http://127.0.0.1:3000 \
+  --out docs/evidence/browser --json docs/evidence/browser-results.json # 25 browser steps
+npm run db:integrity -- --json            # 49 database checks after a migration
+npm run native-engine:verify -- --json    # native Prisma engine: PASS/FAIL/BLOCKED
+```
+
+The browser suite needs a Chromium: it uses `@sparticuz/chromium` (bundled, unpacked from its own
+archives) through `puppeteer-core`, so it runs without a system Chrome. Every step writes a screenshot,
+and a failure writes the screenshot, the page HTML and the network log. What the round-13 run found —
+and how to read the PASS/FAIL/BLOCKED verdicts — is in
+[docs/production-readiness-report-round13.md](docs/production-readiness-report-round13.md); the two
+checks that need access this environment does not have are in
+[docs/handoff-production-verification.md](docs/handoff-production-verification.md).
+
 The login screen can be inspected without a database. Authentication, registration, dashboard data, and operational modules require a configured local database and are intentionally unavailable in frontend-only mode. No successful sign-in or business data is fabricated.
 
 ## What's next (Step 2)

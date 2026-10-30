@@ -114,13 +114,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "A valid email address is required." }, { status: 400 });
   }
 
-  if (!password || password.length < 8) {
-    return NextResponse.json(
-      { error: "Initial password must be at least 8 characters long." },
-      { status: 400 }
-    );
-  }
-
   if (department && department.length > 100) {
     return NextResponse.json({ error: "Department name must be 100 characters or fewer." }, { status: 400 });
   }
@@ -217,6 +210,16 @@ export async function POST(req: Request) {
             "Invitation sent. The account holder must accept it before this hotel appears in their workspace.",
         },
         { status: 202 }
+      );
+    }
+
+    // A brand-new account needs an initial password. An existing account is only
+    // invited, so this field is ignored for it — requiring it would push one
+    // administrator into choosing a password for somebody else's account.
+    if (!password || password.length < 8) {
+      return NextResponse.json(
+        { error: "Initial password must be at least 8 characters long." },
+        { status: 400 }
       );
     }
 

@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import StaffClient from "@/components/staff/StaffClient";
+import { pendingInvitationIds } from "@/lib/invitations";
 import { requirePageRole } from "@/lib/page-auth";
 import { ROLE_GROUPS } from "@/lib/permissions";
 
@@ -26,6 +27,8 @@ export default async function StaffPage() {
     orderBy: { user: { name: "asc" } },
   });
 
+  const pending = await pendingInvitationIds(memberships.map((m) => m.id));
+
   const initialStaff = memberships.map((m) => ({
     id: m.id,
     userId: m.user.id,
@@ -36,6 +39,7 @@ export default async function StaffPage() {
     department: m.department,
     status: m.status,
     isActive: m.user.isActive && m.status === "ACTIVE",
+    invitationPending: pending.has(m.id),
     lastLoginAt: m.user.lastLoginAt?.toISOString() ?? null,
     createdAt: m.createdAt.toISOString(),
   }));

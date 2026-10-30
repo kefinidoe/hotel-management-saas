@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { Plus, X, Settings2 } from "lucide-react";
 import clsx from "clsx";
 import { apiErrorMessage, requestJson } from "@/lib/client-api";
+import { MEAL_PLANS, MEAL_PLAN_LABELS, type MealPlanCode } from "@/lib/tariffs";
 
 type Room = {
   id: string;
@@ -24,6 +25,12 @@ type RoomType = {
   description: string | null;
   baseRate: number;
   capacity: number;
+  /**
+   * The meal plan a room type is sold on. Reservations pick a tariff by
+   * occupancy + meal plan, so a room type without one cannot be booked — the
+   * reservation dialog reports "no tariff for this occupancy and meal plan".
+   */
+  mealPlan: string | null;
 };
 
 const STATUS_OPTIONS = ROOM_STATUSES;
@@ -409,6 +416,7 @@ function RoomTypesModal({
   const [name, setName] = useState("");
   const [baseRate, setBaseRate] = useState("");
   const [capacity, setCapacity] = useState("2");
+  const [mealPlan, setMealPlan] = useState<MealPlanCode>("BED_ONLY");
   const [editingType, setEditingType] = useState<RoomType | null>(null);
   const [loading, setLoading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -418,6 +426,7 @@ function RoomTypesModal({
     setName(roomType.name);
     setBaseRate(String(roomType.baseRate));
     setCapacity(String(roomType.capacity));
+    setMealPlan(MEAL_PLANS.includes(roomType.mealPlan as MealPlanCode) ? (roomType.mealPlan as MealPlanCode) : "BED_ONLY");
     onError(null);
   }
 
@@ -426,6 +435,7 @@ function RoomTypesModal({
     setName("");
     setBaseRate("");
     setCapacity("2");
+    setMealPlan("BED_ONLY");
     onError(null);
   }
 
@@ -444,7 +454,7 @@ function RoomTypesModal({
 
     setLoading(true);
     onError(null);
-    const payload = { name: name.trim(), baseRate: numericRate, capacity: numericCapacity };
+    const payload = { name: name.trim(), baseRate: numericRate, capacity: numericCapacity, mealPlan };
     try {
       if (editingType) {
         await requestJson<RoomType>(`/api/room-types/${editingType.id}`, {
@@ -491,7 +501,7 @@ function RoomTypesModal({
             <div>
               <p className="text-sm font-medium">{rt.name}</p>
               <p className="text-xs text-text-secondary">
-                KSh {rt.baseRate.toLocaleString()} · sleeps {rt.capacity}
+                KSh {rt.baseRate.toLocaleString()} · sleeps {rt.capacity} · {rt.mealPlan ? MEAL_PLAN_LABELS[rt.mealPlan as MealPlanCode] : "no meal plan"}
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -544,6 +554,23 @@ function RoomTypesModal({
             required
             className={inputClass()}
           />
+        </div>
+        <div>
+          <label className="block text-sm font-medium mb-1.5">Meal Plan</label>
+          <select
+            value={mealPlan}
+            onChange={(e) => setMealPlan(e.target.value as MealPlanCode)}
+            className={inputClass()}
+          >
+            {MEAL_PLANS.map((plan) => (
+              <option key={plan} value={plan}>
+                {MEAL_PLAN_LABELS[plan]}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs text-text-muted mt-1">
+            Reservations match a room type by occupancy and meal plan, so this is required to book it.
+          </p>
         </div>
         <div className="flex gap-2">
           {editingType && (

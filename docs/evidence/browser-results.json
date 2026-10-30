@@ -1,0 +1,244 @@
+{
+  "target": "http://127.0.0.1:3100",
+  "startedAt": "2026-10-30T17:48:47.011Z",
+  "finishedAt": "2026-10-30T17:49:54.557Z",
+  "browser": "HeadlessChrome/153.0.8010.0",
+  "databaseAssertions": "enabled (psql)",
+  "fixtures": {
+    "hotelA": "Aurora Lodge 1793382527011",
+    "hotelB": "Bayside Inn 1793382527011",
+    "ownerA": {
+      "name": "Amina Owner",
+      "email": "owner-a-1793382527011@example.test",
+      "password": "OwnerPass123!"
+    },
+    "ownerB": {
+      "name": "Bram Owner",
+      "email": "owner-b-1793382527011@example.test",
+      "password": "OwnerPass123!"
+    },
+    "receptionist": {
+      "name": "Ruth Reception",
+      "email": "reception-a-1793382527011@example.test",
+      "password": "Reception123!"
+    },
+    "guest": {
+      "name": "Grace Guest 1793382527011",
+      "phone": "+254711000111"
+    },
+    "roomNumber": "101",
+    "menuItem": "Mandazi 27011",
+    "menuCategory": "Counter 27011",
+    "inventoryItem": "Maize Flour 27011",
+    "ticket": "Shower leaking 27011"
+  },
+  "totals": {
+    "steps": 25,
+    "passed": 25,
+    "failed": 0
+  },
+  "screenshots": [
+    "/home/user/hotel-management-saas/docs/evidence/browser/01-hotel-a-register.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/02-hotel-a-dashboard.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/03-rooms-create-type.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/04-rooms-create-room.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/05-staff-add-new-account.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/06-hotel-b-register.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/07-tenant-isolation-a.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/08-invitation-sent.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/09-invitation-not-yet-access.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/10-invitation-accepted.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/11-hotel-switch.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/12-role-sign-in.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/13-role-navigation.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/14-role-direct-url-denied.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/15-reservation-create.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/16-check-in.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/17-folio-payment-checkout.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/18-housekeeping-task.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/19-maintenance-ticket.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/20-inventory-item.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/21-pos-sale.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/22-reports-render.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/23-subscription-render.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/24-tenant-isolation-b.png",
+    "/home/user/hotel-management-saas/docs/evidence/browser/25-sign-out.png"
+  ],
+  "steps": [
+    {
+      "id": "hotel-a-register",
+      "description": "register Hotel A's owner and create the workspace through the UI",
+      "status": "PASS",
+      "ms": 3682,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/01-hotel-a-register.png"
+    },
+    {
+      "id": "hotel-a-dashboard",
+      "description": "the dashboard shows the hotel, the owner and the setup checklist",
+      "status": "PASS",
+      "ms": 507,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/02-hotel-a-dashboard.png"
+    },
+    {
+      "id": "rooms-create-type",
+      "description": "create a room type from the Rooms page",
+      "status": "PASS",
+      "ms": 1732,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/03-rooms-create-type.png"
+    },
+    {
+      "id": "rooms-create-room",
+      "description": "create room 101 of that type and see it listed",
+      "status": "PASS",
+      "ms": 1940,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/04-rooms-create-room.png"
+    },
+    {
+      "id": "staff-add-new-account",
+      "description": "add a receptionist who has no account yet",
+      "status": "PASS",
+      "ms": 2300,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/05-staff-add-new-account.png"
+    },
+    {
+      "id": "hotel-b-register",
+      "description": "a second hotel is created by a different owner in a separate browser",
+      "status": "PASS",
+      "ms": 3520,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/06-hotel-b-register.png"
+    },
+    {
+      "id": "tenant-isolation-a",
+      "description": "Hotel A's owner sees no trace of Hotel B",
+      "status": "PASS",
+      "ms": 2451,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/07-tenant-isolation-a.png"
+    },
+    {
+      "id": "invitation-sent",
+      "description": "Hotel A invites an existing account from the Staff page",
+      "status": "PASS",
+      "ms": 2022,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/08-invitation-sent.png"
+    },
+    {
+      "id": "invitation-not-yet-access",
+      "description": "the invitee is offered the invitation but not the workspace",
+      "status": "PASS",
+      "ms": 1341,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/09-invitation-not-yet-access.png"
+    },
+    {
+      "id": "invitation-accepted",
+      "description": "the invitee accepts from /select-hotel",
+      "status": "PASS",
+      "ms": 272,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/10-invitation-accepted.png"
+    },
+    {
+      "id": "hotel-switch",
+      "description": "the invitee switches into Hotel A and back to Hotel B",
+      "status": "PASS",
+      "ms": 3283,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/11-hotel-switch.png"
+    },
+    {
+      "id": "role-sign-in",
+      "description": "the receptionist signs in and sees their hotel",
+      "status": "PASS",
+      "ms": 2278,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/12-role-sign-in.png"
+    },
+    {
+      "id": "role-navigation",
+      "description": "the receptionist's navigation hides administration pages",
+      "status": "PASS",
+      "ms": 196,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/13-role-navigation.png"
+    },
+    {
+      "id": "role-direct-url-denied",
+      "description": "typing the admin URL directly is refused, not merely hidden",
+      "status": "PASS",
+      "ms": 1444,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/14-role-direct-url-denied.png"
+    },
+    {
+      "id": "reservation-create",
+      "description": "the owner books a guest into room 101 through the UI",
+      "status": "PASS",
+      "ms": 2237,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/15-reservation-create.png"
+    },
+    {
+      "id": "check-in",
+      "description": "front desk checks the guest in and opens the folio",
+      "status": "PASS",
+      "ms": 1759,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/16-check-in.png"
+    },
+    {
+      "id": "folio-payment-checkout",
+      "description": "settle the folio and check the guest out",
+      "status": "PASS",
+      "ms": 3585,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/17-folio-payment-checkout.png"
+    },
+    {
+      "id": "housekeeping-task",
+      "description": "the checked-out room appears in housekeeping and can be moved along",
+      "status": "PASS",
+      "ms": 11810,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/18-housekeeping-task.png"
+    },
+    {
+      "id": "maintenance-ticket",
+      "description": "raise a maintenance ticket and see it under Open",
+      "status": "PASS",
+      "ms": 1666,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/19-maintenance-ticket.png"
+    },
+    {
+      "id": "inventory-item",
+      "description": "add an inventory item and see its stock",
+      "status": "PASS",
+      "ms": 2138,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/20-inventory-item.png"
+    },
+    {
+      "id": "pos-sale",
+      "description": "add a menu item and take a counter payment in the restaurant POS",
+      "status": "PASS",
+      "ms": 9810,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/21-pos-sale.png"
+    },
+    {
+      "id": "reports-render",
+      "description": "the reports page renders revenue and collection panels",
+      "status": "PASS",
+      "ms": 1801,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/22-reports-render.png"
+    },
+    {
+      "id": "subscription-render",
+      "description": "the subscription page shows the plan band and its limits",
+      "status": "PASS",
+      "ms": 2241,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/23-subscription-render.png"
+    },
+    {
+      "id": "tenant-isolation-b",
+      "description": "the second owner's workspace shows its own data only",
+      "status": "PASS",
+      "ms": 1494,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/24-tenant-isolation-b.png"
+    },
+    {
+      "id": "sign-out",
+      "description": "signing out ends the session and protects the dashboard",
+      "status": "PASS",
+      "ms": 1121,
+      "screenshot": "/home/user/hotel-management-saas/docs/evidence/browser/25-sign-out.png"
+    }
+  ]
+}
