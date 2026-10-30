@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Minus, Plus, Trash2, ShoppingCart, UtensilsCrossed, Settings2, X } from "lucide-react";
 import type { HotelRole } from "@prisma/client";
 import clsx from "clsx";
@@ -390,6 +391,7 @@ export default function RestaurantClient({
   initialActivity: ActivityItem[];
   initialTodayTotal: number;
 }) {
+  const router = useRouter();
   const pendingStorageKey = tenantPOSStorageKey(activeTenantId);
   const canManageMenu = hasRole(currentUserRole, ROLE_GROUPS.MANAGEMENT);
   const [activeCategory, setActiveCategory] = useState(menu[0]?.id ?? "");
@@ -425,6 +427,14 @@ export default function RestaurantClient({
   }, [pendingAttempt]);
 
   const [reconciling, setReconciling] = useState(false);
+
+  useEffect(() => {
+    // `menu` is server-rendered and replaced by router.refresh() after an edit;
+    // a selection pointing at a category that disappeared must fall back.
+    if (menu.length > 0 && !menu.some((category) => category.id === activeCategory)) {
+      setActiveCategory(menu[0].id);
+    }
+  }, [menu, activeCategory]);
 
   const loadActivity = useCallback(async () => {
     const res = await fetch("/api/restaurant/activity");
@@ -1472,7 +1482,15 @@ export default function RestaurantClient({
 }
 
 function ManageMenuModal({ menu, onClose }: { menu: Category[]; onClose: () => void }) {
+  const router = useRouter();
   const [categoryId, setCategoryId] = useState(menu[0]?.id ?? "");
+  useEffect(() => {
+    // The menu is server-rendered; after router.refresh() the previous category
+    // may be gone, which would leave the item form pointing at nothing.
+    if (menu.length > 0 && !menu.some((category) => category.id === categoryId)) {
+      setCategoryId(menu[0].id);
+    }
+  }, [menu, categoryId]);
   const [itemName, setItemName] = useState("");
   const [itemPrice, setItemPrice] = useState("");
   const [newCategory, setNewCategory] = useState("");
@@ -1497,7 +1515,8 @@ function ManageMenuModal({ menu, onClose }: { menu: Category[]; onClose: () => v
     }
     setItemName("");
     setItemPrice("");
-    setMsg("Item added. Refresh the page to see it on the POS.");
+    setMsg("Item added.");
+    router.refresh();
   }
 
   async function addCategory(e: React.FormEvent) {
@@ -1516,7 +1535,10 @@ function ManageMenuModal({ menu, onClose }: { menu: Category[]; onClose: () => v
       return;
     }
     setNewCategory("");
-    setMsg("Category added. Refresh the page to see it.");
+    setMsg("Category added.");
+    // Refresh the server-rendered menu so the new category is selectable now,
+    // instead of telling the user to reload the page.
+    router.refresh();
   }
 
   async function removeItem(id: string) {
