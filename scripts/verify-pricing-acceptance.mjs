@@ -906,7 +906,7 @@ async function main() {
     const status = response.status;
     const body = await response.json().catch(() => ({}));
     assert(status === 409, `expected 409, got ${status}: ${JSON.stringify(body)}`);
-    assert(/repriced/i.test(body.error ?? ""), `unexpected message: ${body.error}`);
+    assert(/repriced|repricing/i.test(body.error ?? ""), `unexpected message: ${body.error}`);
     const remaining = sql(
       `SELECT count(*) FROM "ReservationPriceSnapshot" WHERE "reservationId" = '${created.id}'`
     );

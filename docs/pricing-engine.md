@@ -29,7 +29,9 @@ executed, and the honest gaps.
 | Price snapshots | Append-only version ledger: version 1 frozen at creation, every repricing appends an immutable version (DB trigger); the current price is the highest version. |
 | Snapshot failures | Fail closed: a configured-price reservation whose snapshot cannot be written is rolled back and never sold. Legacy hotels unaffected. |
 | Repricing integrity | New version + `ReservationPriceChange` + reservation update + `RESERVATION_REPRICED` audit event in one serializable transaction; `500 AUDIT_UNAVAILABLE` and full rollback if the audit cannot be written. |
-| Financial retention | `ON DELETE RESTRICT` from reservation and hotel; the delete API refuses repriced reservations; only an explicit purge removes history. |
+| Financial retention | `ON DELETE RESTRICT` from reservation and hotel; deletion is restricted to unused drafts; only an explicit purge removes history. |
+| Deletion policy | Only a draft with no folio line, no payment in any status, no repricing and no extension can be deleted; every refusal is a `409` that lists the evidence, and a permitted deletion is audited. |
+| Extension history | `ReservationExtension` records each approved extension (dates, nights, rate, charge, rooms, folio lines, approver) without touching the frozen booking price. |
 | Repricing concurrency | Repricing takes the hotel's reservation advisory lock, then the reservation row lock, and prices only from data re-read after both. Proved with real concurrent HTTP requests against PostgreSQL. |
 | Financial-state eligibility | A reservation with any folio charge or any payment cannot be repriced (`409`); unpaid stays keep repricing. |
 | Reschedule safety | Moving a priced stay keeps the frozen price, flags `pricingNeedsReview` and writes a review audit row instead of quietly re-pricing. |
@@ -285,6 +287,61 @@ rolls back and the response is `500 {"code":"AUDIT_UNAVAILABLE"}`, never a succe
 moves to a different store, this is the seam where a transactional outbox belongs: the outbox row
 would be written in this same transaction and drained afterwards.
 
+### What may be deleted, and what may not
+
+`DELETE /api/reservations/:id` (management only, under the hotel advisory lock) deletes **only a
+genuinely unused draft**. Everything is decided from a re-read taken under the lock, so a charge
+cannot be posted between the check and the delete.
+
+| Reservation state | Deletion |
+| --- | --- |
+| Pending/confirmed draft, no folio, no payments, no repricing, no extension | **Allowed** — audited (`RESERVATION_DELETED`, strict), room block and the draft's own version-1 quote removed |
+| Any folio charge (room, restaurant, laundry, service, discount, tax) | **Refused** `409 RESERVATION_HAS_FINANCIAL_RECORDS` |
+| Any payment — `COMPLETED`, `PENDING`, `FAILED` or `REFUNDED` (no status filter) | **Refused** `409`, the message names the statuses |
+| A folio with no lines yet | **Refused** `409` — a folio means the stay workflow started |
+| Repricing history (a change row, or any version above 1) | **Refused** `409` |
+| Any stay extension | **Refused** `409` |
+| `CHECKED_IN` / `CHECKED_OUT` | **Refused** `409` |
+| Another hotel's reservation | **Refused** `404` |
+
+The 409 body carries `code: "RESERVATION_HAS_FINANCIAL_RECORDS"` and lists exactly what was found
+(`2 folio charges and 1 payment (1 completed)`), and tells the caller to cancel instead. Nothing is
+deleted on a refusal — verified row by row in the integration tests. There is no cascading deletion
+of financial records anywhere: the only rows a permitted deletion removes are the draft's own room
+block and its own frozen quote, and it names them explicitly.
+
+An audit failure rolls the deletion back (`500 AUDIT_UNAVAILABLE`): a reservation cannot disappear
+without a record of who removed it.
+
+### Stay extensions are their own financial event
+
+`POST /api/reservations/:id/extend` does **not** reprice the booking. The agreed price stays frozen
+(version 1..N untouched, `priceVersion` is only referenced) and each approved extension is written
+to its own table, because `ReservationPriceChange` describes "the price of the same stay was
+re-agreed" and would misstate an extension.
+
+`ReservationExtension` (migration 22) records, per extension: previous check-out, new check-out,
+additional nights, the agreed nightly rate, the additional charge, currency, the rooms affected
+(room id, number, room type, nights, amount per room), the folio and the exact folio lines it
+created, the booking price version it extended, the note, the approver and the timestamp.
+
+The extension, its folio charge lines, the new check-out date and the strict `RESERVATION_EXTENDED`
+audit event commit in one transaction under the hotel's advisory lock, at `READ COMMITTED` (the
+snapshot must be taken after the lock is granted — the same reasoning as repricing). A failing audit
+rolls all of it back.
+
+Duplicate protection is layered:
+
+1. the advisory lock serialises concurrent attempts, and the state (including the current check-out)
+   is re-read after it;
+2. asking for the date the stay already ends on returns `409 EXTENSION_ALREADY_APPLIED`;
+3. `UNIQUE (reservationId, previousCheckOut)` makes posting the same nights from the same check-out
+   moment a database error even if something bypasses the route.
+
+The reservation detail endpoint (`GET /api/reservations/:id`) now returns `priceSnapshots`,
+`priceChanges` and `stayExtensions` (with the approver's name), and the Front Desk “Add Days” modal
+lists the previous extensions for the stay it is about to extend.
+
 ### Retention of financial evidence
 
 The original `ON DELETE CASCADE` from `Reservation` meant deleting a reservation silently erased its
@@ -353,6 +410,13 @@ Screenshots: `docs/evidence/pricing/` (see §12).
 
 - **Migration 20** — `prisma/migrations/20261031120000_add_pricing_engine/migration.sql`: creates the
   eleven tables, enums and indexes; additive only.
+- **Migration 22** — `prisma/migrations/20261101120000_add_reservation_extension_history/migration.sql`:
+  additive, one new table (`ReservationExtension`) with its checks (`nights >= 1`, check-out must
+  move forward, non-negative charge and rate), `UNIQUE (reservationId, previousCheckOut)`, and
+  `RESTRICT` foreign keys to the hotel, the reservation and the approver. No existing table is
+  altered and no existing row is touched. The ledger gained `saas_through_21` and `saas_current` now
+  requires the extension table, its uniqueness index and its `RESTRICT` rule; the release manifest is
+  22 entries.
 - **Migration 21** — `prisma/migrations/20261031160000_price_version_history/migration.sql`
   (financial integrity):
   - adds `ReservationPriceSnapshot.version` (default 1) and `ReservationPriceChange.previousVersion`
@@ -380,7 +444,7 @@ Screenshots: `docs/evidence/pricing/` (see §12).
 ## 10. Verification actually executed
 
 Environment: disposable local PostgreSQL 17 (`127.0.0.1:55433`, database
-`hotel_saas_demo_owner`, 21 migrations applied in place), app built with
+`hotel_saas_demo_owner`, 22 migrations applied in place), app built with
 `SAAS_ENVIRONMENT=saas SAAS_DATABASE_IDENTIFIER=hotel_saas_demo_owner` and served by
 `npx next start -p 3000 -H 0.0.0.0`.
 
@@ -389,15 +453,16 @@ Environment: disposable local PostgreSQL 17 (`127.0.0.1:55433`, database
 | `DATABASE_URL=… DIRECT_URL=… npx prisma validate` | `The schema at prisma/schema.prisma is valid 🚀` |
 | `npx tsc --noEmit` | no output (clean) |
 | `next lint` | `✔ No ESLint warnings or errors` |
-| `vitest run` | **63 files, 959 passed, 6 skipped** |
+| `vitest run` | **64 files, 977 passed, 6 skipped** |
 | `node scripts/verify-pricing-acceptance.mjs --base http://127.0.0.1:3000 --json docs/evidence/pricing/pricing-acceptance.json` | **PASS — 35 passed, 0 failed** |
 | `node scripts/verify-repricing-concurrency.mjs --base http://127.0.0.1:3000 --json docs/evidence/pricing/repricing-concurrency.json` | **PASS — 8 passed, 0 failed** (real PostgreSQL, real HTTP) |
+| `node scripts/verify-reservation-integrity.mjs --base http://127.0.0.1:3000 --json docs/evidence/reservations/deletion-extension-integrity.json` | **PASS — 19 passed, 0 failed** (real PostgreSQL, real HTTP) |
 | `node scripts/verify-reservation-acceptance.mjs --base http://127.0.0.1:3000` | **PASS — 13 passed, 0 failed** |
 | `node scripts/e2e-smoke.mjs --base http://127.0.0.1:3000` | **PASS — 55/55** |
 | `node scripts/browser-e2e.mjs --base http://127.0.0.1:3000` | **PASS — 33/33 browser steps** |
 | `node scripts/owner-test/verify-handover.mjs` (BASE/ORIGIN = 127.0.0.1:3000) | **PASS — 69/69 checks** |
 | `node scripts/db-integrity.mjs` | **PASS — 49 checks, no integrity violations** |
-| `node scripts/migration-ledger.mjs manifest --check` | `Release manifest matches 21 migration files.` |
+| `node scripts/migration-ledger.mjs manifest --check` | `Release manifest matches 22 migration files.` |
 | ledger feature probe against the demo DB | `checkpoints matching: saas_current` |
 | `next build` | `✓ Compiled successfully` |
 
@@ -435,6 +500,29 @@ against real PostgreSQL: two repricings produce versions 1–3 with the original
 `UPDATE` of a stored version is rejected by the database ("immutable"), a `DELETE` of a reservation
 with pricing history is refused by the foreign key, and the API itself answers `409` instead of
 deleting a repriced reservation.
+
+### Deletion and extension integrity are proved against PostgreSQL
+
+`scripts/verify-reservation-integrity.mjs` (19 checks) drives the running application with real
+sessions and asserts on the committed rows:
+
+| Check | Result on real PostgreSQL |
+| --- | --- |
+| `delete-draft` | `200`; reservation, room block and its quote gone; `RESERVATION_DELETED` audit row written |
+| `delete-folio-charge` / `-pending-payment` / `-refunded-payment` / `-completed-payment` | `409 RESERVATION_HAS_FINANCIAL_RECORDS`; every row byte-identical afterwards, no deletion audit row |
+| `delete-repriced` | versions `1,2` and the change row intact |
+| `delete-extended` | extension row intact, message names the extension |
+| `delete-cross-hotel` | `404`, reservation intact |
+| `extend-charge` | folio grows by exactly `nights x rate`; the new line is `quantity 2`, `unitPrice 7000`, `total 14000` |
+| `extend-history` | previous/new check-out, nights, rate, charge, currency, `priceVersion`, folio, room number and approver all stored; `RESERVATION_EXTENDED` audit metadata matches |
+| `extend-snapshot-frozen` | version 1 unchanged (every column), no new version, no repricing row |
+| `extend-balances` | `required`, `paid`, `balance` equal the folio sums |
+| `extend-repeat` | `409 EXTENSION_ALREADY_APPLIED`, no second line, one extension row |
+| `extend-concurrent` | two simultaneous requests -> one `200`, one `409`, one extension, 4 nights charged in total (2 booked + 2 extended) |
+| `extend-audit-rollback` | a `BEFORE INSERT` trigger on `AuditLog` raises -> `500 AUDIT_UNAVAILABLE`; no folio line, no extension row, check-out unchanged |
+| `extend-conflict` | overlapping booking -> `409` naming the room and booking, no charge |
+| `extend-cross-hotel` | `404`, nothing written |
+| `extend-real-checkin` | a real `POST /api/check-in` (folio required `14000`) followed by an extension ending at `21000`, balance `21000`, one extension row |
 
 ### Concurrency is proved against PostgreSQL, not a mock
 
@@ -490,6 +578,16 @@ drives the real UI in Chromium, and restores the hotel's original pricing model 
 - Repricing a reservation whose status changes to `CHECKED_IN` between the request and the lock is
   refused, but a stay that is checked in *after* a successful reprice keeps the (already audited)
   new price — that is the intended order of events, not a race.
+- Extensions cannot be cancelled or shortened through the API. A wrong extension is corrected the
+  way any folio error is: a credit/adjustment line, with the extension row left as the record of what
+  was agreed.
+- Every room on a multi-room stay is extended by the same nights at that room's own agreed rate; the
+  route does not support extending only part of a stay.
+- An extension always posts a `ROOM_CHARGE` with `taxRate 0`. Tax on extension nights follows the
+  hotel's existing folio practice rather than re-running the pricing engine's tax rules.
+- Extension history is surfaced in the Front Desk "Add Days" modal and in
+  `GET /api/reservations/:id`. There is no dedicated history page, and the Reservations list does not
+  yet show an extension badge.
 - Pricing history currently records the *price* versions only. A full financial audit trail also
   wants folio/payment events; those are already recorded by their own modules and were not merged
   into this ledger.
@@ -518,6 +616,8 @@ acceptance run creates (rooms 903/904 and their rates) stays in place as a worke
 
 ## 12. Evidence index
 
+- `docs/evidence/reservations/deletion-extension-integrity.json` — the nineteen real-PostgreSQL
+  deletion and extension checks with their details.
 - `docs/evidence/pricing/repricing-concurrency.json` — the eight real-PostgreSQL concurrency and
   financial-state checks with their details.
 - `docs/evidence/pricing/pricing-acceptance.json` — per-check results of the run above.
@@ -539,7 +639,8 @@ New backend: `lib/pricing/{types,engine,config,admin,versions}.ts`,
 `app/api/pricing/route.ts`, `app/api/pricing/room-rates/route.ts`, `app/api/pricing/[entity]/route.ts`,
 `app/api/reservations/quote/route.ts`, `app/api/reservations/[id]/reprice/route.ts`,
 `prisma/migrations/20261031120000_add_pricing_engine/migration.sql`,
-`prisma/migrations/20261031160000_price_version_history/migration.sql`.
+`prisma/migrations/20261031160000_price_version_history/migration.sql`,
+`prisma/migrations/20261101120000_add_reservation_extension_history/migration.sql`.
 
 New UI: `components/pricing/PricingClient.tsx`,
 `app/dashboard/settings/pricing/page.tsx`, `components/reservations/RepriceDialog.tsx`, plus the
@@ -552,7 +653,8 @@ Changed: `prisma/schema.prisma`, `app/api/reservations/route.ts` (engine + snaps
 `scripts/migration-ledger.mjs`, `prisma/migration-release-manifest.json`.
 
 Tests: `__tests__/pricing/{engine,pricing-api,reservation-pricing,pricing-integrity}.test.ts`,
-`scripts/verify-repricing-concurrency.mjs`,
+`__tests__/reservations/delete-extension-integrity.test.ts`,
+`scripts/verify-repricing-concurrency.mjs`, `scripts/verify-reservation-integrity.mjs`,
 `__tests__/frontend/{create-reservation,reprice-dialog}.test.tsx`,
 `__tests__/schema/migration-adoption.test.ts`, `scripts/verify-pricing-acceptance.mjs` (new),
 `scripts/verify-reservation-acceptance.mjs` (waits for the server-quoted rate).

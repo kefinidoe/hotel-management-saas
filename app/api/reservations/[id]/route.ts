@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { recordAudit } from "@/lib/audit";
+import { AuditPersistenceError, recordAudit } from "@/lib/audit";
 import { rangesOverlap } from "@/lib/dates";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { stayNights } from "@/lib/billing";
@@ -56,6 +56,15 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
           items: true,
           payments: { where: { status: "COMPLETED" } },
         },
+      },
+      // Pricing and extension history: the frozen agreement (version 1 is what
+      // the guest booked), any explicit repricings, and every approved stay
+      // extension with who approved it. Read-only evidence.
+      priceSnapshots: { orderBy: { version: "asc" } },
+      priceChanges: { orderBy: { createdAt: "asc" } },
+      stayExtensions: {
+        orderBy: { createdAt: "asc" },
+        include: { approvedBy: { select: { id: true, name: true } } },
       },
     },
   });
@@ -310,22 +319,34 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   const hotelId = tenant.hotelId;
 
   try {
-    await prisma.$transaction(
+    const outcome = await prisma.$transaction(
       async (tx) => {
         const lockKey = `hotel-${hotelId}-reservation-create`;
         await tx.$queryRaw<Array<{ locked: string }>>`
           SELECT pg_advisory_xact_lock(hashtext(${lockKey}))::text AS locked
         `;
 
+        // Everything the decision depends on is read under the same hotel lock
+        // that payments, check-in/out, rescheduling, extensions and repricing
+        // take, so a charge cannot be posted between the check and the delete.
         const reservation = await tx.reservation.findUnique({
           where: { id_hotelId: { id, hotelId } },
           include: {
+            rooms: { select: { id: true, roomId: true } },
             folios: {
               where: { hotelId },
-              include: {
-                payments: { where: { hotelId, status: "COMPLETED" } },
+              select: {
+                id: true,
+                isClosed: true,
+                // No status filter: PENDING, COMPLETED, FAILED and REFUNDED all
+                // represent money that was promised, taken or given back.
+                items: { select: { id: true, type: true, total: true } },
+                payments: { select: { id: true, status: true, amount: true } },
               },
             },
+            priceSnapshots: { select: { version: true }, orderBy: { version: "desc" } },
+            priceChanges: { select: { id: true } },
+            stayExtensions: { select: { id: true } },
           },
         });
 
@@ -339,31 +360,61 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
             409
           );
         }
-
-        const hasPayments = reservation.folios.some((f) => f.payments.length > 0);
-        if (hasPayments) {
+        if (reservation.status === "CHECKED_OUT") {
           throw new ReservationUpdateError(
-            "Cannot delete a reservation that has recorded payments. Cancel it instead.",
+            "Cannot delete a stay that has been checked out. Its financial record must be kept.",
             409
           );
         }
 
-        // Financial evidence is never removed by cascade (the foreign keys are
-        // RESTRICT). A repricing is an audited financial event, so a reservation
-        // that has one is cancelled, never deleted. A plain quote that was never
-        // paid or re-priced is removed together with its frozen price only
-        // because the reservation itself is being discarded.
-        const priceChanges = await tx.reservationPriceChange.count({
-          where: { reservationId: id, hotelId },
-        });
-        if (priceChanges > 0) {
+        const items = reservation.folios.flatMap((folio) => folio.items);
+        const payments = reservation.folios.flatMap((folio) => folio.payments);
+        const repriced =
+          reservation.priceChanges.length > 0 ||
+          reservation.priceSnapshots.some((snapshot) => snapshot.version > 1);
+
+        // Only genuinely unused drafts may be deleted. Every other case has a
+        // record somebody may need later: what was charged, what was paid, what
+        // was re-agreed, or what was extended.
+        const reasons: string[] = [];
+        if (items.length > 0) {
+          reasons.push(`${items.length} folio charge${items.length === 1 ? "" : "s"}`);
+        }
+        if (payments.length > 0) {
+          const byStatus = payments.reduce<Record<string, number>>((counts, payment) => {
+            counts[payment.status] = (counts[payment.status] ?? 0) + 1;
+            return counts;
+          }, {});
+          const detail = Object.entries(byStatus)
+            .map(([status, count]) => `${count} ${status.toLowerCase()}`)
+            .join(", ");
+          reasons.push(`${payments.length} payment${payments.length === 1 ? "" : "s"} (${detail})`);
+        }
+        if (reservation.folios.length > 0 && items.length === 0 && payments.length === 0) {
+          reasons.push(`${reservation.folios.length} folio${reservation.folios.length === 1 ? "" : "s"}`);
+        }
+        if (repriced) {
+          reasons.push("a repricing history");
+        }
+        if (reservation.stayExtensions.length > 0) {
+          reasons.push(
+            `${reservation.stayExtensions.length} stay extension${reservation.stayExtensions.length === 1 ? "" : "s"}`
+          );
+        }
+
+        if (reasons.length > 0) {
           throw new ReservationUpdateError(
-            "Cannot delete a reservation that has been repriced. Cancel it so its pricing history is kept.",
+            `This reservation has ${reasons.join(", ")}. Financial records cannot be deleted — ` +
+              "cancel the reservation instead so its history is preserved.",
             409
           );
         }
 
-        await tx.reservationPriceSnapshot.deleteMany({
+        // What remains is an unused draft: no charges, no money, no repricing and
+        // no extension. The frozen quote (version 1) and the room block belong to
+        // the draft itself and are removed with it, deliberately and by name —
+        // never by a cascade from another table.
+        const snapshotCount = await tx.reservationPriceSnapshot.deleteMany({
           where: { reservationId: id, hotelId },
         });
 
@@ -371,13 +422,33 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
           where: { reservationId: id },
         });
 
-        await tx.folio.deleteMany({
-          where: { reservationId: id, hotelId },
-        });
+        // Strict audit: a deletion nobody can account for must not happen.
+        await recordAudit(
+          {
+            hotelId,
+            userId: tenant.userId,
+            action: "RESERVATION_DELETED",
+            entity: "Reservation",
+            entityId: id,
+            metadata: {
+              code: reservation.code,
+              status: reservation.status,
+              guestId: reservation.guestId,
+              checkInDate: reservation.checkInDate.toISOString(),
+              checkOutDate: reservation.checkOutDate.toISOString(),
+              rooms: reservation.rooms.map((room) => room.roomId),
+              priceSnapshotsRemoved: snapshotCount.count,
+            },
+          },
+          tx,
+          { strict: true }
+        );
 
         await tx.reservation.delete({
           where: { id_hotelId: { id, hotelId } },
         });
+
+        return { code: reservation.code };
       },
       {
         isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
@@ -385,10 +456,40 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
       }
     );
 
-    return NextResponse.json({ ok: true, message: "Reservation deleted." });
+    return NextResponse.json({
+      ok: true,
+      message: `Draft reservation ${outcome.code} deleted. No financial records existed.`,
+    });
   } catch (error) {
     if (error instanceof ReservationUpdateError) {
-      return NextResponse.json({ error: error.message }, { status: error.status });
+      return NextResponse.json(
+        { error: error.message, ...(error.status === 409 ? { code: "RESERVATION_HAS_FINANCIAL_RECORDS" } : {}) },
+        { status: error.status }
+      );
+    }
+    if (error instanceof AuditPersistenceError) {
+      console.error("Reservation deletion rolled back: the audit record could not be written.", error);
+      return NextResponse.json(
+        {
+          error:
+            "The reservation was not deleted because the deletion could not be recorded in the audit trail. Nothing was changed.",
+          code: "AUDIT_UNAVAILABLE",
+        },
+        { status: 500 }
+      );
+    }
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      (error.code === "P2034" || error.code === "P2003")
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "The reservation could not be deleted because a related record still references it. Nothing was changed.",
+          code: "RESERVATION_HAS_FINANCIAL_RECORDS",
+        },
+        { status: 409 }
+      );
     }
     console.error("Reservation deletion failed:", error);
     return NextResponse.json({ error: "Could not delete reservation." }, { status: 500 });

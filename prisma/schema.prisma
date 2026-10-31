@@ -110,6 +110,7 @@ model Hotel {
   pricingSettings    HotelPricingSettings?
   priceSnapshots     ReservationPriceSnapshot[]
   priceChanges       ReservationPriceChange[]
+  stayExtensions     ReservationExtension[]
 
   @@index([status])
 }
@@ -177,6 +178,7 @@ model User {
 
   memberships         HotelMembership[]
   reservationsCreated Reservation[]       @relation("ReservationCreatedBy")
+  stayExtensionsApproved ReservationExtension[] @relation("ReservationExtensionApprovedBy")
   paymentsCashiered   Payment[]           @relation("PaymentCashier")
   housekeepingTasks   HousekeepingTask[]  @relation("HousekeepingAssignee")
   maintenanceTickets  MaintenanceTicket[] @relation("MaintenanceAssignee")
@@ -331,6 +333,10 @@ model Reservation {
   // highest version.
   priceSnapshots ReservationPriceSnapshot[]
   priceChanges   ReservationPriceChange[]
+  // Approved stay extensions. An extension is not a repricing: the agreed stay
+  // stays frozen as it was, and each extension is recorded as its own bounded
+  // financial event with the nights, rate and amount it added.
+  stayExtensions ReservationExtension[]
 
   @@unique([hotelId, code])
   @@unique([id, hotelId])
@@ -1097,4 +1103,49 @@ model ReservationPriceChange {
   createdAt        DateTime    @default(now())
 
   @@index([hotelId, reservationId, createdAt])
+}
+
+/// One approved extension of a stay.
+///
+/// An extension is deliberately *not* a repricing. `ReservationPriceChange`
+/// means "the price of the same stay was re-agreed", with a previous and a new
+/// total for the whole booking. Extending a stay leaves the original agreement
+/// exactly as it was (version 1 of `ReservationPriceSnapshot` is untouched) and
+/// adds a bounded chunk of nights at an explicitly agreed rate. Recording that
+/// as a price change would misstate the event and make the folio, the snapshot
+/// and the change row disagree. Each extension therefore has its own row.
+model ReservationExtension {
+  id               String      @id @default(uuid())
+  hotelId          String
+  // Financial evidence outlives the hotel row.
+  hotel            Hotel       @relation(fields: [hotelId], references: [id], onDelete: Restrict)
+  reservationId    String
+  reservation      Reservation @relation(fields: [reservationId, hotelId], references: [id, hotelId], onDelete: Restrict)
+
+  previousCheckOut DateTime
+  newCheckOut      DateTime
+  additionalNights Int
+  /// The rate the extension was agreed at (the stay's own agreed rate).
+  nightlyRate      Decimal     @db.Decimal(10, 2)
+  additionalCharge Decimal     @db.Decimal(10, 2)
+  currency         String
+  /// Rooms affected: [{ roomId, number, roomTypeId, nightlyRate, nights, amount }]
+  rooms            Json
+  /// Folio the charge was posted to, and the exact folio lines it created.
+  folioId          String
+  folioItemIds     Json
+  /// Booking price version the extension was added to (null for legacy hotels).
+  priceVersion     Int?
+  note             String?
+  approvedById     String
+  approvedBy       User        @relation("ReservationExtensionApprovedBy", fields: [approvedById], references: [id])
+  createdAt        DateTime    @default(now())
+
+  // One extension per checkout moment: a repeated or concurrent request that
+  // starts from the same checkout date cannot post the same nights twice.
+  @@unique([reservationId, previousCheckOut])
+  @@index([hotelId, reservationId, createdAt])
+  @@index([hotelId, createdAt])
+  // Child-side index for the (reservationId, hotelId) foreign key.
+  @@index([reservationId, hotelId])
 }

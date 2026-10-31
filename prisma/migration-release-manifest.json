@@ -86,6 +86,10 @@
     {
       "name": "20261031160000_price_version_history",
       "sha256": "405f03934214c00f2f57b7cc88ac95d27856bd4a2bd5db9ab819e624d0214d47"
+    },
+    {
+      "name": "20261101120000_add_reservation_extension_history",
+      "sha256": "ab6f0e295a99a3ff0b8fa4ae87f69913ea42f3215593b43845761a69717d6296"
     }
   ]
 }

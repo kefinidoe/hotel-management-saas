@@ -158,16 +158,34 @@ export const SCHEMA_FEATURES = {
     `EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ReservationPriceChange_reservationId_hotelId_fkey' AND confdeltype = 'r')`,
   trigger_ReservationPriceSnapshot_immutable:
     `EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'ReservationPriceSnapshot_immutable' AND NOT tgisinternal)`,
+
+  // Auditable stay extensions (migration 22).
+  table_ReservationExtension: table("ReservationExtension"),
+  column_ReservationExtension_additionalNights: column("ReservationExtension", "additionalNights"),
+  index_ReservationExtension_previousCheckOut:
+    index("ReservationExtension_reservationId_previousCheckOut_key"),
+  restrict_ReservationExtension_reservation:
+    `EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ReservationExtension_reservationId_hotelId_fkey' AND confdeltype = 'r')`,
 };
 
-/** One SQL statement that returns the whole feature map as JSON. */
+/**
+ * One SQL statement that returns the whole feature map as JSON.
+ *
+ * PostgreSQL refuses more than 100 arguments to a single function call, and the
+ * feature map is already past that, so it is built in chunks of 50 pairs and
+ * merged with `||`. The statement still starts with `json_build_object(`.
+ */
 export function buildFeatureQuery(features = SCHEMA_FEATURES) {
-  const entries = Object.entries(features)
-    .map(([name, sql]) => `'${name}', (${sql})`)
-    .join(",\n    ");
-  return `SELECT json_build_object(
-    ${entries}
-  )::text AS features;`;
+  const entries = Object.entries(features).map(([name, sql]) => `'${name}', (${sql})`);
+  const chunkSize = 50;
+  const chunks = [];
+  for (let index = 0; index < entries.length; index += chunkSize) {
+    chunks.push(entries.slice(index, index + chunkSize));
+  }
+  const rendered = chunks
+    .map((chunk) => `json_build_object(\n    ${chunk.join(",\n    ")}\n  )::jsonb`)
+    .join(" || ");
+  return `SELECT (${rendered})::text AS features;`;
 }
 
 /**
@@ -365,9 +383,33 @@ export const CHECKPOINTS = [
     ],
   },
   {
-    id: "saas_current",
-    label: "Current schema, all migrations applied (migrations 1-21)",
+    id: "saas_through_21",
+    label: "Pricing version history without extension history (migrations 1-21 applied)",
     appliedThrough: "20261031160000_price_version_history",
+    require: [
+      "table_Hotel",
+      "table_Subscription",
+      "column_HotelMembership_department",
+      "column_Payment_requestFingerprint",
+      "table_HotelPricingSettings",
+      "table_ReservationPriceSnapshot",
+      "column_ReservationPriceSnapshot_version",
+      "column_ReservationPriceChange_newVersion",
+      "index_ReservationPriceSnapshot_reservationId_version",
+      "restrict_ReservationPriceSnapshot_reservation",
+      "restrict_ReservationPriceChange_reservation",
+      "trigger_ReservationPriceSnapshot_immutable",
+    ],
+    forbid: [
+      "table_ReservationExtension",
+      "index_ReservationExtension_previousCheckOut",
+      "restrict_ReservationExtension_reservation",
+    ],
+  },
+  {
+    id: "saas_current",
+    label: "Current schema, all migrations applied (migrations 1-22)",
+    appliedThrough: "20261101120000_add_reservation_extension_history",
     require: [
       "table_Hotel",
       "table_Subscription",
@@ -396,6 +438,10 @@ export const CHECKPOINTS = [
       "restrict_ReservationPriceSnapshot_reservation",
       "restrict_ReservationPriceChange_reservation",
       "trigger_ReservationPriceSnapshot_immutable",
+      "table_ReservationExtension",
+      "column_ReservationExtension_additionalNights",
+      "index_ReservationExtension_previousCheckOut",
+      "restrict_ReservationExtension_reservation",
     ],
     forbid: [],
   },

@@ -59,9 +59,9 @@ describe("migration release manifest", () => {
     expect(manifest).not.toBeNull();
     const names = manifest.migrations.map((entry: { name: string }) => entry.name);
     expect(names).toEqual(migrations.map((migration) => migration.name));
-    expect(names).toHaveLength(21);
+    expect(names).toHaveLength(22);
     expect(names[0]).toBe("20260915161717_init");
-    expect(names[names.length - 1]).toBe("20261031160000_price_version_history");
+    expect(names[names.length - 1]).toBe("20261101120000_add_reservation_extension_history");
     expect(names).toContain("20261029120000_add_pos_charge_to_room_idempotency");
     expect(names).toContain("20261029130000_add_tenant_composite_join_fks");
   });
@@ -144,7 +144,7 @@ describe("schema checkpoints", () => {
 
   it("builds one SQL statement that returns every feature", () => {
     const sql = buildFeatureQuery();
-    expect(sql.trim().startsWith("SELECT json_build_object(")).toBe(true);
+    expect(sql.trim().startsWith("SELECT (json_build_object(")).toBe(true);
     for (const [name, predicate] of Object.entries(SCHEMA_FEATURES)) {
       expect(sql).toContain(`'${name}'`);
       expect(sql).toContain(predicate as string);
@@ -208,6 +208,7 @@ describe("adoption planning", () => {
       "20261029130000_add_tenant_composite_join_fks",
       "20261031120000_add_pricing_engine",
       "20261031160000_price_version_history",
+      "20261101120000_add_reservation_extension_history",
     ]);
     expect(plan.problems).toEqual([]);
   });
@@ -219,6 +220,7 @@ describe("adoption planning", () => {
     expect(plan.pending).toEqual([
       "20261031120000_add_pricing_engine",
       "20261031160000_price_version_history",
+      "20261101120000_add_reservation_extension_history",
     ]);
     expect(plan.problems).toEqual([]);
   });
@@ -227,7 +229,10 @@ describe("adoption planning", () => {
     const plan = buildAdoptionPlan({ migrations, features: featuresFor("saas_through_20"), ledgerRows: [] });
     expect(plan.checkpoint?.id).toBe("saas_through_20");
     expect(plan.baseline).toEqual(names.slice(0, 20));
-    expect(plan.pending).toEqual(["20261031160000_price_version_history"]);
+    expect(plan.pending).toEqual([
+      "20261031160000_price_version_history",
+      "20261101120000_add_reservation_extension_history",
+    ]);
     expect(plan.problems).toEqual([]);
   });
 

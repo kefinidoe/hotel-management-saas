@@ -1,6 +1,6 @@
 {
   "base": "http://127.0.0.1:3000",
-  "generatedAt": "2026-10-31T08:45:28.995Z",
+  "generatedAt": "2026-10-31T09:16:08.862Z",
   "hotel": "Riverside Grand Hotel",
   "currency": "KES",
   "passed": 35,
@@ -24,7 +24,7 @@
       "id": "api-config-read",
       "description": "the owner reads the pricing configuration",
       "status": "PASS",
-      "detail": "8 room types, 1 occupancies"
+      "detail": "11 room types, 4 occupancies"
     },
     {
       "id": "api-config-write-forbidden",
@@ -162,7 +162,7 @@
       "id": "api-delete-keeps-history",
       "description": "the API refuses to delete a repriced reservation so its history survives",
       "status": "PASS",
-      "detail": "409 Cannot delete a reservation that has been repriced. Cancel it so its pricing history is kept."
+      "detail": "409 This reservation has a repricing history. Financial records cannot be deleted — cancel the reservation instead so its history is preserved."
     },
     {
       "id": "browser-settings-page",
@@ -216,7 +216,7 @@
       "id": "api-arrival-created",
       "description": "a same-day arrival is booked for the Front Desk",
       "status": "PASS",
-      "detail": "RES-2026-00010 @ 4,600"
+      "detail": "RES-2026-00026 @ 4,600"
     },
     {
       "id": "browser-config-edit-keeps-sold-price",

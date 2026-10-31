@@ -1,0 +1,125 @@
+{
+  "generatedAt": "2026-10-31T09:22:11.245Z",
+  "base": "http://127.0.0.1:3000",
+  "database": "postgresql://127.0.0.1:55433/hotel_saas_demo_owner",
+  "total": 19,
+  "passed": 19,
+  "failed": 0,
+  "fixturesRemoved": 7,
+  "results": [
+    {
+      "id": "delete-draft",
+      "description": "an unused draft is deleted and audited",
+      "status": "PASS",
+      "detail": "200; draft removed with 0 quote row(s); audit row written"
+    },
+    {
+      "id": "delete-folio-charge",
+      "description": "a folio charge alone blocks deletion",
+      "status": "PASS",
+      "detail": "409 RESERVATION_HAS_FINANCIAL_RECORDS, records unchanged"
+    },
+    {
+      "id": "delete-pending-payment",
+      "description": "a pending payment blocks deletion",
+      "status": "PASS",
+      "detail": "409, records unchanged"
+    },
+    {
+      "id": "delete-refunded-payment",
+      "description": "a refunded payment blocks deletion",
+      "status": "PASS",
+      "detail": "409, message names the refunded payment"
+    },
+    {
+      "id": "delete-completed-payment",
+      "description": "a completed payment blocks deletion",
+      "status": "PASS",
+      "detail": "409, records unchanged"
+    },
+    {
+      "id": "delete-repriced",
+      "description": "pricing history blocks deletion",
+      "status": "PASS",
+      "detail": "409, both versions and the change row intact"
+    },
+    {
+      "id": "delete-extended",
+      "description": "extension history blocks deletion",
+      "status": "PASS",
+      "detail": "409, message names the extension, row intact"
+    },
+    {
+      "id": "delete-cross-hotel",
+      "description": "another hotel's manager cannot delete",
+      "status": "PASS",
+      "detail": "404, reservation intact"
+    },
+    {
+      "id": "extend-charge",
+      "description": "the extension posts exactly nights x agreed rate to the folio",
+      "status": "PASS",
+      "detail": "2 nights x 7000 = 14000; folio 14000 -> 28000"
+    },
+    {
+      "id": "extend-history",
+      "description": "the extension records the whole agreement",
+      "status": "PASS",
+      "detail": "2027-01-11 -> 2027-01-13, 2 nights, room 906, 14000.00 KES, approver + audit recorded"
+    },
+    {
+      "id": "extend-snapshot-frozen",
+      "description": "the booking's frozen price is untouched",
+      "status": "PASS",
+      "detail": "version 1 unchanged (14000 for 2 nights); no new version, no repricing row"
+    },
+    {
+      "id": "extend-balances",
+      "description": "required, paid and balance stay arithmetically correct",
+      "status": "PASS",
+      "detail": "required 28000, paid 5000, balance 23000"
+    },
+    {
+      "id": "extend-repeat",
+      "description": "repeating the request cannot charge twice",
+      "status": "PASS",
+      "detail": "409 EXTENSION_ALREADY_APPLIED, one extension, no extra charge"
+    },
+    {
+      "id": "extend-concurrent",
+      "description": "two simultaneous extensions produce one charge",
+      "status": "PASS",
+      "detail": "200+409, one extension, 4 nights charged in total (2 booked + 2 extended)"
+    },
+    {
+      "id": "extend-audit-rollback",
+      "description": "a failing audit rolls back charge and dates",
+      "status": "PASS",
+      "detail": "500 AUDIT_UNAVAILABLE; folio, dates and history unchanged"
+    },
+    {
+      "id": "extend-conflict",
+      "description": "a conflicting booking blocks the extension",
+      "status": "PASS",
+      "detail": "409 blocked by the overlapping booking, no charge"
+    },
+    {
+      "id": "extend-cross-hotel",
+      "description": "another hotel's manager cannot extend",
+      "status": "PASS",
+      "detail": "404, nothing written"
+    },
+    {
+      "id": "extend-real-checkin",
+      "description": "a genuine check-in followed by an extension keeps the folio consistent",
+      "status": "PASS",
+      "detail": "check-in required 14000, extension added 7000 -> 21000"
+    },
+    {
+      "id": "extend-history-api",
+      "description": "the reservation detail exposes the extension history",
+      "status": "PASS",
+      "detail": "1 extension, 2 nights, 14000 KES, approved by Naomi Chebet"
+    }
+  ]
+}
