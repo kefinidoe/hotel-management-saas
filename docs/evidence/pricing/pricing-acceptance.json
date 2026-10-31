@@ -1,9 +1,9 @@
 {
   "base": "http://127.0.0.1:3000",
-  "generatedAt": "2026-10-30T23:56:16.242Z",
+  "generatedAt": "2026-10-31T00:26:50.726Z",
   "hotel": "Riverside Grand Hotel",
   "currency": "KES",
-  "passed": 31,
+  "passed": 35,
   "failed": 0,
   "screenshots": [
     "/home/user/hotel-management-saas/docs/evidence/pricing/pricing-01-settings-overview.png",
@@ -123,10 +123,28 @@
       "detail": "20,700 → 23,400 (audited)"
     },
     {
+      "id": "api-reprice-twice-keeps-history",
+      "description": "a second repricing appends a third version and the original still stands",
+      "status": "PASS",
+      "detail": "1:20700,2:23400,3:24900 (2 recorded changes)"
+    },
+    {
+      "id": "api-db-rejects-snapshot-update",
+      "description": "the database refuses to rewrite an agreed price version",
+      "status": "PASS",
+      "detail": "UPDATE rejected by trigger"
+    },
+    {
+      "id": "api-db-restricts-reservation-delete",
+      "description": "a reservation with pricing history cannot be deleted by cascade",
+      "status": "PASS",
+      "detail": "DELETE refused (RESTRICT)"
+    },
+    {
       "id": "api-discount-permission",
       "description": "only management may discount a stay",
       "status": "PASS",
-      "detail": "403 for receptionist, 5,900 for manager"
+      "detail": "403 for receptionist, 6,400 for manager"
     },
     {
       "id": "api-tenant-isolation",
@@ -139,6 +157,12 @@
       "description": "a meal plan cannot reference another hotel's room type",
       "status": "PASS",
       "detail": "404 and no partial row"
+    },
+    {
+      "id": "api-delete-keeps-history",
+      "description": "the API refuses to delete a repriced reservation so its history survives",
+      "status": "PASS",
+      "detail": "409 Cannot delete a reservation that has been repriced. Cancel it so its pricing history is kept."
     },
     {
       "id": "browser-settings-page",
@@ -192,7 +216,7 @@
       "id": "api-arrival-created",
       "description": "a same-day arrival is booked for the Front Desk",
       "status": "PASS",
-      "detail": "RES-2026-00017 @ 4,600"
+      "detail": "RES-2026-00033 @ 4,600"
     },
     {
       "id": "browser-config-edit-keeps-sold-price",

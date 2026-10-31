@@ -47,6 +47,10 @@ async function main() {
     const deletedReservationRooms = await tx.reservationRoom.deleteMany({
       where: { reservation: { hotelId } },
     });
+    // Price history is RESTRICTed from cascade deletion; a deliberate purge has
+    // to remove it explicitly.
+    await tx.reservationPriceChange.deleteMany({ where: { hotelId } });
+    await tx.reservationPriceSnapshot.deleteMany({ where: { hotelId } });
     const deletedReservations = await tx.reservation.deleteMany({ where: { hotelId } });
     const deletedHousekeeping = await tx.housekeepingTask.deleteMany({ where: { hotelId } });
     const deletedMaintenance = await tx.maintenanceTicket.deleteMany({ where: { hotelId } });

@@ -26,7 +26,10 @@ executed, and the honest gaps.
 | Taxes & service charges | `TaxRule`: `PERCENT` or `FIXED`, `ROOM`/`MEALS`/`ALL`, `PER_NIGHT`/`PER_STAY`/`PER_PERSON_PER_NIGHT`, inclusive or exclusive. |
 | Discounts | Fixed or percentage, management-only, validated server-side, stored on the reservation and in the snapshot. |
 | Server-authoritative pricing | One pure engine (`lib/pricing/engine.ts`) used by the quote endpoint, reservation creation and repricing. The browser never computes money. |
-| Price snapshots | `ReservationPriceSnapshot` frozen at creation; `ReservationPriceChange` + audit trail on explicit repricing. |
+| Price snapshots | Append-only version ledger: version 1 frozen at creation, every repricing appends an immutable version (DB trigger); the current price is the highest version. |
+| Snapshot failures | Fail closed: a configured-price reservation whose snapshot cannot be written is rolled back and never sold. Legacy hotels unaffected. |
+| Repricing integrity | New version + `ReservationPriceChange` + reservation update + `RESERVATION_REPRICED` audit event in one serializable transaction; `500 AUDIT_UNAVAILABLE` and full rollback if the audit cannot be written. |
+| Financial retention | `ON DELETE RESTRICT` from reservation and hotel; the delete API refuses repriced reservations; only an explicit purge removes history. |
 | Folio consistency | `lib/stay-service.ts` bills the snapshot (`grandTotal`) and emits meal/extra/tax folio lines from the frozen breakdown. |
 | Configuration UI | `/dashboard/settings/pricing` — seven sections, currency labels, enable/disable, delete, management-only. |
 | Repricing UI | “Reprice” on Front Desk arrival cards (management only) → explicit confirm with a reason. |
@@ -110,8 +113,10 @@ Hotel ──1:1── HotelPricingSettings            (toggles + pricingModel)
   ├──1:N── TaxRule               (basis, amount, appliesTo, chargeBasis, isInclusive, sortOrder)
   │
   └── Reservation
-        ├──1:1── ReservationPriceSnapshot   (frozen price, breakdown JSON, currency, actor)
-        └──1:N── ReservationPriceChange     (previousTotal, newTotal, reason, breakdown, actor)
+        ├──1:N── ReservationPriceSnapshot   (one immutable row per version: version 1 = the
+        │                                    agreement at booking, 2.. = repricings)
+        └──1:N── ReservationPriceChange     (previousTotal, newTotal, previous/new version,
+                                             reason, breakdown, actor)
 ```
 
 Design decisions worth stating:
@@ -123,8 +128,9 @@ Design decisions worth stating:
   cross-tenant attach, not only the application code.
 - **One settings row per hotel** (`hotelId @unique`), created lazily; absent means legacy pricing, so
   an un-migrated hotel keeps working.
-- **Snapshot separate from reservation** rather than columns on `Reservation`: the frozen breakdown
-  is document-shaped JSON plus the totals a report/fee query needs as columns.
+- **Snapshots are a ledger, not a column.** One row per agreed version, unique on
+  `(reservationId, version)`, never updated (trigger-enforced). "Current price" is the highest
+  version — see §6.
 - **`MealPlanRoomType` instead of an array column** keeps referential integrity when a room type is
   deleted.
 - **No duplicated models**: `RateAdjustment` covers both seasonal and weekend pricing (same shape,
@@ -165,24 +171,85 @@ sees is what is stored — and the stored number is recomputed, not echoed.
 
 ---
 
-## 6. Snapshots, repricing, folios
+## 6. Price versions, repricing, folios
 
-- `POST /api/reservations` prices the stay, writes `ReservationRoom.rate` (the nightly room rate) and
-  writes `ReservationPriceSnapshot` inside the same serializable transaction.
-- The snapshot freezes: pricing model, currency, room type, occupancy name, meal plan name and basis,
-  nightly rate, nights, adults/children/extra beds, room/meals/extras/adjustments/discount/tax
-  totals, grand total, the full breakdown (including per-night rates) and the actor.
-- **Configuration edits cannot move a sold price.** Proven at API level (raise the rate → the sold
-  snapshot and reservation room rate stay put, a fresh quote uses the new rate) and in the browser.
-- Repricing is explicit: `POST /api/reservations/:id/reprice` (management only, pending/confirmed,
-  single room) — recomputes with today's configuration, keeps the previous total in
-  `ReservationPriceChange` with the reason and actor, writes an `AuditLog` entry
-  (`RESERVATION_REPRICED`), and updates the snapshot.
-- `lib/stay-service.ts` bills the snapshot: accommodation required = `snapshot.grandTotal`, and the
-  folio gains meal / extra-bed / tax lines produced from the frozen breakdown, so payments, invoices
-  and reports stay in step with the agreed price.
+Pricing history is a ledger. `ReservationPriceSnapshot` holds one immutable row per version of a
+reservation's agreed price:
 
----
+- **version 1** is written inside the reservation-creation transaction;
+- every repricing **appends** the next version — earlier rows are never updated;
+- the **current price is the highest version** for that reservation (one helper,
+  `currentPriceVersion` in `lib/pricing/versions.ts`, is the only definition, used by repricing,
+  check-in billing and the API).
+
+Each version freezes: pricing model, currency, room type, occupancy name, meal plan name and basis,
+nightly rate, nights, adults/children/extra beds, room/meals/extras/adjustments/discount/tax totals,
+grand total, the full per-night breakdown, the actor (`createdById`) and `createdAt`.
+
+Guarantees enforced by the database, not only by code (migration 21):
+
+| Guarantee | Mechanism |
+| --- | --- |
+| No two versions of the same reservation share a number | `UNIQUE (reservationId, version)` |
+| A written version can never be altered | `BEFORE UPDATE` trigger raising `restrict_violation` |
+| Pricing evidence cannot be cascade-deleted with the reservation | `ON DELETE RESTRICT` on both pricing foreign keys |
+| Pricing evidence cannot be cascade-deleted with the hotel | `ON DELETE RESTRICT` on the hotel foreign key |
+
+### Fail-closed snapshot creation
+
+When a hotel prices from configuration, the frozen version is part of the charge: without it the
+hotel cannot defend what the guest was quoted. `POST /api/reservations` therefore treats the
+snapshot write as mandatory — a missing delegate, a failed insert or a missing table throws, the
+transaction rolls back, and the API answers `500` ("The reservation price could not be recorded, so
+the reservation was not created"). Nothing is sold: no reservation, no room block, no guest row.
+
+Legacy hotels (`LEGACY_BASE_RATE`) keep their pre-pricing behaviour exactly: their charge comes from
+the legacy tariff calculation, so the snapshot is not required and a missing table is logged rather
+than blocking the booking.
+
+### Repricing is explicit, atomic and audited
+
+`POST /api/reservations/:id/reprice` (management only, pending/confirmed, single room) runs one
+serializable transaction that:
+
+1. locks the reservation row (`SELECT … FOR UPDATE`) so two managers cannot write the same version;
+2. reads the current version and computes the next one;
+3. updates `ReservationRoom.rate` and the reservation discount;
+4. inserts the new immutable snapshot version;
+5. inserts the `ReservationPriceChange` (previous/new total, previous/new **version**, reason,
+   breakdown, actor);
+6. writes the `RESERVATION_REPRICED` **audit event into the same transaction**, in strict mode.
+
+`recordAudit` already accepted a transaction client, and `AuditLog` lives in the same PostgreSQL
+database as the reservation, so no separate outbox is needed: the audit insert is part of the same
+commit. What was missing was strictness — the old helper swallowed write failures and returned
+`false`. It now takes `{ strict: true }`, which throws `AuditPersistenceError` both when the write
+fails and when no audit model is reachable. The route lets that propagate, so the whole repricing
+rolls back and the response is `500 {"code":"AUDIT_UNAVAILABLE"}`, never a success. If auditing ever
+moves to a different store, this is the seam where a transactional outbox belongs: the outbox row
+would be written in this same transaction and drained afterwards.
+
+### Retention of financial evidence
+
+The original `ON DELETE CASCADE` from `Reservation` meant deleting a reservation silently erased its
+price history. That is no longer possible:
+
+- both pricing tables are `ON DELETE RESTRICT` from `Reservation` **and** from `Hotel`;
+- `DELETE /api/reservations/:id` refuses (`409`) once a reservation has been repriced — it must be
+  cancelled so the history is kept;
+- a reservation that was never paid and never repriced can still be deleted, and its frozen quote is
+  removed deliberately in the same transaction (it is a discarded quotation, not a financial event);
+- the admin test-data purge (`/api/admin/clean-test-data`, disabled in SaaS environments) removes
+  pricing rows explicitly before the reservations, so a deliberate teardown still works;
+- the only way to alter a version afterwards is a forensic operation that first disables the
+  immutability trigger — deliberately awkward, and never something the app does.
+
+### Folio consistency
+
+`lib/stay-service.ts` bills the **current version**: accommodation required is the version's
+`grandTotal`, and meal/extra/tax lines are generated from that version's breakdown, with the
+discount line taken from the same version. Reprice, then check in — the folio totals equal the
+latest agreed total, while version 1 still records what was agreed at booking.
 
 ## 7. API surface and permissions
 
@@ -228,13 +295,25 @@ Screenshots: `docs/evidence/pricing/` (see §12).
 
 ## 9. Migration and backward compatibility
 
-- One migration: `prisma/migrations/20261031120000_add_pricing_engine/migration.sql` — creates the
-  eleven tables, enums and indexes; additive only, no column dropped or rewritten, no data deleted.
-- `scripts/migration-ledger.mjs` gained a checkpoint `saas_through_19` (everything up to the
-  composite-FK migration, forbidding the pricing tables) and the new `saas_current`
-  (`appliedThrough 20261031120000_add_pricing_engine`, requiring the pricing tables). A database
-  adopted at 19 migrations is recognised and told to apply exactly one more.
-- `prisma/migration-release-manifest.json` re-generated: 20 entries; `--check` passes.
+- **Migration 20** — `prisma/migrations/20261031120000_add_pricing_engine/migration.sql`: creates the
+  eleven tables, enums and indexes; additive only.
+- **Migration 21** — `prisma/migrations/20261031160000_price_version_history/migration.sql`
+  (financial integrity):
+  - adds `ReservationPriceSnapshot.version` (default 1) and `ReservationPriceChange.previousVersion`
+    /`newVersion` — every existing row keeps its data and becomes version 1;
+  - replaces the "one snapshot per reservation" unique index with `UNIQUE (reservationId, version)`
+    (+ a descending lookup index) — the old constraint is what forced repricing to overwrite;
+  - swaps `ON DELETE CASCADE` for `ON DELETE RESTRICT` on the reservation and hotel foreign keys of
+    both pricing tables;
+  - adds a `BEFORE UPDATE` trigger that rejects any change to a stored version.
+  All of it is additive to data: no row is rewritten, no column dropped, nothing deleted. Applied to
+  the demo database in place; the ledger then detects it as `saas_current`.
+- `scripts/migration-ledger.mjs` now has: `saas_through_19`, `saas_through_20` (pricing engine,
+  forbidding the version columns/trigger) and `saas_current`
+  (`appliedThrough 20261031160000_price_version_history`, requiring the version column, the version
+  index, both RESTRICT delete rules and the immutability trigger). Detected against the demo
+  database: `checkpoints matching: saas_current`.
+- `prisma/migration-release-manifest.json` re-generated: 21 entries; `--check` passes.
 - **Backward compatible by default**: `HotelPricingSettings` absent ⇒ legacy behaviour
   (`LEGACY_BASE_RATE`, every advanced toggle off), which is what the demo hotel is left as. Switching
   a hotel to occupancy pricing is a deliberate, validated action; switching it back does not touch
@@ -245,7 +324,7 @@ Screenshots: `docs/evidence/pricing/` (see §12).
 ## 10. Verification actually executed
 
 Environment: disposable local PostgreSQL 17 (`127.0.0.1:55433`, database
-`hotel_saas_demo_owner`, 20 migrations), app built with
+`hotel_saas_demo_owner`, 21 migrations applied in place), app built with
 `SAAS_ENVIRONMENT=saas SAAS_DATABASE_IDENTIFIER=hotel_saas_demo_owner` and served by
 `npx next start -p 3000 -H 0.0.0.0`.
 
@@ -254,14 +333,15 @@ Environment: disposable local PostgreSQL 17 (`127.0.0.1:55433`, database
 | `DATABASE_URL=… DIRECT_URL=… npx prisma validate` | `The schema at prisma/schema.prisma is valid 🚀` |
 | `npx tsc --noEmit` | no output (clean) |
 | `next lint` | `✔ No ESLint warnings or errors` |
-| `vitest run` | **62 files, 941 passed, 6 skipped** |
-| `node scripts/verify-pricing-acceptance.mjs --base http://127.0.0.1:3000 --json docs/evidence/pricing/pricing-acceptance.json` | **PASS — 31 passed, 0 failed** |
+| `vitest run` | **63 files, 953 passed, 6 skipped** |
+| `node scripts/verify-pricing-acceptance.mjs --base http://127.0.0.1:3000 --json docs/evidence/pricing/pricing-acceptance.json` | **PASS — 35 passed, 0 failed** |
 | `node scripts/verify-reservation-acceptance.mjs --base http://127.0.0.1:3000` | **PASS — 13 passed, 0 failed** |
 | `node scripts/e2e-smoke.mjs --base http://127.0.0.1:3000` | **PASS — 55/55** |
 | `node scripts/browser-e2e.mjs --base http://127.0.0.1:3000` | **PASS — 33/33 browser steps** |
 | `node scripts/owner-test/verify-handover.mjs` (BASE/ORIGIN = 127.0.0.1:3000) | **PASS — 69/69 checks** |
 | `node scripts/db-integrity.mjs` | **PASS — 49 checks, no integrity violations** |
-| `node scripts/migration-ledger.mjs manifest --check` | `Release manifest matches 20 migration files.` |
+| `node scripts/migration-ledger.mjs manifest --check` | `Release manifest matches 21 migration files.` |
+| ledger feature probe against the demo DB | `checkpoints matching: saas_current` |
 | `next build` | `✓ Compiled successfully` |
 
 Unit tests (`__tests__/pricing/engine.test.ts`, 41 cases) cover each occupancy shape, per-person and
@@ -269,6 +349,29 @@ per-room bases, per-stay charges, currencies, seasonal and weekend adjustments, 
 child pricing, extra beds, fixed and percentage discounts, taxes (inclusive and exclusive) and every
 invalid-input failure. Integration tests cover configuration CRUD, cross-tenant refusals, quote
 isolation, discount permissions, reservation pricing, snapshot freezing, repricing and audit.
+
+`__tests__/pricing/pricing-integrity.test.ts` (11 cases) runs the real routes and the real check-in
+service against a Prisma double whose transactions genuinely roll back, and covers exactly the
+financial-integrity cases:
+
+| Case | What it proves |
+| --- | --- |
+| Snapshot insert throws | `500`, and no reservation, room block or guest is left behind |
+| Snapshot delegate missing (configured pricing) | `500`, nothing created — never silently skipped |
+| Legacy hotel, snapshot storage missing | `201`; legacy pricing still sells rooms |
+| Create → reprice → reprice | versions `[1,2,3]`; version 1 identical byte-for-byte; every version keeps its currency, occupancy, meal plan and actor; current version is 3 |
+| Stale version read (racing writer) | duplicate version refused by `UNIQUE (reservationId, version)`, nothing appended |
+| Audit write throws during reprice | `500 AUDIT_UNAVAILABLE`; no new version, no price-change row, room rate and discount unchanged |
+| Audit model missing during reprice | `500 AUDIT_UNAVAILABLE`; nothing written |
+| Another hotel's reservation | `404`, snapshots unchanged |
+| Receptionist repricing | `403` |
+| Reprice then check in | folio `required` equals the latest version; room charge + meal line equal the repriced breakdown; version 1 unchanged |
+
+Browser/API acceptance (`scripts/verify-pricing-acceptance.mjs`, 35 checks) additionally proves
+against real PostgreSQL: two repricings produce versions 1–3 with the original intact, an
+`UPDATE` of a stored version is rejected by the database ("immutable"), a `DELETE` of a reservation
+with pricing history is refused by the foreign key, and the API itself answers `409` instead of
+deleting a repriced reservation.
 
 The pricing acceptance script is intentionally independent of the seed data: it creates its own room
 types (rooms 903/904), occupancies (`Pricing Single/Double/Family`), a meal plan and its own rates,
@@ -284,6 +387,15 @@ drives the real UI in Chromium, and restores the hotel's original pricing model 
 - The Prisma native query engine cannot be downloaded here (`binaries.prisma.sh` TLS failure), so
   runtime verification uses the WASM/driver-adapter path. `prisma validate` and the schema tests run
   against the real schema, and the migration itself was applied by the real PostgreSQL server.
+- Hotel deletion is not an application feature. The new `RESTRICT` foreign keys mean that deleting a
+  hotel row that still has pricing history now fails by design; a legitimate teardown has to remove
+  or export the financial records first. That is the intended retention policy, not an oversight.
+- The immutability trigger blocks `UPDATE` only. `DELETE` remains possible for deliberate purges
+  (the reservation-delete path and the test-data endpoint), and restoring a version from a backup is
+  the recovery route for an erroneous purge.
+- Pricing history currently records the *price* versions only. A full financial audit trail also
+  wants folio/payment events; those are already recorded by their own modules and were not merged
+  into this ledger.
 
 ---
 
@@ -324,10 +436,11 @@ acceptance run creates (rooms 903/904 and their rates) stays in place as a worke
 
 ## 13. Files
 
-New backend: `lib/pricing/{types,engine,config,admin}.ts`,
+New backend: `lib/pricing/{types,engine,config,admin,versions}.ts`,
 `app/api/pricing/route.ts`, `app/api/pricing/room-rates/route.ts`, `app/api/pricing/[entity]/route.ts`,
 `app/api/reservations/quote/route.ts`, `app/api/reservations/[id]/reprice/route.ts`,
-`prisma/migrations/20261031120000_add_pricing_engine/migration.sql`.
+`prisma/migrations/20261031120000_add_pricing_engine/migration.sql`,
+`prisma/migrations/20261031160000_price_version_history/migration.sql`.
 
 New UI: `components/pricing/PricingClient.tsx`,
 `app/dashboard/settings/pricing/page.tsx`, `components/reservations/RepriceDialog.tsx`, plus the
@@ -339,7 +452,7 @@ Changed: `prisma/schema.prisma`, `app/api/reservations/route.ts` (engine + snaps
 `lib/stay-service.ts` (snapshot-driven folio), `components/frontdesk/FrontDeskClient.tsx` (Reprice),
 `scripts/migration-ledger.mjs`, `prisma/migration-release-manifest.json`.
 
-Tests: `__tests__/pricing/{engine,pricing-api,reservation-pricing}.test.ts`,
+Tests: `__tests__/pricing/{engine,pricing-api,reservation-pricing,pricing-integrity}.test.ts`,
 `__tests__/frontend/{create-reservation,reprice-dialog}.test.tsx`,
 `__tests__/schema/migration-adoption.test.ts`, `scripts/verify-pricing-acceptance.mjs` (new),
 `scripts/verify-reservation-acceptance.mjs` (waits for the server-quoted rate).

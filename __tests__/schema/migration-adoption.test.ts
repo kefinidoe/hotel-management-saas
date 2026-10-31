@@ -59,9 +59,9 @@ describe("migration release manifest", () => {
     expect(manifest).not.toBeNull();
     const names = manifest.migrations.map((entry: { name: string }) => entry.name);
     expect(names).toEqual(migrations.map((migration) => migration.name));
-    expect(names).toHaveLength(20);
+    expect(names).toHaveLength(21);
     expect(names[0]).toBe("20260915161717_init");
-    expect(names[names.length - 1]).toBe("20261031120000_add_pricing_engine");
+    expect(names[names.length - 1]).toBe("20261031160000_price_version_history");
     expect(names).toContain("20261029120000_add_pos_charge_to_room_idempotency");
     expect(names).toContain("20261029130000_add_tenant_composite_join_fks");
   });
@@ -199,7 +199,7 @@ describe("adoption planning", () => {
     }
   });
 
-  it("baselines 17 migrations for an unmanaged SaaS database and leaves the three new ones pending", () => {
+  it("baselines 17 migrations for an unmanaged SaaS database and leaves the four new ones pending", () => {
     const plan = buildAdoptionPlan({ migrations, features: featuresFor("saas_through_17"), ledgerRows: [] });
     expect(plan.checkpoint?.id).toBe("saas_through_17");
     expect(plan.baseline).toEqual(names.slice(0, 17));
@@ -207,6 +207,7 @@ describe("adoption planning", () => {
       "20261029120000_add_pos_charge_to_room_idempotency",
       "20261029130000_add_tenant_composite_join_fks",
       "20261031120000_add_pricing_engine",
+      "20261031160000_price_version_history",
     ]);
     expect(plan.problems).toEqual([]);
   });
@@ -215,7 +216,18 @@ describe("adoption planning", () => {
     const plan = buildAdoptionPlan({ migrations, features: featuresFor("saas_through_19"), ledgerRows: [] });
     expect(plan.checkpoint?.id).toBe("saas_through_19");
     expect(plan.baseline).toEqual(names.slice(0, 19));
-    expect(plan.pending).toEqual(["20261031120000_add_pricing_engine"]);
+    expect(plan.pending).toEqual([
+      "20261031120000_add_pricing_engine",
+      "20261031160000_price_version_history",
+    ]);
+    expect(plan.problems).toEqual([]);
+  });
+
+  it("baselines 20 migrations for a database whose pricing engine has no version history", () => {
+    const plan = buildAdoptionPlan({ migrations, features: featuresFor("saas_through_20"), ledgerRows: [] });
+    expect(plan.checkpoint?.id).toBe("saas_through_20");
+    expect(plan.baseline).toEqual(names.slice(0, 20));
+    expect(plan.pending).toEqual(["20261031160000_price_version_history"]);
     expect(plan.problems).toEqual([]);
   });
 

@@ -309,6 +309,25 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
           );
         }
 
+        // Financial evidence is never removed by cascade (the foreign keys are
+        // RESTRICT). A repricing is an audited financial event, so a reservation
+        // that has one is cancelled, never deleted. A plain quote that was never
+        // paid or re-priced is removed together with its frozen price only
+        // because the reservation itself is being discarded.
+        const priceChanges = await tx.reservationPriceChange.count({
+          where: { reservationId: id, hotelId },
+        });
+        if (priceChanges > 0) {
+          throw new ReservationUpdateError(
+            "Cannot delete a reservation that has been repriced. Cancel it so its pricing history is kept.",
+            409
+          );
+        }
+
+        await tx.reservationPriceSnapshot.deleteMany({
+          where: { reservationId: id, hotelId },
+        });
+
         await tx.reservationRoom.deleteMany({
           where: { reservationId: id },
         });

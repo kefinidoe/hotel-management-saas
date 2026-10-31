@@ -82,6 +82,10 @@
     {
       "name": "20261031120000_add_pricing_engine",
       "sha256": "27642ce20ea2a605c98a5e80d49ea8bf892087c99875dfc7f6a4383e054b6a91"
+    },
+    {
+      "name": "20261031160000_price_version_history",
+      "sha256": "405f03934214c00f2f57b7cc88ac95d27856bd4a2bd5db9ab819e624d0214d47"
     }
   ]
 }

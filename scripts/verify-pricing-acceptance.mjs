@@ -152,6 +152,7 @@ function clearPreviousRuns(hotel) {
   if (!ids) return 0;
   const list = ids.split(",").map((id) => `'${id}'`).join(",");
   sql(`DELETE FROM "ReservationRoom" WHERE "reservationId" IN (${list})`);
+  sql(`DELETE FROM "ReservationPriceChange" WHERE "reservationId" IN (${list})`);
   sql(`DELETE FROM "ReservationPriceSnapshot" WHERE "reservationId" IN (${list})`);
   sql(`DELETE FROM "Reservation" WHERE id IN (${list})`);
   return list.split(",").length;
@@ -631,11 +632,12 @@ async function main() {
   await checkAsync("api-snapshot-frozen", "a price snapshot is written with the reservation", async () => {
     assert(created?.id, "reservation was not created");
     const row = sql(
-      `SELECT "grandTotal" || '|' || currency || '|' || "occupancyName" || '|' || "mealPlanName" || '|' || nights
-       FROM "ReservationPriceSnapshot" WHERE "reservationId" = '${created.id}'`
+      `SELECT "grandTotal" || '|' || currency || '|' || "occupancyName" || '|' || "mealPlanName" || '|' || nights || '|' || version
+       FROM "ReservationPriceSnapshot" WHERE "reservationId" = '${created.id}' AND version = 1`
     );
-    assert(row, "no snapshot row");
-    const [total, currency, occupancyName, mealPlanName, nights] = row.split("|");
+    assert(row, "no version 1 snapshot row");
+    const [total, currency, occupancyName, mealPlanName, nights, version] = row.split("|");
+    assert(version === "1", `original version is ${version}`);
     assert(Number(total) === expected, `snapshot total ${total} != ${expected}`);
     assert(currency === fx.currency, `snapshot currency ${currency}`);
     assert(occupancyName === "Pricing Double", `snapshot occupancy ${occupancyName}`);
@@ -657,9 +659,10 @@ async function main() {
     assert(status === 200 || status === 201, `status ${status}`);
 
     const snapshot = sql(
-      `SELECT "grandTotal" FROM "ReservationPriceSnapshot" WHERE "reservationId" = '${created.id}'`
+      `SELECT "grandTotal" FROM "ReservationPriceSnapshot"
+       WHERE "reservationId" = '${created.id}' AND version = 1`
     );
-    assert(Number(snapshot) === expected, `snapshot changed to ${snapshot}`);
+    assert(Number(snapshot) === expected, `the original version changed to ${snapshot}`);
     // The reservation keeps the room rate it was sold at; the total lives in the
     // snapshot that the assertion above just read.
     const soldRate = sql(
@@ -698,7 +701,8 @@ async function main() {
     assert(status === 201, `status ${status}: ${JSON.stringify(body)}`);
     assert(body.total === raised, `stored total ${body.total} != ${raised}`);
     const snapshot = sql(
-      `SELECT "grandTotal" FROM "ReservationPriceSnapshot" WHERE "reservationId" = '${body.id}'`
+      `SELECT "grandTotal" FROM "ReservationPriceSnapshot"
+       WHERE "reservationId" = '${body.id}' ORDER BY version DESC LIMIT 1`
     );
     assert(Number(snapshot) === raised, `snapshot ${snapshot} != ${raised}`);
     return `${money(body.total)}`;
@@ -725,19 +729,36 @@ async function main() {
     assert(body.previousTotal === expected, `previousTotal ${body.previousTotal} != ${expected}`);
     assert(body.total === expectedReprice, `new total ${body.total} != ${expectedReprice}`);
 
-    const snapshot = sql(
-      `SELECT "grandTotal" FROM "ReservationPriceSnapshot" WHERE "reservationId" = '${created.id}'`
+    assert(body.version === 2, `repricing wrote version ${body.version}`);
+    const latest = sql(
+      `SELECT "grandTotal" || '|' || version FROM "ReservationPriceSnapshot"
+       WHERE "reservationId" = '${created.id}' ORDER BY version DESC LIMIT 1`
     );
-    assert(Number(snapshot) === expectedReprice, `snapshot ${snapshot} != ${expectedReprice}`);
+    const [latestTotal, latestVersion] = latest.split("|");
+    assert(Number(latestTotal) === expectedReprice, `latest version ${latestTotal} != ${expectedReprice}`);
+    assert(latestVersion === "2", `latest version is ${latestVersion}`);
+
+    // The agreement made at booking is still exactly what it was.
+    const original = sql(
+      `SELECT "grandTotal" || '|' || currency || '|' || "occupancyName" || '|' || "createdById"
+       FROM "ReservationPriceSnapshot" WHERE "reservationId" = '${created.id}' AND version = 1`
+    );
+    const [originalTotal, originalCurrency, originalOccupancy, originalActor] = original.split("|");
+    assert(Number(originalTotal) === expected, `version 1 total changed to ${originalTotal}`);
+    assert(originalCurrency === fx.currency, `version 1 currency is ${originalCurrency}`);
+    assert(originalOccupancy === "Pricing Double", `version 1 occupancy is ${originalOccupancy}`);
+    assert(Boolean(originalActor), "version 1 lost its actor");
 
     const change = sql(
       `SELECT "previousTotal" || '|' || "newTotal" || '|' || coalesce(reason, '') || '|' || "changedById"
+              || '|' || coalesce("previousVersion"::text, '') || '|' || coalesce("newVersion"::text, '')
        FROM "ReservationPriceChange" WHERE "reservationId" = '${created.id}'
        ORDER BY "createdAt" DESC LIMIT 1`
     );
-    const [previousTotal, newTotal, reason, changedBy] = change.split("|");
+    const [previousTotal, newTotal, reason, changedBy, previousVersion, newVersion] = change.split("|");
     assert(Number(previousTotal) === expected, `change row previous ${previousTotal}`);
     assert(Number(newTotal) === expectedReprice, `change row new ${newTotal}`);
+    assert(previousVersion === "1" && newVersion === "2", `change versions ${previousVersion}->${newVersion}`);
     assert(/acceptance/.test(reason), `change row reason "${reason}"`);
     assert(changedBy.length > 0, "change row has no actor");
 
@@ -747,6 +768,73 @@ async function main() {
     );
     assert(Number(audit) >= 1, "no audit entry for the repricing");
     return `${money(expected)} → ${money(expectedReprice)} (audited)`;
+  });
+
+  await checkAsync("api-reprice-twice-keeps-history", "a second repricing appends a third version and the original still stands", async () => {
+    const secondRate = raised + 500;
+    const { status: rateStatus } = await owner.post("/api/pricing/room-rates", {
+      roomTypeId: fx.standard.roomTypeId,
+      rates: [
+        { occupancyTypeId: singleId, nightlyRate: STANDARD.single },
+        { occupancyTypeId: doubleId, nightlyRate: secondRate },
+        { occupancyTypeId: familyId, nightlyRate: STANDARD.family },
+      ],
+    });
+    assert(rateStatus === 200 || rateStatus === 201, `rate status ${rateStatus}`);
+
+    const expectedThird = secondRate * 3 + MEAL.charge * 2 * 3;
+    const { status, body } = await owner.post(`/api/reservations/${created.id}/reprice`, {
+      reason: "acceptance: second repricing",
+    });
+    assert(status === 200, `status ${status}: ${JSON.stringify(body)}`);
+    assert(body.version === 3, `expected version 3, got ${body.version}`);
+    assert(body.total === expectedThird, `total ${body.total} != ${expectedThird}`);
+
+    const versions = sql(
+      `SELECT string_agg(version || ':' || "grandTotal"::int, ',' ORDER BY version)
+       FROM "ReservationPriceSnapshot" WHERE "reservationId" = '${created.id}'`
+    );
+    const parsed = versions.split(",");
+    assert(parsed.length === 3, `expected 3 versions, got ${versions}`);
+    assert(parsed[0] === `1:${expected}`, `version 1 is ${parsed[0]}, expected 1:${expected}`);
+    assert(parsed[2] === `3:${expectedThird}`, `version 3 is ${parsed[2]}`);
+    const changes = sql(
+      `SELECT count(*) FROM "ReservationPriceChange" WHERE "reservationId" = '${created.id}'`
+    );
+    assert(changes === "2", `expected 2 price-change rows, got ${changes}`);
+    return `${versions} (${changes} recorded changes)`;
+  });
+
+  await checkAsync("api-db-rejects-snapshot-update", "the database refuses to rewrite an agreed price version", async () => {
+    let rejected = null;
+    try {
+      sql(`UPDATE "ReservationPriceSnapshot" SET "grandTotal" = 1 WHERE "reservationId" = '${created.id}' AND version = 1`);
+    } catch (error) {
+      rejected = String(error.stderr ?? error.message ?? error);
+    }
+    assert(rejected, "PostgreSQL allowed an UPDATE of an agreed price version");
+    assert(/immutable/i.test(rejected), `unexpected database error: ${rejected.slice(0, 200)}`);
+    const total = sql(
+      `SELECT "grandTotal" FROM "ReservationPriceSnapshot" WHERE "reservationId" = '${created.id}' AND version = 1`
+    );
+    assert(Number(total) === expected, `version 1 total is now ${total}`);
+    return "UPDATE rejected by trigger";
+  });
+
+  await checkAsync("api-db-restricts-reservation-delete", "a reservation with pricing history cannot be deleted by cascade", async () => {
+    let rejected = null;
+    try {
+      sql(`DELETE FROM "Reservation" WHERE id = '${created.id}'`);
+    } catch (error) {
+      rejected = String(error.stderr ?? error.message ?? error);
+    }
+    assert(rejected, "PostgreSQL deleted a reservation that still has pricing history");
+    assert(/foreign key|violates/i.test(rejected), `unexpected database error: ${rejected.slice(0, 200)}`);
+    const remaining = sql(
+      `SELECT count(*) FROM "ReservationPriceSnapshot" WHERE "reservationId" = '${created.id}'`
+    );
+    assert(remaining === "3", `pricing history shrank to ${remaining} rows`);
+    return "DELETE refused (RESTRICT)";
   });
 
   await checkAsync("api-discount-permission", "only management may discount a stay", async () => {
@@ -771,7 +859,17 @@ async function main() {
       discount: 500,
     });
     assert(allowed.status === 201, `manager discount returned ${allowed.status}: ${JSON.stringify(allowed.body)}`);
-    assert(allowed.body.total === raised - 500, `discounted total ${allowed.body.total}`);
+    // Read the live rate: earlier checks in this run change it on purpose.
+    const liveRate = Number(
+      sql(
+        `SELECT "nightlyRate" FROM "RoomTypeOccupancy"
+         WHERE "roomTypeId" = '${fx.standard.roomTypeId}' AND "occupancyTypeId" = '${doubleId}' AND "isActive"`
+      )
+    );
+    assert(
+      allowed.body.total === liveRate - 500,
+      `discounted total ${allowed.body.total}, expected ${liveRate - 500}`
+    );
     return `403 for receptionist, ${money(allowed.body.total)} for manager`;
   });
 
@@ -801,6 +899,21 @@ async function main() {
     );
     assert(after === before, "a partial meal plan was written");
     return "404 and no partial row";
+  });
+
+  await checkAsync("api-delete-keeps-history", "the API refuses to delete a repriced reservation so its history survives", async () => {
+    const response = await owner.request(`/api/reservations/${created.id}`, { method: "DELETE" });
+    const status = response.status;
+    const body = await response.json().catch(() => ({}));
+    assert(status === 409, `expected 409, got ${status}: ${JSON.stringify(body)}`);
+    assert(/repriced/i.test(body.error ?? ""), `unexpected message: ${body.error}`);
+    const remaining = sql(
+      `SELECT count(*) FROM "ReservationPriceSnapshot" WHERE "reservationId" = '${created.id}'`
+    );
+    assert(remaining === "3", `pricing history shrank to ${remaining} rows`);
+    const reservation = sql(`SELECT count(*) FROM "Reservation" WHERE id = '${created.id}'`);
+    assert(reservation === "1", "the reservation was deleted anyway");
+    return `${status} ${body.error}`;
   });
 
   // ---- Phase B ------------------------------------------------------------
@@ -1026,7 +1139,7 @@ async function main() {
          FROM "ReservationPriceSnapshot" s
          JOIN "Reservation" r ON r.id = s."reservationId"
          JOIN "Guest" g ON g.id = r."guestId"
-         WHERE g.id IN (SELECT id FROM "Guest" WHERE "fullName" = '${guestName}')`
+         WHERE g.id IN (SELECT id FROM "Guest" WHERE "fullName" = '${guestName}') AND s.version = 1`
       );
       assert(row, "no snapshot for the reservation created in the browser");
       const [total, currency, occupancy] = row.split("|");
@@ -1076,7 +1189,7 @@ async function main() {
         `SELECT s."grandTotal" FROM "ReservationPriceSnapshot" s
          JOIN "Reservation" r ON r.id = s."reservationId"
          JOIN "Guest" g ON g.id = r."guestId"
-         WHERE g."fullName" = '${guestName}'`
+         WHERE g."fullName" = '${guestName}' AND s.version = 1`
       );
       const higher = uiRate + 2500;
       const saved = await owner.post("/api/pricing/room-rates", {
@@ -1097,9 +1210,9 @@ async function main() {
         `SELECT s."grandTotal" FROM "ReservationPriceSnapshot" s
          JOIN "Reservation" r ON r.id = s."reservationId"
          JOIN "Guest" g ON g.id = r."guestId"
-         WHERE g."fullName" = '${guestName}'`
+         WHERE g."fullName" = '${guestName}' AND s.version = 1`
       );
-      assert(after === before, `snapshot moved from ${before} to ${after}`);
+      assert(after === before, `the original version moved from ${before} to ${after}`);
       return `${money(before)} unchanged after raising to ${money(higher)}`;
     });
 
@@ -1142,7 +1255,7 @@ async function main() {
          JOIN "Reservation" r ON r.id = s."reservationId"
          JOIN "Guest" g ON g.id = r."guestId"
          LEFT JOIN "ReservationPriceChange" c ON c."reservationId" = r.id
-         WHERE g."fullName" = '${arrivalGuest}' LIMIT 1`
+         WHERE g."fullName" = '${arrivalGuest}' AND s.version = 2 LIMIT 1`
       );
       const [snapshotTotal, changeTotal] = stored.split("|");
       assert(Number(snapshotTotal) === expectedNew, `snapshot after reprice ${snapshotTotal} != ${expectedNew}`);

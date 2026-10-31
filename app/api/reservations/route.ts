@@ -356,14 +356,18 @@ export async function POST(req: Request) {
           },
         });
 
-        // Freeze the agreed price. Editing pricing configuration later must not
-        // change what this guest was quoted.
+        // Freeze the agreed price as version 1 of this reservation's pricing
+        // history. Editing pricing configuration later must not change what this
+        // guest was quoted. When the hotel prices from configuration this write
+        // is mandatory: without the frozen record the charge cannot be defended,
+        // so a failure rolls the whole reservation back.
         if (priceSnapshot) {
           await persistPriceSnapshot(tx, {
             hotelId,
             reservationId: reservation.id,
             breakdown: priceSnapshot,
             createdById: tenant.userId,
+            required: usesConfiguredPricing,
           });
         }
 
@@ -401,12 +405,18 @@ export async function POST(req: Request) {
   }
 }
 
+/** Raised when a configured-price reservation cannot freeze its price. */
+class PriceSnapshotError extends ReservationError {}
+
 /**
- * Persist the frozen price breakdown.
+ * Persist version 1 of the frozen price breakdown.
  *
- * Guarded so an installation that has not run the pricing migration (or a test
- * double without that delegate) still creates reservations: the snapshot is an
- * additional guarantee, not a prerequisite for selling a room.
+ * `required` is true whenever the hotel prices from configuration. Then a missing
+ * delegate or a failed write throws, which aborts the surrounding transaction:
+ * a reservation whose agreed price could not be recorded is never sold. Legacy
+ * hotels (no configured pricing) keep the old behaviour - there the snapshot is
+ * an extra guarantee rather than the source of the charge, so a missing table is
+ * reported instead of blocking the booking.
  */
 async function persistPriceSnapshot(
   tx: unknown,
@@ -415,35 +425,56 @@ async function persistPriceSnapshot(
     reservationId: string;
     breakdown: PriceBreakdown;
     createdById: string;
+    required: boolean;
   }
 ) {
   const delegate = (tx as { reservationPriceSnapshot?: { create?: (args: unknown) => Promise<unknown> } })
     .reservationPriceSnapshot;
-  if (!delegate?.create) return null;
+  if (!delegate?.create) {
+    if (input.required) {
+      throw new PriceSnapshotError(
+        "The reservation price could not be recorded, so the reservation was not created.",
+        500
+      );
+    }
+    console.warn(
+      "Pricing snapshot storage is unavailable; the legacy reservation was created without a frozen price."
+    );
+    return null;
+  }
   const { breakdown } = input;
-  return delegate.create({
-    data: {
-      hotelId: input.hotelId,
-      reservationId: input.reservationId,
-      pricingModel: breakdown.pricingModel,
-      currency: breakdown.currency,
-      occupancyName: breakdown.occupancyName,
-      mealPlanName: breakdown.mealPlanName,
-      mealPlanBasis: breakdown.mealPlanBasis,
-      nightlyRate: breakdown.nightlyRate,
-      nights: breakdown.nights,
-      adults: breakdown.adults,
-      children: breakdown.children,
-      extraBeds: breakdown.extraBeds,
-      roomTotal: breakdown.totals.room,
-      mealsTotal: breakdown.totals.meals,
-      extrasTotal: breakdown.totals.extras,
-      adjustmentsTotal: breakdown.totals.adjustments,
-      discountTotal: breakdown.totals.discount,
-      taxTotal: breakdown.totals.tax,
-      grandTotal: breakdown.totals.grandTotal,
-      breakdown: breakdown as unknown as Prisma.InputJsonValue,
-      createdById: input.createdById,
-    },
-  });
+  try {
+    return await delegate.create({
+      data: {
+        version: 1,
+        hotelId: input.hotelId,
+        reservationId: input.reservationId,
+        pricingModel: breakdown.pricingModel,
+        currency: breakdown.currency,
+        occupancyName: breakdown.occupancyName,
+        mealPlanName: breakdown.mealPlanName,
+        mealPlanBasis: breakdown.mealPlanBasis,
+        nightlyRate: breakdown.nightlyRate,
+        nights: breakdown.nights,
+        adults: breakdown.adults,
+        children: breakdown.children,
+        extraBeds: breakdown.extraBeds,
+        roomTotal: breakdown.totals.room,
+        mealsTotal: breakdown.totals.meals,
+        extrasTotal: breakdown.totals.extras,
+        adjustmentsTotal: breakdown.totals.adjustments,
+        discountTotal: breakdown.totals.discount,
+        taxTotal: breakdown.totals.tax,
+        grandTotal: breakdown.totals.grandTotal,
+        breakdown: breakdown as unknown as Prisma.InputJsonValue,
+        createdById: input.createdById,
+      },
+    });
+  } catch (error) {
+    console.error("Failed to persist the reservation price snapshot:", error);
+    throw new PriceSnapshotError(
+      "The reservation price could not be recorded, so the reservation was not created.",
+      500
+    );
+  }
 }

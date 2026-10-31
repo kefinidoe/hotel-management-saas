@@ -326,8 +326,11 @@ model Reservation {
 
   rooms  ReservationRoom[]
   folios Folio[]
-  priceSnapshot ReservationPriceSnapshot?
-  priceChanges  ReservationPriceChange[]
+  // Append-only pricing history: version 1 is the price agreed at creation,
+  // each repricing appends a new immutable version. The current price is the
+  // highest version.
+  priceSnapshots ReservationPriceSnapshot[]
+  priceChanges   ReservationPriceChange[]
 
   @@unique([hotelId, code])
   @@unique([id, hotelId])
@@ -1032,14 +1035,23 @@ model HotelPricingSettings {
   createdAt           DateTime     @default(now())
 }
 
-/// The agreed price of a reservation, frozen at creation/repricing time.
-/// Editing pricing configuration never rewrites these rows.
+/// One immutable version of a reservation's agreed price.
+///
+/// Version 1 is written when the reservation is created; every repricing appends
+/// the next version. Rows are never updated (a database trigger enforces this),
+/// so the original agreement — amount, currency, breakdown, occupancy, meal plan
+/// and the actor who made it — survives every later repricing.
 model ReservationPriceSnapshot {
   id             String      @id @default(uuid())
   hotelId        String
-  hotel          Hotel       @relation(fields: [hotelId], references: [id], onDelete: Cascade)
-  reservationId  String      @unique
-  reservation    Reservation @relation(fields: [reservationId, hotelId], references: [id, hotelId], onDelete: Cascade)
+  // Financial evidence outlives a hotel row: deleting a hotel must not erase it.
+  hotel          Hotel       @relation(fields: [hotelId], references: [id], onDelete: Restrict)
+  reservationId  String
+  // A reservation cannot be deleted while pricing versions exist; the deletion
+  // path has to remove them deliberately.
+  reservation    Reservation @relation(fields: [reservationId, hotelId], references: [id, hotelId], onDelete: Restrict)
+  /// 1 = the original agreement, 2.. = later repricings.
+  version        Int         @default(1)
 
   pricingModel   PricingModel
   currency       String
@@ -1062,19 +1074,23 @@ model ReservationPriceSnapshot {
   createdById    String
   createdAt      DateTime    @default(now())
 
-  @@unique([reservationId, hotelId])
+  @@unique([reservationId, version])
   @@index([hotelId, createdAt])
+  @@index([reservationId, version])
 }
 
 /// Audit trail for explicit repricing of an existing reservation.
 model ReservationPriceChange {
   id               String      @id @default(uuid())
   hotelId          String
-  hotel            Hotel       @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  hotel            Hotel       @relation(fields: [hotelId], references: [id], onDelete: Restrict)
   reservationId    String
-  reservation      Reservation @relation(fields: [reservationId, hotelId], references: [id, hotelId], onDelete: Cascade)
+  reservation      Reservation @relation(fields: [reservationId, hotelId], references: [id, hotelId], onDelete: Restrict)
   previousTotal    Decimal     @db.Decimal(10, 2)
   newTotal         Decimal     @db.Decimal(10, 2)
+  /// Versions this change moved between (null for rows written before versioning).
+  previousVersion  Int?
+  newVersion       Int?
   reason           String?
   breakdown        Json
   changedById      String

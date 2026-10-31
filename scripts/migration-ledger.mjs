@@ -146,6 +146,18 @@ export const SCHEMA_FEATURES = {
   table_ReservationPriceSnapshot: table("ReservationPriceSnapshot"),
   column_ReservationPriceSnapshot_grandTotal: column("ReservationPriceSnapshot", "grandTotal"),
   fk_OrderItem_menuItem: constraint("OrderItem_menuItemId_hotelId_fkey"),
+
+  // Pricing version history and financial retention (migration 21).
+  column_ReservationPriceSnapshot_version: column("ReservationPriceSnapshot", "version"),
+  column_ReservationPriceChange_newVersion: column("ReservationPriceChange", "newVersion"),
+  index_ReservationPriceSnapshot_reservationId_version:
+    index("ReservationPriceSnapshot_reservationId_version_key"),
+  restrict_ReservationPriceSnapshot_reservation:
+    `EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ReservationPriceSnapshot_reservationId_hotelId_fkey' AND confdeltype = 'r')`,
+  restrict_ReservationPriceChange_reservation:
+    `EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ReservationPriceChange_reservationId_hotelId_fkey' AND confdeltype = 'r')`,
+  trigger_ReservationPriceSnapshot_immutable:
+    `EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'ReservationPriceSnapshot_immutable' AND NOT tgisinternal)`,
 };
 
 /** One SQL statement that returns the whole feature map as JSON. */
@@ -320,8 +332,8 @@ export const CHECKPOINTS = [
     ],
   },
   {
-    id: "saas_current",
-    label: "Current schema, all migrations applied (migrations 1-20)",
+    id: "saas_through_20",
+    label: "Pricing engine without versioned history (migrations 1-20 applied)",
     appliedThrough: "20261031120000_add_pricing_engine",
     require: [
       "table_Hotel",
@@ -345,6 +357,45 @@ export const CHECKPOINTS = [
       "table_MealPlanConfig",
       "table_ReservationPriceSnapshot",
       "column_ReservationPriceSnapshot_grandTotal",
+    ],
+    forbid: [
+      "column_ReservationPriceSnapshot_version",
+      "column_ReservationPriceChange_newVersion",
+      "trigger_ReservationPriceSnapshot_immutable",
+    ],
+  },
+  {
+    id: "saas_current",
+    label: "Current schema, all migrations applied (migrations 1-21)",
+    appliedThrough: "20261031160000_price_version_history",
+    require: [
+      "table_Hotel",
+      "table_Subscription",
+      "column_HotelMembership_department",
+      "column_Order_idempotencyOperation",
+      "column_Payment_requestFingerprint",
+      "column_ReservationRoom_hotelId",
+      "column_Recipe_hotelId",
+      "column_RecipeIngredient_hotelId",
+      "column_OrderItem_hotelId",
+      "fk_ReservationRoom_reservation",
+      "fk_ReservationRoom_room",
+      "fk_Recipe_menuItem",
+      "fk_RecipeIngredient_recipe",
+      "fk_RecipeIngredient_inventoryItem",
+      "fk_OrderItem_order",
+      "fk_OrderItem_menuItem",
+      "table_HotelPricingSettings",
+      "table_OccupancyType",
+      "table_MealPlanConfig",
+      "table_ReservationPriceSnapshot",
+      "column_ReservationPriceSnapshot_grandTotal",
+      "column_ReservationPriceSnapshot_version",
+      "column_ReservationPriceChange_newVersion",
+      "index_ReservationPriceSnapshot_reservationId_version",
+      "restrict_ReservationPriceSnapshot_reservation",
+      "restrict_ReservationPriceChange_reservation",
+      "trigger_ReservationPriceSnapshot_immutable",
     ],
     forbid: [],
   },

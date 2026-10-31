@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { currentPriceVersion } from "@/lib/pricing/versions";
 import { recordAudit } from "@/lib/audit";
 import { rangesOverlap } from "@/lib/dates";
 import { blocksGuestPlacement, isBookableToday, ROOM_STATUS_LABELS } from "@/lib/room-status";
@@ -64,9 +65,10 @@ export async function executeCheckIn(tenant: TenantContext, options: CheckInOpti
         include: {
           rooms: { include: { room: true } },
           folios: { where: { hotelId }, select: { id: true } },
-          // The frozen price agreed when the reservation was created. When it is
-          // present it — not a recomputation — decides what the guest owes.
-          priceSnapshot: true,
+          // The newest frozen price (version 1 at creation, higher after an
+          // explicit repricing). It — not a recomputation — decides what the
+          // guest owes.
+          priceSnapshots: { orderBy: { version: "desc" }, take: 1 },
         },
       });
 
@@ -157,7 +159,7 @@ export async function executeCheckIn(tenant: TenantContext, options: CheckInOpti
       let nights: number;
       let required: number;
       const discount = Number(reservation.discount ?? 0);
-      const snapshot = reservation.priceSnapshot ?? null;
+      const snapshot = currentPriceVersion(reservation.priceSnapshots);
       try {
         nights = stayNights(reservation.checkInDate, reservation.checkOutDate);
         required = snapshot
