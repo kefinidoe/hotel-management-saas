@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-31T09:22:11.245Z",
+  "generatedAt": "2026-10-31T16:11:16.162Z",
   "base": "http://127.0.0.1:3000",
   "database": "postgresql://127.0.0.1:55433/hotel_saas_demo_owner",
   "total": 19,

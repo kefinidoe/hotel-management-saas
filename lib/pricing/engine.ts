@@ -329,20 +329,39 @@ export function priceStay(config: HotelPricingConfig, request: PriceRequest): Pr
     });
   }
 
-  if (children > 0 && settings.useChildPricing && config.childRules.length > 0) {
+  if (children > 0 && settings.useChildPricing) {
     const activeRules = config.childRules
       .filter((rule) => rule.isActive)
       .sort((left, right) => left.maxAge - right.maxAge);
+
+    // Child pricing is switched on with no band to apply. Charging nothing would
+    // silently give the children away, so the price is refused instead.
+    if (activeRules.length === 0) {
+      return fail(
+        "INVALID_CONFIG",
+        "Child pricing is switched on for this hotel but no child age band is configured. " +
+          "Add one on the Pricing page, or record the children as adults."
+      );
+    }
+
+    // The booking form does not ask for ages, so unnamed children are priced with
+    // the youngest band's minimum age. That is documented behaviour (see
+    // docs/pricing-engine.md) and covered by tests; it never skips the rule.
     const ages =
       request.childAges?.length === children
         ? request.childAges
-        : activeRules.length > 0
-          ? Array.from({ length: children }, () => activeRules[0].minAge)
-          : [];
+        : Array.from({ length: children }, () => activeRules[0].minAge);
 
     for (const age of ages) {
       const rule = activeRules.find((candidate) => age >= candidate.minAge && age <= candidate.maxAge);
-      if (!rule) continue;
+      // A child outside every configured band used to be free. That is an
+      // under-charge, not a valid price: say what to configure instead.
+      if (!rule) {
+        return fail(
+          "INVALID_CONFIG",
+          `No child price is configured for a child aged ${age}. Add an age band covering that age on the Pricing page, or record the guest as an adult.`
+        );
+      }
       const amount =
         rule.chargeType === "PERCENT_OF_ADULT"
           ? roundMoney(nightlyRate * (rule.amount / 100) * nights)

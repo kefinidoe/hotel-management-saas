@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { pricingModelStubs } from "../fixtures/pricing-prisma-double";
 
 export const HotelRole = {
   HOTEL_OWNER: "HOTEL_OWNER",
@@ -223,8 +224,14 @@ let db: TestDB;
 
 vi.doMock("@/lib/prisma", () => ({
   prisma: {
+    // A real client always exposes the pricing models. Without them the pricing
+    // reader now fails closed (503) instead of pricing from base rates silently,
+    // so the double has to look like a real client: an empty configuration is a
+    // hotel that never opened the Pricing page.
+    ...pricingModelStubs(),
     $transaction: async (fn: any) => {
       const tx = {
+        ...pricingModelStubs(),
         $queryRaw: async (query: any, ...values: any[]) => {
           const parts = Array.isArray(query) ? query : [query];
           const rendered = parts.map((p: any, i: number) => `${p}${values[i] !== undefined ? values[i] : ""}`).join("");

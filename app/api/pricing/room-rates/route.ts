@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getTenantFromRoute, requireModule, requireRole, ROLE_GROUPS } from "@/lib/authz";
 import { recordAudit } from "@/lib/audit";
+import { pricingUnavailableResponse } from "@/lib/pricing/http";
 import { PricingConfigError, setRoomTypeRates } from "@/lib/pricing/admin";
 
 /** Bulk upsert of one room type's per-occupancy nightly rates. */
@@ -34,6 +35,8 @@ export async function POST(req: Request) {
     if (error instanceof PricingConfigError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
+    const unavailable = pricingUnavailableResponse(error, "POST /api/pricing/room-rates");
+    if (unavailable) return unavailable;
     console.error("Failed to save room rates:", error);
     return NextResponse.json({ error: "Could not save room rates." }, { status: 500 });
   }

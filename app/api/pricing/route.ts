@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getTenantFromRoute, requireModule, requireRole, ROLE_GROUPS } from "@/lib/authz";
 import { recordAudit } from "@/lib/audit";
+import { pricingUnavailableResponse } from "@/lib/pricing/http";
 import {
   PricingConfigError,
   listPricingBundle,
@@ -31,6 +32,8 @@ export async function GET() {
   try {
     return NextResponse.json(await listPricingBundle(tenant.hotelId));
   } catch (error) {
+    const unavailable = pricingUnavailableResponse(error, "GET /api/pricing");
+    if (unavailable) return unavailable;
     console.error("Failed to load pricing configuration:", error);
     return NextResponse.json({ error: "Could not load pricing configuration." }, { status: 500 });
   }
@@ -62,6 +65,8 @@ export async function PATCH(req: Request) {
     if (error instanceof PricingConfigError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
+    const unavailable = pricingUnavailableResponse(error, "PATCH /api/pricing");
+    if (unavailable) return unavailable;
     console.error("Failed to update pricing settings:", error);
     return NextResponse.json({ error: "Could not save pricing settings." }, { status: 500 });
   }

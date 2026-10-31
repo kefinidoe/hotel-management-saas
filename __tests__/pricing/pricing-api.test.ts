@@ -31,6 +31,10 @@ const state = vi.hoisted(() => {
   mealPlans: [] as Record<string, unknown>[],
   roomTypeOccupancies: [] as Record<string, unknown>[],
   settings: [] as Record<string, unknown>[],
+  /** Models the double pretends the generated client does not expose. */
+  hiddenModels: [] as string[],
+  /** Models whose reads the double makes fail, to exercise the error paths. */
+  failingModels: {} as Record<string, Error>,
   };
 });
 
@@ -64,11 +68,15 @@ vi.doMock("@/lib/prisma", () => {
   const findMany = (rows: () => Record<string, unknown>[]) => async (args?: { where?: { hotelId?: string } }) =>
     scoped(rows(), args?.where?.hotelId);
 
-  return {
-    prisma: {
+  const prismaDouble: Record<string, any> = {
       hotel: {
         findUnique: async ({ where }: { where: { id: string } }) =>
           [hotelA, hotelB].find((hotel) => hotel.id === where.id) ?? null,
+        // `loadPricingConfig` reads the currency from the Hotel row.
+        findMany: async (args?: { where?: { hotelId?: string; id?: string } }) =>
+          [hotelA, hotelB].filter((hotel) =>
+            args?.where?.id ? hotel.id === args.where.id : args?.where?.hotelId ? hotel.id === args.where.hotelId : true
+          ),
       },
       hotelPricingSettings: {
         findMany: async (args?: { where?: { hotelId?: string } }) =>
@@ -160,6 +168,7 @@ vi.doMock("@/lib/prisma", () => {
       },
       mealPlanConfig: {
         findMany: findMany(() => state.mealPlans),
+        count: async (args?: { where?: { hotelId?: string } }) => scoped(state.mealPlans, args?.where?.hotelId).length,
         findUnique: async ({ where }: { where: { id_hotelId: { id: string; hotelId: string } } }) =>
           state.mealPlans.find(
             (row) => row.id === where.id_hotelId.id && row.hotelId === where.id_hotelId.hotelId
@@ -176,9 +185,9 @@ vi.doMock("@/lib/prisma", () => {
         createMany: async ({ data }: { data: unknown[] }) => ({ count: data.length }),
       },
       rateAdjustment: { findMany: async () => [], create: async () => ({ id: "adj-1" }) },
-      extraBedRule: { findMany: async () => [] },
-      childPricingRule: { findMany: async () => [] },
-      taxRule: { findMany: async () => [] },
+      extraBedRule: { findMany: async () => [], count: async () => 0 },
+      childPricingRule: { findMany: async () => [], count: async () => 0 },
+      taxRule: { findMany: async () => [], count: async () => 0 },
       room: {
         findUnique: async ({ where }: { where: { id_hotelId: { id: string; hotelId: string } } }) =>
           [
@@ -189,8 +198,32 @@ vi.doMock("@/lib/prisma", () => {
           ) ?? null,
       },
       auditLog: { create: async () => ({ id: "audit-1" }) },
-    },
   };
+
+  // Make the double behave like a generated client that may be stale or failing:
+  // a hidden model is `undefined` — exactly what a client generated from an older
+  // schema looks like — and a failing model throws like a broken connection.
+  const withFailures = new Proxy(prismaDouble, {
+    get(target, property, receiver) {
+      if (typeof property !== "string") return Reflect.get(target, property, receiver);
+      if (state.hiddenModels.includes(property)) return undefined;
+      const model = Reflect.get(target, property, receiver);
+      const failure = state.failingModels[property];
+      if (failure && model && typeof model === "object") {
+        return new Proxy(model, {
+          get(modelTarget, method, modelReceiver) {
+            const original = Reflect.get(modelTarget, method, modelReceiver);
+            if (typeof original !== "function") return original;
+            if (method === "findMany") return async () => { throw failure; };
+            return original.bind(modelTarget);
+          },
+        });
+      }
+      return model;
+    },
+  });
+
+  return { prisma: withFailures };
 });
 
 let pricingRoute: typeof import("@/app/api/pricing/route");
@@ -204,6 +237,8 @@ beforeEach(async () => {
   state.mealPlans = [];
   state.roomTypeOccupancies = [];
   state.settings = [];
+  state.hiddenModels = [];
+  state.failingModels = {};
   state.tenant = {
     userId: "user-owner-a",
     hotelId: "hotel-a",
@@ -384,5 +419,177 @@ describe("reservation quote endpoint", () => {
     expect(body.nightlyRate).toBe(5500);
     expect(body.totals.grandTotal).toBe(11000);
     expect(body.availableOccupancies).toHaveLength(1);
+  });
+});
+
+describe("pricing failures are explicit — never a silent base-rate price", () => {
+  const legacy = () => ({
+    id: "settings-a",
+    hotelId: "hotel-a",
+    pricingModel: "LEGACY_BASE_RATE",
+    useOccupancyRates: false,
+    useMealPlans: false,
+    useSeasonalPricing: false,
+    useWeekendPricing: false,
+    useChildPricing: false,
+    useExtraBeds: false,
+    useTaxes: false,
+    pricesIncludeTax: false,
+  });
+
+  const quote = () =>
+    quoteRoute.POST(
+      jsonRequest(
+        { roomId: "room-a-101", checkInDate: "2026-12-01", checkOutDate: "2026-12-03", adults: 1 },
+        "http://localhost:3000/api/reservations/quote"
+      )
+    );
+
+  it("answers 503 PRISMA_CLIENT_STALE when the client cannot serve hotelPricingSettings", async () => {
+    // This is the original crash: a client generated before the pricing models
+    // existed. It must be a named 503, not `undefined.findUnique`.
+    state.hiddenModels = ["hotelPricingSettings"];
+
+    const response = await pricingRoute.GET();
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.code).toBe("PRISMA_CLIENT_STALE");
+    expect(body.error).toContain("npx prisma generate");
+    // Nothing internal (file paths, delegate names) leaks to the caller.
+    expect(body.error).not.toContain("hotelPricingSettings");
+  });
+
+  it("stops a quote when the client is stale instead of pricing from base rates", async () => {
+    state.hiddenModels = ["hotelPricingSettings"];
+
+    const response = await quote();
+    expect(response.status).toBe(503);
+    expect((await response.json()).code).toBe("PRISMA_CLIENT_STALE");
+  });
+
+  it("answers 503 PRICING_TABLES_MISSING when the pricing table was never created", async () => {
+    state.failingModels = {
+      taxRule: Object.assign(new Error('relation "TaxRule" does not exist'), { code: "P2021" }),
+    };
+
+    const response = await quote();
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.code).toBe("PRICING_TABLES_MISSING");
+  });
+
+  it("answers 503 PRICING_CONFIG_UNREADABLE when a pricing read fails", async () => {
+    state.failingModels = {
+      taxRule: Object.assign(new Error("connection reset by peer"), { code: "P1001" }),
+    };
+
+    const response = await quote();
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.code).toBe("PRICING_CONFIG_UNREADABLE");
+    // The caller is told no price could be produced, not a fallback price.
+    expect(body.error).toContain("no price can be quoted");
+  });
+
+  it("refuses to price a hotel that switched taxes on without a tax rule", async () => {
+    state.settings = [{ ...legacy(), useTaxes: true }];
+
+    const response = await quote();
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.code).toBe("PRICING_CONFIG_INVALID");
+    expect(body.error).toContain("no tax rule is configured");
+  });
+
+  it("still prices a hotel that has never configured pricing (documented base-rate fallback)", async () => {
+    state.settings = [];
+
+    const response = await quote();
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    // rt-a-standard baseRate 4500 x 2 nights
+    expect(body.totals.grandTotal).toBe(9000);
+    expect(body.pricingModel).toBe("LEGACY_BASE_RATE");
+  });
+
+  it("refuses to switch a pricing rule on when there is nothing to apply", async () => {
+    const patch = (body: unknown) =>
+      pricingRoute.PATCH(
+        new Request("http://localhost:3000/api/pricing", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        })
+      );
+
+    const taxes = await patch({ useTaxes: true });
+    expect(taxes.status).toBe(400);
+    expect((await taxes.json()).error).toContain("tax rule");
+
+    const children = await patch({ useChildPricing: true });
+    expect(children.status).toBe(400);
+    expect((await children.json()).error).toContain("child age band");
+
+    const extraBeds = await patch({ useExtraBeds: true });
+    expect(extraBeds.status).toBe(400);
+    expect((await extraBeds.json()).error).toContain("extra-bed rule");
+
+    const mealPlans = await patch({ useMealPlans: true });
+    expect(mealPlans.status).toBe(400);
+    expect((await mealPlans.json()).error).toContain("meal plan");
+
+    // The refused switches changed nothing.
+    expect(state.settings).toHaveLength(0);
+  });
+
+  it("refuses occupancy pricing when the hotel has no occupancy options", async () => {
+    const response = await pricingRoute.PATCH(
+      new Request("http://localhost:3000/api/pricing", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pricingModel: "ROOM_TYPE_OCCUPANCY", useOccupancyRates: true }),
+      })
+    );
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toContain("occupancy option");
+  });
+});
+
+describe("tenant isolation on pricing writes", () => {
+  it("cannot update another hotel's occupancy option", async () => {
+    state.occupancyTypes = [
+      { id: "occ-b", hotelId: "hotel-b", name: "B secret occupancy", minAdults: 1, maxAdults: 2, maxChildren: 0, sortOrder: 1, isActive: true, createdAt: new Date(), updatedAt: new Date() },
+    ];
+
+    const response = await entityRoute.PATCH(
+      new Request("http://localhost:3000/api/pricing/occupancy-types", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: "occ-b", name: "Hijacked", isActive: false }),
+      }),
+      { params: Promise.resolve({ entity: "occupancy-types" }) }
+    );
+
+    expect(response.status).toBe(404);
+    // Hotel B's row is untouched.
+    expect(state.occupancyTypes[0]).toMatchObject({ hotelId: "hotel-b", name: "B secret occupancy", isActive: true });
+  });
+
+  it("does not let one hotel read another hotel's settings through the API", async () => {
+    state.settings = [
+      { id: "settings-b", hotelId: "hotel-b", pricingModel: "ROOM_TYPE_OCCUPANCY", useOccupancyRates: true, useMealPlans: true, useSeasonalPricing: true, useWeekendPricing: true, useChildPricing: true, useExtraBeds: true, useTaxes: true, pricesIncludeTax: true },
+    ];
+    state.occupancyTypes = [
+      { id: "occ-b", hotelId: "hotel-b", name: "B secret occupancy", minAdults: 1, maxAdults: 2, maxChildren: 0, sortOrder: 1, isActive: true, createdAt: new Date(), updatedAt: new Date() },
+    ];
+
+    const response = await pricingRoute.GET();
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.settings.pricingModel).toBe("LEGACY_BASE_RATE");
+    expect(body.settings.useTaxes).toBe(false);
+    expect(body.occupancies).toEqual([]);
+    expect(JSON.stringify(body)).not.toContain("B secret occupancy");
   });
 });

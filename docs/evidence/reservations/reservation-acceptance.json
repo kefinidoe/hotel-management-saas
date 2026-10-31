@@ -1,6 +1,6 @@
 {
   "base": "http://127.0.0.1:3000",
-  "generatedAt": "2026-10-30T23:50:32.949Z",
+  "generatedAt": "2026-10-31T16:11:12.837Z",
   "hotel": "Riverside Grand Hotel",
   "currency": "KES",
   "passed": 13,
@@ -18,21 +18,21 @@
       "description": "receptionist creates a reservation on a 'Standard' room type",
       "status": "PASS",
       "ms": 0,
-      "detail": "RES-2026-00010"
+      "detail": "RES-2026-00011"
     },
     {
       "id": "api-rate-persisted",
       "description": "stored nightly rate is the room type's configured rate",
       "status": "PASS",
-      "ms": 15,
-      "detail": "4500.00 in 57190ce0-5c63-465d-9e04-a2b8c89d2267"
+      "ms": 14,
+      "detail": "4500.00 in a6d83259-5db1-4b30-bf82-631b408e0ce1"
     },
     {
       "id": "api-no-double-booking",
       "description": "the same room and dates cannot be sold twice",
       "status": "PASS",
       "ms": 0,
-      "detail": "409 Room is already booked for part of that date range (RES-2026-00010)."
+      "detail": "409 Room is already booked for part of that date range (RES-2026-00011)."
     },
     {
       "id": "api-tenant-isolation",
@@ -53,13 +53,13 @@
       "description": "the new reservation is returned by the list endpoint",
       "status": "PASS",
       "ms": 0,
-      "detail": "RES-2026-00010"
+      "detail": "RES-2026-00011"
     },
     {
       "id": "api-owner-hotel-selected",
       "description": "owner selects the Riverside workspace explicitly",
       "status": "PASS",
-      "ms": 1,
+      "ms": 0,
       "detail": "active hotel set"
     },
     {
@@ -67,7 +67,7 @@
       "description": "the owner can create a reservation too",
       "status": "PASS",
       "ms": 0,
-      "detail": "RES-2026-00011"
+      "detail": "RES-2026-00012"
     },
     {
       "id": "browser-rate-populated",
@@ -95,13 +95,13 @@
       "description": "reservation created from the form",
       "status": "PASS",
       "ms": 10,
-      "detail": "RES-2026-00012 @ 8500.00"
+      "detail": "RES-2026-00013 @ 8500.00"
     },
     {
       "id": "browser-persisted",
       "description": "reservation is still on the calendar after a reload",
       "status": "PASS",
-      "ms": 0,
+      "ms": 1,
       "detail": "visible"
     }
   ]

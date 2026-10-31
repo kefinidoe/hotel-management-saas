@@ -4,6 +4,7 @@ import { getTenantFromRoute, requireModule, requireRole, ROLE_GROUPS } from "@/l
 import { hasRole } from "@/lib/permissions";
 import { loadPricingConfig } from "@/lib/pricing/config";
 import { priceStay } from "@/lib/pricing/engine";
+import { pricingUnavailableResponse } from "@/lib/pricing/http";
 
 /**
  * Live price quote for the reservation form.
@@ -64,7 +65,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Room not found in this hotel." }, { status: 404 });
   }
 
-  const config = await loadPricingConfig(tenant.hotelId, tenant.hotel.currency);
+  // A quote that cannot read the hotel's configuration must not fall back to the
+  // room type's base rate: the receptionist would read out a price that the
+  // engine will refuse (or charge differently) at booking time.
+  let config: Awaited<ReturnType<typeof loadPricingConfig>>;
+  try {
+    config = await loadPricingConfig(tenant.hotelId, tenant.hotel.currency);
+  } catch (error) {
+    const unavailable = pricingUnavailableResponse(error, "POST /api/reservations/quote");
+    if (unavailable) return unavailable;
+    throw error;
+  }
 
   // The options this room is actually sold as, with the hotel's own names.
   const occupancyOptions = config.occupancies

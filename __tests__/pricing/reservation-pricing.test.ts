@@ -218,7 +218,40 @@ function prismaDouble() {
   return client;
 }
 
-vi.doMock("@/lib/prisma", () => ({ prisma: prismaDouble() }));
+/**
+ * Failure injection for the pricing reads.
+ *
+ * `fail("taxRule", error)` makes that delegate's reads throw; `hide("taxRule")`
+ * removes it entirely, which is what a Prisma Client generated from an older
+ * schema looks like. Both are failure modes that used to be swallowed by
+ * `safeFindMany` and turned into a base-rate price.
+ */
+const pricingFailure = new Map<string, Error>();
+const hiddenModels = new Set<string>();
+
+vi.doMock("@/lib/prisma", () => {
+  const base = prismaDouble() as Record<string, any>;
+  const wrapped = new Proxy(base, {
+    get(target, property, receiver) {
+      if (typeof property !== "string") return Reflect.get(target, property, receiver);
+      if (hiddenModels.has(property)) return undefined;
+      const model = Reflect.get(target, property, receiver);
+      const failure = pricingFailure.get(property);
+      if (failure && model && typeof model === "object") {
+        return new Proxy(model, {
+          get(modelTarget, method) {
+            const original = Reflect.get(modelTarget, method);
+            if (typeof original !== "function") return original;
+            if (method === "findMany") return async () => { throw failure; };
+            return original.bind(modelTarget);
+          },
+        });
+      }
+      return model;
+    },
+  });
+  return { prisma: wrapped };
+});
 
 let createReservation: (req: Request) => Promise<Response>;
 
@@ -292,6 +325,8 @@ function seed() {
 
 beforeEach(() => {
   seed();
+  pricingFailure.clear();
+  hiddenModels.clear();
   state.tenant = {
     userId: "user-reception-a",
     hotelId: "hotel-a",
@@ -450,5 +485,41 @@ describe("configuration changes do not rewrite existing reservations", () => {
       checkOutDate: "2026-12-12T00:00:00.000Z",
     });
     expect(await second.json()).toMatchObject({ total: 34000 });
+  });
+});
+
+describe("a pricing configuration that cannot be read never becomes a base-rate charge", () => {
+  it("stops the reservation with 503 PRICING_CONFIG_UNREADABLE and writes nothing", async () => {
+    pricingFailure.set("taxRule", Object.assign(new Error("connection terminated unexpectedly"), { code: "P1001" }));
+
+    const response = await post({ occupancyTypeId: "occ-double", adults: 2 });
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.code).toBe("PRICING_CONFIG_UNREADABLE");
+
+    // Nothing was created: no reservation, no room assignment, no frozen snapshot.
+    expect(db.reservations).toHaveLength(0);
+    expect(db.reservationRooms).toHaveLength(0);
+    expect(db.snapshots).toHaveLength(0);
+  });
+
+  it("stops the reservation with 503 PRISMA_CLIENT_STALE when a pricing delegate is missing", async () => {
+    // Exactly the original crash: a client generated before the pricing models.
+    hiddenModels.add("hotelPricingSettings");
+
+    const response = await post({ occupancyTypeId: "occ-double", adults: 2 });
+    expect(response.status).toBe(503);
+    expect((await response.json()).code).toBe("PRISMA_CLIENT_STALE");
+    expect(db.reservations).toHaveLength(0);
+    expect(db.snapshots).toHaveLength(0);
+  });
+
+  it("does not price from base rates when the occupancy rates cannot be read", async () => {
+    hiddenModels.add("roomTypeOccupancy");
+
+    const response = await post({ occupancyTypeId: "occ-double", adults: 2 });
+    expect(response.status).toBe(503);
+    // The legacy 6,000 base rate never appears in a charge.
+    expect(db.reservations).toHaveLength(0);
   });
 });

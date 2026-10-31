@@ -441,6 +441,91 @@ Screenshots: `docs/evidence/pricing/` (see §12).
 
 ---
 
+## 9a. Failing closed: configuration reads and generated-client drift
+
+Two defects found after the engine shipped, and what now prevents them.
+
+### 9a.1 The crash: a generated client older than the schema
+
+`prisma.hotelPricingSettings` was `undefined` on the Pricing & Rates page
+(`lib/pricing/admin.ts:129`), while `prisma.hotel` worked — the signature of a Prisma Client
+generated *before* the pricing models existed. `@prisma/client` is only a wrapper around whatever
+`prisma generate` last wrote to `node_modules/.prisma/client`, so `npm ci --ignore-scripts`, a Docker
+build without `postinstall`, a checkout whose dependencies predate a migration, or a long-running dev
+server holding the previous client all reproduce it — and every *old* query keeps working, so nothing
+complains until a new model is touched.
+
+Three layers now make that state impossible to reach silently:
+
+| Layer | Where | Behaviour |
+| --- | --- | --- |
+| Start-up guard | `lib/prisma.ts` → `assertPricingDelegates(prisma, "application start-up")` | A missing pricing delegate throws `PricingUnavailableError("PRISMA_CLIENT_STALE")` when the module loads, with the fix in the server log, instead of a `TypeError` inside a page. |
+| Build/CI check | `scripts/check-prisma-client.mjs` (wired into `build`, `predev`, `prestart`, exposed as `npm run check:prisma-client`) | Fails the build when the embedded schema copy differs from `prisma/schema.prisma`, when a model has no delegate, or when `prisma` and `@prisma/client` versions differ. |
+| Read guard | `lib/pricing/config.ts`, `lib/pricing/admin.ts` → `requirePricingDelegate` | Every pricing read re-checks the delegate it is about to use, so a client swapped underneath a running process still cannot price. |
+
+`prestart` passes `--allow-missing-schema` because standalone images may ship the generated client
+without the schema source; the delegate check still runs there. The comparison ignores formatting and
+the generator block (`prisma format` reorders field attributes; verification harnesses regenerate with
+extra preview features), and compares the model/field lines as a multiset — a client built before a
+model or field existed still differs.
+
+### 9a.2 The silent fallback: empty configuration instead of an error
+
+`lib/pricing/config.ts` used to answer `[]` when a delegate was missing and *also* when a query threw:
+
+```ts
+if (!model?.findMany) return [];
+```
+
+Reservation creation, quotes and repricing therefore kept working on `RoomType.baseRate` while
+ignoring occupancy rates, meal plans, seasonal/weekend adjustments, extra beds, child bands and taxes —
+an under-charge nobody would notice. That branch is gone. `loadPricingConfig` now either returns a
+complete configuration or throws a typed error:
+
+| Code | Meaning | HTTP |
+| --- | --- | --- |
+| `PRISMA_CLIENT_STALE` | generated client lacks a pricing model | 503 |
+| `PRICING_TABLES_MISSING` | the pricing tables were never created (`P2021`/`P2022`) | 503 |
+| `PRICING_CONFIG_UNREADABLE` | the read failed (connection, permissions, driver) | 503 |
+| `PRICING_CONFIG_INVALID` | the hotel switched a rule on with nothing to apply | 503 |
+
+`PricingUnavailableError` carries a safe `message` for the caller and a server-only `detail`; the
+routes log the detail and return the message with the code, and the Pricing & Rates page renders a
+plain "Pricing & Rates is unavailable" panel with the code instead of crashing. Affected paths:
+`GET/PATCH /api/pricing`, `/api/pricing/[entity]`, `/api/pricing/room-rates`,
+`POST /api/reservations`, `/api/reservations/quote` and `/api/reservations/[id]/reprice` (the last
+three re-read the configuration, so a failure there now means *nothing was written*).
+
+**The one intended fallback is unchanged and tested:** a hotel with no `HotelPricingSettings` row has
+never opened the Pricing page and is sold at its room type base rate (`LEGACY_BASE_RATE`). Optional
+rule lists stay legitimately empty when their switch is off. What changed is that "I could not read
+the configuration" can no longer masquerade as "this hotel has no rules".
+
+### 9a.3 A switched-on rule is never skipped
+
+- `assertPricingConfigUsable` refuses to price when occupancy pricing is on with no active occupancy
+  option or no active occupancy rate, and when taxes are on with no active tax rule.
+- The engine refuses (`INVALID_CONFIG`) when child pricing is on and there is no age band, or when a
+  child's age falls outside every band — previously such a child was free.
+- `PATCH /api/pricing` refuses to switch a feature on with nothing to apply (occupancy pricing,
+  taxes, child pricing, meal plans, extra beds), checking the *effective* state after the request.
+- Children whose ages are not supplied are still priced with the youngest band's minimum age (the
+  booking form does not collect ages). That default is documented here and covered by
+  `__tests__/pricing/engine-fail-closed.test.ts`.
+
+### 9a.4 Tests added
+
+| File | Cases |
+| --- | --- |
+| `__tests__/pricing/config-failures.test.ts` | 14 — missing delegate, missing client, failed read, missing table, tenant-scoped reads, the documented no-settings fallback, invalid configurations, delegate guard |
+| `__tests__/pricing/engine-fail-closed.test.ts` | 6 — no age band, all bands inactive, age outside bands, matching bands, unnamed children, child pricing off |
+| `__tests__/schema/generated-client.test.ts` | 6 — every schema model has a delegate in the installed client, pricing delegates present, `lib/prisma.ts` imports and guards the client, exactly one `PrismaClient` outside the CLI scripts |
+| `__tests__/scripts/prisma-client-check.test.ts` | 5 — check passes, fails on a stale client, fails on a missing/hollow client, tolerates a deployment without the schema |
+| `__tests__/pricing/pricing-api.test.ts` | +10 — 503 codes for every failure mode, refuses to switch rules on with nothing configured, tenant isolation on pricing writes |
+| `__tests__/pricing/reservation-pricing.test.ts` | +3 — a failed or stale pricing read stops the reservation and writes no reservation, room, snapshot |
+
+---
+
 ## 10. Verification actually executed
 
 Environment: disposable local PostgreSQL 17 (`127.0.0.1:55433`, database
@@ -453,7 +538,7 @@ Environment: disposable local PostgreSQL 17 (`127.0.0.1:55433`, database
 | `DATABASE_URL=… DIRECT_URL=… npx prisma validate` | `The schema at prisma/schema.prisma is valid 🚀` |
 | `npx tsc --noEmit` | no output (clean) |
 | `next lint` | `✔ No ESLint warnings or errors` |
-| `vitest run` | **64 files, 977 passed, 6 skipped** |
+| `vitest run` | **68 files, 1021 passed, 6 skipped** |
 | `node scripts/verify-pricing-acceptance.mjs --base http://127.0.0.1:3000 --json docs/evidence/pricing/pricing-acceptance.json` | **PASS — 35 passed, 0 failed** |
 | `node scripts/verify-repricing-concurrency.mjs --base http://127.0.0.1:3000 --json docs/evidence/pricing/repricing-concurrency.json` | **PASS — 8 passed, 0 failed** (real PostgreSQL, real HTTP) |
 | `node scripts/verify-reservation-integrity.mjs --base http://127.0.0.1:3000 --json docs/evidence/reservations/deletion-extension-integrity.json` | **PASS — 19 passed, 0 failed** (real PostgreSQL, real HTTP) |
@@ -464,7 +549,9 @@ Environment: disposable local PostgreSQL 17 (`127.0.0.1:55433`, database
 | `node scripts/db-integrity.mjs` | **PASS — 49 checks, no integrity violations** |
 | `node scripts/migration-ledger.mjs manifest --check` | `Release manifest matches 22 migration files.` |
 | ledger feature probe against the demo DB | `checkpoints matching: saas_current` |
-| `next build` | `✓ Compiled successfully` |
+| `npm run build` (generate → client check → build) | `✓ Compiled successfully` |
+| `node scripts/check-prisma-client.mjs` | `✔ Prisma Client matches prisma/schema.prisma` (40 models) |
+| stale-client start-up proof (`tsx`, stubbed `@prisma/client`) | refused at import: `PRISMA_CLIENT_STALE`, detail names `npx prisma generate` |
 
 Unit tests (`__tests__/pricing/engine.test.ts`, 41 cases) cover each occupancy shape, per-person and
 per-room bases, per-stay charges, currencies, seasonal and weekend adjustments, priority resolution,

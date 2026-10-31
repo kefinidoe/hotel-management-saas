@@ -5,6 +5,7 @@ import { getTenantFromRoute, requireModule, requireRole, ROLE_GROUPS } from "@/l
 import { AuditPersistenceError, recordAudit } from "@/lib/audit";
 import { roundMoney } from "@/lib/billing";
 import { loadPricingConfig } from "@/lib/pricing/config";
+import { pricingUnavailableResponse } from "@/lib/pricing/http";
 import { priceStay } from "@/lib/pricing/engine";
 import { currentPriceVersion, nextPriceVersion } from "@/lib/pricing/versions";
 
@@ -353,6 +354,11 @@ export async function POST(
       breakdown: result.priced,
     });
   } catch (error) {
+    // Repricing re-reads the configuration inside the locked transaction. If that
+    // read fails, nothing was written and the caller gets a 503 rather than a
+    // price computed from incomplete rules.
+    const unavailable = pricingUnavailableResponse(error, "POST /api/reservations/[id]/reprice");
+    if (unavailable) return unavailable;
     if (error instanceof RepriceError) {
       return NextResponse.json(
         { error: error.message, ...(error.code ? { code: error.code } : {}) },

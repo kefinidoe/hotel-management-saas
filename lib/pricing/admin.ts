@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { parseMoney } from "@/lib/billing";
+import { assertPricingDelegates } from "./delegates";
 
 /**
  * Pricing configuration: reading, validating and writing one hotel's settings.
@@ -7,7 +8,18 @@ import { parseMoney } from "@/lib/billing";
  * Every write is scoped by `hotelId` and every cross-reference (room type,
  * occupancy option) is re-checked against that hotel before it is stored, so a
  * crafted request cannot attach another hotel's record to this one.
+ *
+ * Each entry point first proves the Prisma Client can serve the pricing models
+ * (`assertPricingDelegates`). Without that check a client generated from an older
+ * schema fails here with `TypeError: Cannot read properties of undefined`, which
+ * is the crash this module used to produce on the Pricing & Rates page. With it,
+ * the caller gets `PricingUnavailableError("PRISMA_CLIENT_STALE")` and a 503 that
+ * names the fix.
  */
+
+function assertPricingClient(context: string): void {
+  assertPricingDelegates(prisma as unknown, context);
+}
 
 export class PricingConfigError extends Error {
   constructor(message: string, readonly status = 400) {
@@ -112,6 +124,8 @@ async function assertOccupancy(hotelId: string, occupancyTypeId: string): Promis
 // read
 // ---------------------------------------------------------------------------
 export async function listPricingBundle(hotelId: string) {
+  assertPricingClient("pricing configuration read");
+
   const [
     hotel,
     settings,
@@ -225,6 +239,8 @@ export async function listPricingBundle(hotelId: string) {
 // settings
 // ---------------------------------------------------------------------------
 export async function updatePricingSettings(hotelId: string, body: Record<string, unknown>) {
+  assertPricingClient("pricing settings update");
+
   const data: Record<string, unknown> = {};
   if (body.pricingModel !== undefined) {
     data.pricingModel = enumValue(body.pricingModel, PRICING_MODELS, "Pricing model");
@@ -242,13 +258,81 @@ export async function updatePricingSettings(hotelId: string, body: Record<string
     if (body[flag] !== undefined) data[flag] = Boolean(body[flag]);
   }
 
-  // Turning occupancy rates on without a single configured rate would leave the
-  // hotel unable to sell a room, so refuse the switch and say what is missing.
-  if (data.useOccupancyRates === true) {
+  // A switch that is on with nothing for the engine to apply cannot be sold
+  // safely: the booking either stops with an error the receptionist cannot fix,
+  // or the rule is skipped and the guest is under-charged. Refuse the save here,
+  // where a manager sees the message, instead of at the front desk.
+  //
+  // The check is on the *effective* state after this request, so a hotel that is
+  // already inconsistent has to be repaired before any other change is saved.
+  const existing = await prisma.hotelPricingSettings.findUnique({ where: { hotelId } });
+  const effective = {
+    pricingModel: (data.pricingModel as string | undefined) ?? existing?.pricingModel ?? "LEGACY_BASE_RATE",
+    useOccupancyRates: data.useOccupancyRates !== undefined ? Boolean(data.useOccupancyRates) : Boolean(existing?.useOccupancyRates),
+    useMealPlans: data.useMealPlans !== undefined ? Boolean(data.useMealPlans) : Boolean(existing?.useMealPlans),
+    useChildPricing: data.useChildPricing !== undefined ? Boolean(data.useChildPricing) : Boolean(existing?.useChildPricing),
+    useExtraBeds: data.useExtraBeds !== undefined ? Boolean(data.useExtraBeds) : Boolean(existing?.useExtraBeds),
+    useTaxes: data.useTaxes !== undefined ? Boolean(data.useTaxes) : Boolean(existing?.useTaxes),
+  };
+
+  if (effective.pricingModel === "ROOM_TYPE_OCCUPANCY" && effective.useOccupancyRates) {
+    const occupancies = await prisma.occupancyType.count({ where: { hotelId, isActive: true } });
     const rates = await prisma.roomTypeOccupancy.count({ where: { hotelId, isActive: true } });
+    if (occupancies === 0 && rates === 0) {
+      throw new PricingConfigError(
+        "Add at least one occupancy option and an occupancy rate before switching occupancy pricing on.",
+        400
+      );
+    }
+    if (occupancies === 0) {
+      throw new PricingConfigError(
+        "Add at least one occupancy option before switching occupancy pricing on.",
+        400
+      );
+    }
     if (rates === 0) {
       throw new PricingConfigError(
         "Add at least one occupancy rate before switching occupancy pricing on.",
+        400
+      );
+    }
+  }
+
+  if (effective.useTaxes) {
+    const taxes = await prisma.taxRule.count({ where: { hotelId, isActive: true } });
+    if (taxes === 0) {
+      throw new PricingConfigError(
+        "Add at least one tax rule before switching taxes on — otherwise a booking cannot be priced.",
+        400
+      );
+    }
+  }
+
+  if (effective.useChildPricing) {
+    const rules = await prisma.childPricingRule.count({ where: { hotelId, isActive: true } });
+    if (rules === 0) {
+      throw new PricingConfigError(
+        "Add at least one child age band before switching child pricing on.",
+        400
+      );
+    }
+  }
+
+  if (effective.useMealPlans) {
+    const plans = await prisma.mealPlanConfig.count({ where: { hotelId, isActive: true } });
+    if (plans === 0) {
+      throw new PricingConfigError(
+        "Add at least one meal plan before switching meal-plan pricing on.",
+        400
+      );
+    }
+  }
+
+  if (effective.useExtraBeds) {
+    const rules = await prisma.extraBedRule.count({ where: { hotelId, isActive: true } });
+    if (rules === 0) {
+      throw new PricingConfigError(
+        "Add at least one extra-bed rule before switching extra beds on.",
         400
       );
     }
@@ -269,6 +353,8 @@ export async function setRoomTypeRates(
   hotelId: string,
   body: Record<string, unknown>
 ) {
+  assertPricingClient("room rate update");
+
   const roomTypeId = await assertRoomType(hotelId, String(body.roomTypeId ?? ""));
   if (!roomTypeId) throw new PricingConfigError("Choose a room type to set rates for.");
 
@@ -325,6 +411,8 @@ export async function createEntity(
   hotelId: string,
   body: Record<string, unknown>
 ) {
+  assertPricingClient(`pricing ${entity} create`);
+
   switch (entity) {
     case "occupancy-types":
       return prisma.occupancyType.create({
@@ -434,6 +522,8 @@ export async function updateEntity(
   id: string,
   body: Record<string, unknown>
 ) {
+  assertPricingClient(`pricing ${entity} update`);
+
   switch (entity) {
     case "occupancy-types": {
       const existing = await prisma.occupancyType.findUnique({
@@ -623,6 +713,8 @@ export async function updateEntity(
 }
 
 export async function deleteEntity(entity: PricingEntity, hotelId: string, id: string) {
+  assertPricingClient(`pricing ${entity} delete`);
+
   switch (entity) {
     case "occupancy-types": {
       const used = await prisma.roomTypeOccupancy.count({ where: { hotelId, occupancyTypeId: id } });

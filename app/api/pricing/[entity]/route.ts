@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getTenantFromRoute, requireModule, requireRole, ROLE_GROUPS } from "@/lib/authz";
 import { recordAudit } from "@/lib/audit";
+import { pricingUnavailableResponse } from "@/lib/pricing/http";
 import {
   PricingConfigError,
   createEntity,
@@ -29,6 +30,11 @@ function errorResponse(error: unknown, fallback: string) {
   if (error instanceof PricingConfigError) {
     return NextResponse.json({ error: error.message }, { status: error.status });
   }
+  // A stale generated client or unreadable pricing configuration is an
+  // infrastructure failure: 503 tells the UI nothing was saved, and the code
+  // tells an operator what to fix.
+  const unavailable = pricingUnavailableResponse(error, fallback);
+  if (unavailable) return unavailable;
   console.error(fallback, error);
   return NextResponse.json({ error: fallback }, { status: 500 });
 }

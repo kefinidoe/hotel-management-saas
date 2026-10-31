@@ -10,6 +10,7 @@ import { isMealPlan, isOccupancy, tariffPricesStay } from "@/lib/tariffs";
 import { blocksGuestPlacement, ROOM_STATUS_LABELS } from "@/lib/room-status";
 import { loadPricingConfig } from "@/lib/pricing/config";
 import { priceStay } from "@/lib/pricing/engine";
+import { pricingUnavailableResponse } from "@/lib/pricing/http";
 import type { PriceBreakdown } from "@/lib/pricing/types";
 
 const BOOKING_SOURCES = ["WALK_IN", "PHONE", "WEBSITE", "OTA", "CORPORATE", "OTHER"] as const;
@@ -109,7 +110,18 @@ export async function POST(req: Request) {
   // Which pricing model this hotel uses decides which fields are required. A
   // hotel that has configured occupancy rates sends occupancyTypeId; a hotel that
   // still sells at its room type's rate sends the legacy tariff fields.
-  const pricingConfig = await loadPricingConfig(hotelId, tenant.hotel.currency);
+  // Pricing configuration is loaded before anything is written. If it cannot be
+  // read the request stops here with a 503: creating the reservation without it
+  // would price the stay from room type base rates and ignore every configured
+  // rule, i.e. store a charge nobody agreed to.
+  let pricingConfig: Awaited<ReturnType<typeof loadPricingConfig>>;
+  try {
+    pricingConfig = await loadPricingConfig(hotelId, tenant.hotel.currency);
+  } catch (error) {
+    const unavailable = pricingUnavailableResponse(error, "POST /api/reservations (pricing configuration)");
+    if (unavailable) return unavailable;
+    throw error;
+  }
   const usesConfiguredPricing =
     pricingConfig.settings.pricingModel === "ROOM_TYPE_OCCUPANCY" &&
     pricingConfig.settings.useOccupancyRates;

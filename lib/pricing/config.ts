@@ -4,6 +4,17 @@ import {
   type HotelPricingConfig,
   type PricingSettings,
 } from "./types";
+import {
+  PricingUnavailableError,
+  describeError,
+  invalidPricingConfig,
+  isMissingTableError,
+} from "./errors";
+import {
+  assertPricingDelegates,
+  requirePricingDelegate,
+  type PricingModelName,
+} from "./delegates";
 
 /**
  * Load one hotel's pricing configuration for the engine.
@@ -11,79 +22,131 @@ import {
  * Two properties matter here:
  *   1. every query is filtered by `hotelId`, so the config object can only ever
  *      describe the caller's hotel;
- *   2. if the pricing tables are not present yet (an installation that has not
- *      run the migration, or a test double without those delegates) the hotel
- *      falls back to its existing `RoomType.baseRate` behaviour instead of
- *      failing. A hotel that has never opened the pricing page keeps selling
- *      rooms exactly as it did before this feature existed.
+ *   2. the read either returns a *complete* configuration or throws
+ *      `PricingUnavailableError`. It never degrades to an empty configuration,
+ *      because an empty configuration would price rooms from `RoomType.baseRate`
+ *      while silently ignoring occupancy rates, meal plans, adjustments, extra
+ *      beds, child bands and taxes — i.e. it would charge the guest the wrong
+ *      amount without anyone noticing.
+ *
+ * The one intended fallback is explicit and narrow: a hotel that has never
+ * opened the Pricing page has no `HotelPricingSettings` row, and is priced by
+ * its room type base rate (`LEGACY_BASE_RATE`). That is a product decision, it
+ * is seeded that way, and it is covered by tests. It is different from "the
+ * pricing tables could not be read", which is a failure and throws.
  */
 
-type AnyDelegate = { findMany?: (args: unknown) => Promise<unknown[]> } | undefined;
+type Reader = Record<string, unknown>;
 
-let warnedAboutMissingTables = false;
-
-/**
- * Where the pricing tables are read from. Repricing loads the config *inside*
- * the transaction that holds the reservation lock, so the rates it prices with
- * are the ones committed at that moment rather than whatever was readable a
- * few statements earlier. Everything else keeps using the shared client.
- */
-type ConfigClient = Record<string, AnyDelegate> | undefined;
-
-function delegate(client: ConfigClient, name: string): AnyDelegate {
-  const source = (client ?? (prisma as unknown as Record<string, AnyDelegate>)) as Record<string, AnyDelegate>;
-  return source[name];
+function clientFor(client: unknown): Reader {
+  return (client ?? (prisma as unknown as Reader)) as Reader;
 }
 
-async function safeFindMany<T>(client: ConfigClient, name: string, args: unknown): Promise<T[]> {
-  const model = delegate(client, name);
-  if (!model?.findMany) return [];
+/**
+ * Read one model for this hotel.
+ *
+ * Missing delegate  → `PRISMA_CLIENT_STALE`  (generated client is out of date)
+ * Missing table     → `PRICING_TABLES_MISSING` (migrations not applied)
+ * Any other failure → `PRICING_CONFIG_UNREADABLE`
+ *
+ * In none of those cases is an empty list returned.
+ */
+async function readMany<T>(source: Reader, delegate: PricingModelName, args: unknown): Promise<T[]> {
+  const model = requirePricingDelegate(source, delegate, "pricing configuration read");
   try {
     return (await model.findMany(args)) as T[];
   } catch (error) {
-    if (!warnedAboutMissingTables) {
-      warnedAboutMissingTables = true;
-      console.warn(
-        `[pricing] pricing tables unavailable (${error instanceof Error ? error.message : error}); using room type base rates.`
+    if (isMissingTableError(error)) {
+      throw new PricingUnavailableError(
+        "PRICING_TABLES_MISSING",
+        `Reading ${delegate} failed because the table is missing: ${describeError(error)}`,
+        undefined,
+        { cause: error }
       );
     }
-    return [];
+    throw new PricingUnavailableError(
+      "PRICING_CONFIG_UNREADABLE",
+      `Reading ${delegate} failed: ${describeError(error)}`,
+      undefined,
+      { cause: error }
+    );
   }
 }
 
 const num = (value: unknown): number => (value === null || value === undefined ? 0 : Number(value));
 const day = (value: unknown): Date | null => (value instanceof Date ? value : null);
 
+/**
+ * Refuse a configuration that cannot produce a correct price.
+ *
+ * These are states in which the hotel has switched a pricing rule on but has
+ * nothing for the engine to apply. Charging without the rule would under-bill the
+ * guest (or the hotel), so the booking is stopped with an explanation instead.
+ * A hotel that has switched the rule *off* is unaffected: that is a deliberate
+ * product choice, not an error.
+ */
+export function assertPricingConfigUsable(config: HotelPricingConfig): void {
+  const { settings } = config;
+
+  if (settings.pricingModel === "ROOM_TYPE_OCCUPANCY" && settings.useOccupancyRates) {
+    const activeOccupancies = config.occupancies.filter((option) => option.isActive);
+    if (activeOccupancies.length === 0) {
+      throw invalidPricingConfig(
+        `hotel ${config.hotelId}: pricingModel=ROOM_TYPE_OCCUPANCY, useOccupancyRates=true, but no active OccupancyType row`,
+        "Occupancy pricing is switched on for this hotel, but no occupancy option is configured. Add one on the Pricing page before selling rooms."
+      );
+    }
+    const activeRates = config.roomTypeOccupancies.filter((row) => row.isActive);
+    if (activeRates.length === 0) {
+      throw invalidPricingConfig(
+        `hotel ${config.hotelId}: pricingModel=ROOM_TYPE_OCCUPANCY, useOccupancyRates=true, but no active RoomTypeOccupancy row`,
+        "Occupancy pricing is switched on for this hotel, but no occupancy rate is configured. Set the room rates on the Pricing page before selling rooms."
+      );
+    }
+  }
+
+  if (settings.useTaxes && config.taxes.filter((rule) => rule.isActive).length === 0) {
+    throw invalidPricingConfig(
+      `hotel ${config.hotelId}: useTaxes=true but no active TaxRule row`,
+      "Taxes are switched on for this hotel, but no tax rule is configured. Add a tax rule or switch taxes off on the Pricing page — a booking cannot be priced without it."
+    );
+  }
+}
+
 export async function loadPricingConfig(
   hotelId: string,
   currency: string,
   client?: unknown
 ): Promise<HotelPricingConfig> {
-  const source = client as ConfigClient;
+  const source = clientFor(client);
+  // Check the shape once, with a message that names the whole contract, before
+  // any individual read can fail with a bare TypeError.
+  assertPricingDelegates(source, "pricing configuration read");
+
   const [settingsRow, roomTypes, occupancies, roomTypeOccupancies, mealPlans, mealPlanRoomTypes, adjustments, extraBeds, childRules, taxes, hotels] =
     await Promise.all([
-      safeFindMany<Record<string, unknown>>(source, "hotelPricingSettings", { where: { hotelId }, take: 1 }),
-      safeFindMany<Record<string, unknown>>(source, "roomType", {
+      readMany<Record<string, unknown>>(source, "hotelPricingSettings", { where: { hotelId }, take: 1 }),
+      readMany<Record<string, unknown>>(source, "roomType", {
         where: { hotelId },
         select: { id: true, name: true, baseRate: true, capacity: true },
       }),
-      safeFindMany<Record<string, unknown>>(source, "occupancyType", {
+      readMany<Record<string, unknown>>(source, "occupancyType", {
         where: { hotelId },
         orderBy: { sortOrder: "asc" },
       }),
-      safeFindMany<Record<string, unknown>>(source, "roomTypeOccupancy", { where: { hotelId } }),
-      safeFindMany<Record<string, unknown>>(source, "mealPlanConfig", {
+      readMany<Record<string, unknown>>(source, "roomTypeOccupancy", { where: { hotelId } }),
+      readMany<Record<string, unknown>>(source, "mealPlanConfig", {
         where: { hotelId },
         orderBy: { sortOrder: "asc" },
       }),
-      safeFindMany<Record<string, unknown>>(source, "mealPlanRoomType", { where: { hotelId } }),
-      safeFindMany<Record<string, unknown>>(source, "rateAdjustment", { where: { hotelId } }),
-      safeFindMany<Record<string, unknown>>(source, "extraBedRule", { where: { hotelId } }),
-      safeFindMany<Record<string, unknown>>(source, "childPricingRule", { where: { hotelId } }),
-      safeFindMany<Record<string, unknown>>(source, "taxRule", { where: { hotelId }, orderBy: { sortOrder: "asc" } }),
+      readMany<Record<string, unknown>>(source, "mealPlanRoomType", { where: { hotelId } }),
+      readMany<Record<string, unknown>>(source, "rateAdjustment", { where: { hotelId } }),
+      readMany<Record<string, unknown>>(source, "extraBedRule", { where: { hotelId } }),
+      readMany<Record<string, unknown>>(source, "childPricingRule", { where: { hotelId } }),
+      readMany<Record<string, unknown>>(source, "taxRule", { where: { hotelId }, orderBy: { sortOrder: "asc" } }),
       // Currency is authoritative on the Hotel row; the caller may pass a cached
       // value but we only trust this read when it is available.
-      safeFindMany<Record<string, unknown>>(source, "hotel", {
+      readMany<Record<string, unknown>>(source, "hotel", {
         where: { id: hotelId },
         select: { currency: true },
         take: 1,
@@ -103,9 +166,11 @@ export async function loadPricingConfig(
         useTaxes: Boolean(settingsRowValue.useTaxes),
         pricesIncludeTax: Boolean(settingsRowValue.pricesIncludeTax),
       }
-    : { ...DEFAULT_PRICING_SETTINGS };
+    : // No settings row: the hotel has never opened the Pricing page and is
+      // sold at its room type base rate. Documented default, not a failure.
+      { ...DEFAULT_PRICING_SETTINGS };
 
-  return {
+  const config: HotelPricingConfig = {
     hotelId,
     currency: (hotels[0]?.currency as string | undefined) ?? currency,
     settings,
@@ -185,4 +250,7 @@ export async function loadPricingConfig(
       isActive: Boolean(row.isActive),
     })),
   };
+
+  assertPricingConfigUsable(config);
+  return config;
 }
