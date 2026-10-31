@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { recordAudit } from "@/lib/audit";
 import { rangesOverlap } from "@/lib/dates";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { stayNights } from "@/lib/billing";
@@ -215,15 +216,52 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
             );
           }
 
+          const datesChanged =
+            checkIn.getTime() !== reservation.checkInDate.getTime() ||
+            checkOut.getTime() !== reservation.checkOutDate.getTime();
+          const roomChanged = roomId !== reservation.rooms[0].roomId;
+
           await tx.reservation.update({
             where: { id_hotelId: { id: reservation.id, hotelId } },
             data: { checkInDate: checkIn, checkOutDate: checkOut },
           });
-          if (roomId !== reservation.rooms[0].roomId) {
+          if (roomChanged) {
             await tx.reservationRoom.update({
               where: { id: reservation.rooms[0].id },
               data: { roomId },
             });
+          }
+
+          // A frozen price is an agreement about specific nights in a specific
+          // room. Moving the stay does not silently recalculate it (that is what
+          // an explicit, audited repricing is for), but the manager is told the
+          // agreed price no longer describes this booking.
+          const pricingSnapshot = await tx.reservationPriceSnapshot.findFirst({
+            where: { reservationId: reservation.id, hotelId },
+            orderBy: { version: "desc" },
+            select: { version: true },
+          });
+          const pricingNeedsReview = Boolean(pricingSnapshot) && (datesChanged || roomChanged);
+          if (pricingNeedsReview) {
+            await recordAudit(
+              {
+                hotelId,
+                userId: tenant.userId,
+                action: "RESERVATION_RATE_REVIEW_REQUIRED",
+                entity: "Reservation",
+                entityId: reservation.id,
+                metadata: {
+                  priceVersion: pricingSnapshot?.version ?? null,
+                  previousCheckInDate: reservation.checkInDate.toISOString(),
+                  previousCheckOutDate: reservation.checkOutDate.toISOString(),
+                  checkInDate: checkIn.toISOString(),
+                  checkOutDate: checkOut.toISOString(),
+                  previousRoomId: reservation.rooms[0].roomId,
+                  roomId,
+                },
+              },
+              tx
+            );
           }
 
           return {
@@ -232,6 +270,7 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
             checkInDate: checkIn.toISOString(),
             checkOutDate: checkOut.toISOString(),
             roomId,
+            pricingNeedsReview,
           };
         },
         {

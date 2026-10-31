@@ -22,12 +22,21 @@ type AnyDelegate = { findMany?: (args: unknown) => Promise<unknown[]> } | undefi
 
 let warnedAboutMissingTables = false;
 
-function delegate(name: string): AnyDelegate {
-  return (prisma as unknown as Record<string, AnyDelegate>)[name];
+/**
+ * Where the pricing tables are read from. Repricing loads the config *inside*
+ * the transaction that holds the reservation lock, so the rates it prices with
+ * are the ones committed at that moment rather than whatever was readable a
+ * few statements earlier. Everything else keeps using the shared client.
+ */
+type ConfigClient = Record<string, AnyDelegate> | undefined;
+
+function delegate(client: ConfigClient, name: string): AnyDelegate {
+  const source = (client ?? (prisma as unknown as Record<string, AnyDelegate>)) as Record<string, AnyDelegate>;
+  return source[name];
 }
 
-async function safeFindMany<T>(name: string, args: unknown): Promise<T[]> {
-  const model = delegate(name);
+async function safeFindMany<T>(client: ConfigClient, name: string, args: unknown): Promise<T[]> {
+  const model = delegate(client, name);
   if (!model?.findMany) return [];
   try {
     return (await model.findMany(args)) as T[];
@@ -47,32 +56,34 @@ const day = (value: unknown): Date | null => (value instanceof Date ? value : nu
 
 export async function loadPricingConfig(
   hotelId: string,
-  currency: string
+  currency: string,
+  client?: unknown
 ): Promise<HotelPricingConfig> {
+  const source = client as ConfigClient;
   const [settingsRow, roomTypes, occupancies, roomTypeOccupancies, mealPlans, mealPlanRoomTypes, adjustments, extraBeds, childRules, taxes, hotels] =
     await Promise.all([
-      safeFindMany<Record<string, unknown>>("hotelPricingSettings", { where: { hotelId }, take: 1 }),
-      safeFindMany<Record<string, unknown>>("roomType", {
+      safeFindMany<Record<string, unknown>>(source, "hotelPricingSettings", { where: { hotelId }, take: 1 }),
+      safeFindMany<Record<string, unknown>>(source, "roomType", {
         where: { hotelId },
         select: { id: true, name: true, baseRate: true, capacity: true },
       }),
-      safeFindMany<Record<string, unknown>>("occupancyType", {
+      safeFindMany<Record<string, unknown>>(source, "occupancyType", {
         where: { hotelId },
         orderBy: { sortOrder: "asc" },
       }),
-      safeFindMany<Record<string, unknown>>("roomTypeOccupancy", { where: { hotelId } }),
-      safeFindMany<Record<string, unknown>>("mealPlanConfig", {
+      safeFindMany<Record<string, unknown>>(source, "roomTypeOccupancy", { where: { hotelId } }),
+      safeFindMany<Record<string, unknown>>(source, "mealPlanConfig", {
         where: { hotelId },
         orderBy: { sortOrder: "asc" },
       }),
-      safeFindMany<Record<string, unknown>>("mealPlanRoomType", { where: { hotelId } }),
-      safeFindMany<Record<string, unknown>>("rateAdjustment", { where: { hotelId } }),
-      safeFindMany<Record<string, unknown>>("extraBedRule", { where: { hotelId } }),
-      safeFindMany<Record<string, unknown>>("childPricingRule", { where: { hotelId } }),
-      safeFindMany<Record<string, unknown>>("taxRule", { where: { hotelId }, orderBy: { sortOrder: "asc" } }),
+      safeFindMany<Record<string, unknown>>(source, "mealPlanRoomType", { where: { hotelId } }),
+      safeFindMany<Record<string, unknown>>(source, "rateAdjustment", { where: { hotelId } }),
+      safeFindMany<Record<string, unknown>>(source, "extraBedRule", { where: { hotelId } }),
+      safeFindMany<Record<string, unknown>>(source, "childPricingRule", { where: { hotelId } }),
+      safeFindMany<Record<string, unknown>>(source, "taxRule", { where: { hotelId }, orderBy: { sortOrder: "asc" } }),
       // Currency is authoritative on the Hotel row; the caller may pass a cached
       // value but we only trust this read when it is available.
-      safeFindMany<Record<string, unknown>>("hotel", {
+      safeFindMany<Record<string, unknown>>(source, "hotel", {
         where: { id: hotelId },
         select: { currency: true },
         take: 1,

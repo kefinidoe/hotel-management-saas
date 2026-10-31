@@ -166,13 +166,20 @@ function shapeReservation(reservation: Row | null, include?: Row) {
       .filter((row) => row.reservationId === reservation.id)
       .map((folio) => ({
         ...folio,
-        payments: db.payments.filter((payment) => payment.folioId === folio.id && payment.status === "COMPLETED"),
+        items: db.folioItems.filter((item) => item.folioId === folio.id),
+        // Every payment counts, whatever its status: a pending deposit is money
+        // in flight and a refunded one is money that already moved.
+        payments: db.payments.filter((payment) => payment.folioId === folio.id),
       }));
   }
   if (include?.priceSnapshots) {
+    // `staleVersionRead` makes the include see the oldest version, which is what
+    // a read that slipped outside the lock would have returned.
     const versions = db.snapshots
       .filter((row) => row.reservationId === reservation.id)
-      .sort((left, right) => right.version - left.version);
+      .sort((left, right) =>
+        faults.staleVersionRead ? left.version - right.version : right.version - left.version
+      );
     copy.priceSnapshots = include.priceSnapshots.take ? versions.slice(0, include.priceSnapshots.take) : versions;
   }
   return copy;
@@ -507,6 +514,117 @@ describe("fail-closed snapshot creation", () => {
     expect(response.status).toBe(201);
     expect(dbHandle.current.reservations).toHaveLength(1);
     expect(dbHandle.current.snapshots).toHaveLength(0);
+  });
+});
+
+describe("repricing eligibility and locked re-read", () => {
+  function addFolio(reservationId: string, options: { charges?: number; payments?: string[] } = {}) {
+    const folio = {
+      id: `folio-${dbHandle.current.folios.length + 1}`,
+      hotelId: "hotel-a",
+      guestId: "guest-1",
+      reservationId,
+      isClosed: false,
+    };
+    dbHandle.current.folios.push(folio);
+    for (let index = 0; index < (options.charges ?? 0); index += 1) {
+      dbHandle.current.folioItems.push({
+        id: `item-${dbHandle.current.folioItems.length + 1}`,
+        folioId: folio.id,
+        type: "ROOM_CHARGE",
+        total: 4000,
+      });
+    }
+    for (const status of options.payments ?? []) {
+      dbHandle.current.payments.push({
+        id: `pay-${dbHandle.current.payments.length + 1}`,
+        folioId: folio.id,
+        hotelId: "hotel-a",
+        amount: 4000,
+        status,
+      });
+    }
+    return folio;
+  }
+
+  it("refuses to reprice once a payment has been recorded", async () => {
+    const { payload } = await createStay();
+    addFolio(payload.id, { charges: 2, payments: ["COMPLETED"] });
+
+    const response = await reprice(repriceRequest(payload.id, { reason: "late discount" }), repriceCtx(payload.id));
+    const body = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(body.code).toBe("RESERVATION_HAS_FINANCIAL_ACTIVITY");
+    expect(body.error).toMatch(/payment/i);
+    // Nothing was appended and the original agreement is untouched.
+    expect(dbHandle.current.snapshots).toHaveLength(1);
+    expect(dbHandle.current.changes).toHaveLength(0);
+    expect(dbHandle.current.audits.filter((row) => row.action === "RESERVATION_REPRICED")).toHaveLength(0);
+  });
+
+  it("refuses to reprice while a deposit is still pending", async () => {
+    const { payload } = await createStay();
+    addFolio(payload.id, { payments: ["PENDING"] });
+
+    const response = await reprice(repriceRequest(payload.id), repriceCtx(payload.id));
+    expect(response.status).toBe(409);
+    expect(dbHandle.current.snapshots).toHaveLength(1);
+  });
+
+  it("refuses to reprice once a folio charge exists, even without a payment", async () => {
+    const { payload } = await createStay();
+    addFolio(payload.id, { charges: 1 });
+
+    const response = await reprice(repriceRequest(payload.id), repriceCtx(payload.id));
+    const body = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(body.code).toBe("RESERVATION_HAS_FINANCIAL_ACTIVITY");
+    expect(body.error).toMatch(/folio charge/i);
+    expect(dbHandle.current.snapshots).toHaveLength(1);
+  });
+
+  it("still reprices an unpaid reservation that has an empty folio", async () => {
+    const { payload } = await createStay();
+    addFolio(payload.id, {});
+
+    const response = await reprice(repriceRequest(payload.id, { reason: "no money yet" }), repriceCtx(payload.id));
+    expect(response.status).toBe(200);
+    expect(dbHandle.current.snapshots).toHaveLength(2);
+  });
+
+  it("re-validates the status under the lock", async () => {
+    const { payload } = await createStay();
+    // A concurrent check-in commits before this request obtains the lock.
+    dbHandle.current.reservations[0].status = "CHECKED_IN";
+
+    const response = await reprice(repriceRequest(payload.id), repriceCtx(payload.id));
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error).toMatch(/pending or confirmed/i);
+    expect(dbHandle.current.snapshots).toHaveLength(1);
+    expect(dbHandle.current.changes).toHaveLength(0);
+  });
+
+  it("prices the reservation as it is at lock time, not as it was when booked", async () => {
+    const { payload } = await createStay();
+    // A reschedule committed before this request: the stay is now four nights.
+    const reservation = dbHandle.current.reservations[0];
+    reservation.checkInDate = new Date("2026-12-01T00:00:00.000Z");
+    reservation.checkOutDate = new Date("2026-12-05T00:00:00.000Z");
+
+    const response = await reprice(repriceRequest(payload.id, { reason: "longer stay" }), repriceCtx(payload.id));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.breakdown.nights).toBe(4);
+    const snapshot = dbHandle.current.snapshots[1];
+    expect(snapshot.nights).toBe(4);
+    expect(totalOf(snapshot)).toBe(body.total);
+    // Four nights, not the two that were agreed when the booking was made.
+    expect(totalOf(snapshot)).toBeGreaterThan(totalOf(dbHandle.current.snapshots[0]));
   });
 });
 

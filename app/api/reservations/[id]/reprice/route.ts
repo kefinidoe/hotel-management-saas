@@ -17,10 +17,71 @@ import { currentPriceVersion, nextPriceVersion } from "@/lib/pricing/versions";
  * together with a `ReservationPriceChange`, the room/discount update on the
  * reservation and the `RESERVATION_REPRICED` audit event.
  *
- * All four writes share one serializable transaction. If any of them fails,
- * including the audit record, nothing is committed: the endpoint never reports a
- * new price that was not fully recorded.
+ * Everything happens inside one serializable transaction that first takes the
+ * hotel's reservation advisory lock and then locks the reservation row. The
+ * request body supplies *intent* (occupancy, meal plan, guests, discount) but
+ * never the pricing inputs: dates, room assignment, guest counts and the
+ * current price are all re-read from the database after the lock is held, and
+ * the price is computed from those values. A schedule change, a room move, a
+ * payment or a check-in either commits before the lock is granted — in which
+ * case this transaction sees it — or waits until this transaction is done.
+ *
+ * Money that has already moved is never silently repriced: a reservation with
+ * any folio charge or any payment (pending, completed or refunded) is refused
+ * with `409 RESERVATION_HAS_FINANCIAL_ACTIVITY`.
+ *
+ * If any write fails, including the strict audit record, nothing is committed:
+ * the endpoint never reports a new price that was not fully recorded.
  */
+
+class RepriceError extends Error {
+  constructor(
+    message: string,
+    readonly status = 400,
+    readonly code?: string
+  ) {
+    super(message);
+    this.name = "RepriceError";
+  }
+}
+
+type LockedReservation = {
+  id: string;
+  status: string;
+  checkInDate: Date;
+  checkOutDate: Date;
+  adults: number;
+  children: number;
+  discount: unknown;
+  rooms: Array<{ id: string; roomId: string; room: { id: string; roomTypeId: string } }>;
+  priceSnapshots: Array<{ version: number; occupancyName: string | null; mealPlanName: string | null; grandTotal: unknown }>;
+  folios: Array<{ id: string; items: unknown[]; payments: Array<{ id: string; status: string }> }>;
+};
+
+/**
+ * PostgreSQL reports a serialization failure between two concurrent transactions
+ * as SQLSTATE 40001/40P01, which Prisma surfaces either as P2034 or as a raw
+ * query error (P2010) carrying the SQLSTATE. Both mean "nothing was committed,
+ * the data changed underneath you": retrying re-reads the locked state.
+ */
+function isSerializationFailure(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  if (error.code === "P2034") return true;
+  if (error.code === "P2010") {
+    const meta = error.meta as { code?: string; message?: string } | undefined;
+    return meta?.code === "40001" || meta?.code === "40P01" || /40001|40P01/.test(meta?.message ?? "");
+  }
+  return false;
+}
+
+/** Charges or money on a folio mean the price is no longer a paper agreement. */
+function financialActivity(reservation: LockedReservation) {
+  const folios = reservation.folios ?? [];
+  const chargeCount = folios.reduce((total, folio) => total + (folio.items?.length ?? 0), 0);
+  const payments = folios.flatMap((folio) => folio.payments ?? []);
+  return { chargeCount, payments, folioCount: folios.length };
+}
+
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -43,89 +104,133 @@ export async function POST(
     body = {};
   }
 
-  // The reservation is resolved through the tenant, so another hotel's id is
-  // indistinguishable from one that does not exist.
-  const reservation = await prisma.reservation.findUnique({
-    where: { id_hotelId: { id, hotelId } },
-    include: {
-      rooms: { include: { room: true } },
-      priceSnapshots: { orderBy: { version: "desc" }, take: 1 },
-    },
-  });
-  if (!reservation) {
-    return NextResponse.json({ error: "Reservation not found." }, { status: 404 });
-  }
-  if (reservation.status !== "PENDING" && reservation.status !== "CONFIRMED") {
-    return NextResponse.json(
-      { error: "Only a pending or confirmed reservation can be repriced." },
-      { status: 400 }
-    );
-  }
-  if (reservation.rooms.length !== 1) {
-    return NextResponse.json(
-      { error: "Repricing is supported for single-room reservations." },
-      { status: 400 }
-    );
-  }
-
-  const room = reservation.rooms[0].room;
-  const current = currentPriceVersion(reservation.priceSnapshots);
-  const config = await loadPricingConfig(hotelId, tenant.hotel.currency);
-
   const text = (value: unknown) => (typeof value === "string" ? value.trim() : "");
-  const occupancyTypeId =
-    text(body.occupancyTypeId) ||
-    config.occupancies.find((option) => option.name === current?.occupancyName)?.id ||
-    null;
-  const mealPlanId =
-    text(body.mealPlanId) ||
-    config.mealPlans.find((plan) => plan.name === current?.mealPlanName)?.id ||
-    null;
-
-  const discount = Number(body.discount ?? reservation.discount ?? 0);
-  const discountPercent =
-    body.discountPercent === undefined || body.discountPercent === null || body.discountPercent === ""
-      ? undefined
-      : Number(body.discountPercent);
-
-  const priced = priceStay(config, {
-    roomTypeId: room.roomTypeId,
-    occupancyTypeId,
-    mealPlanId,
-    checkIn: reservation.checkInDate,
-    checkOut: reservation.checkOutDate,
-    adults: body.adults === undefined ? reservation.adults : Number(body.adults),
-    children: body.children === undefined ? reservation.children : Number(body.children),
-    childAges: Array.isArray(body.childAges)
-      ? (body.childAges as unknown[]).map((age) => Number(age)).filter((age) => Number.isFinite(age))
-      : undefined,
-    extraBeds: Number(body.extraBeds ?? 0),
-    discount: Number.isFinite(discount) && discount > 0 ? discount : undefined,
-    discountPercent,
-  });
-
-  if (!priced.ok) {
-    return NextResponse.json({ error: priced.message, code: priced.code }, { status: 400 });
-  }
-
-  const nightlyRate = roundMoney((priced.totals.room + priced.totals.adjustments) / priced.nights);
+  const requestedOccupancyId = text(body.occupancyTypeId);
+  const requestedMealPlanId = text(body.mealPlanId);
   const reason = typeof body.reason === "string" ? body.reason.trim().slice(0, 200) : null;
 
-  try {
-    const result = await prisma.$transaction(
+  const runRepricing = () =>
+    prisma.$transaction(
       async (tx) => {
-        // Two managers repricing at once must not compute the same version
-        // number: lock the reservation row for the duration of the transaction.
-        await tx.$queryRaw<Array<{ id: string }>>`
-          SELECT id FROM "Reservation" WHERE id = ${id} AND "hotelId" = ${hotelId} FOR UPDATE
+        // Same per-hotel advisory lock that reservation create/update, check-in,
+        // check-out, payments, charge-to-room and rescheduling already take.
+        // Repricing therefore cannot interleave with any operation that can move
+        // the reservation's dates, occupants, room or money.
+        const lockKey = `hotel-${hotelId}-reservation-create`;
+        await tx.$queryRaw<Array<{ locked: string }>>`
+          SELECT pg_advisory_xact_lock(hashtext(${lockKey}))::text AS locked
         `;
 
-        const previous = await tx.reservationPriceSnapshot.findFirst({
-          where: { reservationId: id, hotelId },
-          orderBy: { version: "desc" },
+        // Row lock as well: it keeps a direct write (script, migration, future
+        // endpoint that forgets the advisory lock) from slipping in underneath.
+        const locked = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM "Reservation" WHERE id = ${id} AND "hotelId" = ${hotelId} FOR UPDATE
+        `;
+        if (locked.length === 0) {
+          throw new RepriceError("Reservation not found.", 404, "NOT_FOUND");
+        }
+
+        // Everything the price depends on is read *after* the locks are held.
+        const reservation = (await tx.reservation.findUnique({
+          where: { id_hotelId: { id, hotelId } },
+          include: {
+            rooms: { include: { room: { select: { id: true, roomTypeId: true } } } },
+            priceSnapshots: { orderBy: { version: "desc" }, take: 1 },
+            folios: {
+              where: { hotelId },
+              select: {
+                id: true,
+                items: { select: { id: true } },
+                payments: { select: { id: true, status: true } },
+              },
+            },
+          },
+        })) as LockedReservation | null;
+
+        if (!reservation) {
+          throw new RepriceError("Reservation not found.", 404, "NOT_FOUND");
+        }
+        // Re-validate the status under the lock: a concurrent check-in or
+        // cancellation must not be able to reprice a stay that already started.
+        if (reservation.status !== "PENDING" && reservation.status !== "CONFIRMED") {
+          throw new RepriceError(
+            "Only a pending or confirmed reservation can be repriced.",
+            400,
+            "INVALID_STATUS"
+          );
+        }
+        if (reservation.rooms.length !== 1) {
+          throw new RepriceError(
+            "Repricing is supported for single-room reservations.",
+            400,
+            "MULTI_ROOM"
+          );
+        }
+
+        const money = financialActivity(reservation);
+        if (money.chargeCount > 0 || money.payments.length > 0) {
+          const detail = [
+            money.chargeCount > 0 ? `${money.chargeCount} folio charge${money.chargeCount === 1 ? "" : "s"}` : null,
+            money.payments.length > 0
+              ? `${money.payments.length} payment${money.payments.length === 1 ? "" : "s"}`
+              : null,
+          ]
+            .filter(Boolean)
+            .join(" and ");
+          throw new RepriceError(
+            `This reservation already has ${detail}. A price that money has already been taken against cannot be changed. ` +
+              "Adjust the folio instead, or cancel this reservation and rebook it at the new price.",
+            409,
+            "RESERVATION_HAS_FINANCIAL_ACTIVITY"
+          );
+        }
+
+        const room = reservation.rooms[0].room;
+        const current = currentPriceVersion(reservation.priceSnapshots);
+        const config = await loadPricingConfig(hotelId, tenant.hotel.currency, tx);
+
+        const occupancyTypeId =
+          requestedOccupancyId ||
+          config.occupancies.find((option) => option.name === current?.occupancyName)?.id ||
+          null;
+        const mealPlanId =
+          requestedMealPlanId ||
+          config.mealPlans.find((plan) => plan.name === current?.mealPlanName)?.id ||
+          null;
+
+        const discount = Number(body.discount ?? reservation.discount ?? 0);
+        const discountPercent =
+          body.discountPercent === undefined || body.discountPercent === null || body.discountPercent === ""
+            ? undefined
+            : Number(body.discountPercent);
+
+        const priced = priceStay(config, {
+          roomTypeId: room.roomTypeId,
+          occupancyTypeId,
+          mealPlanId,
+          checkIn: reservation.checkInDate,
+          checkOut: reservation.checkOutDate,
+          adults: body.adults === undefined ? reservation.adults : Number(body.adults),
+          children: body.children === undefined ? reservation.children : Number(body.children),
+          childAges: Array.isArray(body.childAges)
+            ? (body.childAges as unknown[]).map((age) => Number(age)).filter((age) => Number.isFinite(age))
+            : undefined,
+          extraBeds: Number(body.extraBeds ?? 0),
+          discount: Number.isFinite(discount) && discount > 0 ? discount : undefined,
+          discountPercent,
         });
-        const version = nextPriceVersion(previous);
-        const previousTotal = previous ? Number(previous.grandTotal) : null;
+
+        if (!priced.ok) {
+          throw new RepriceError(priced.message, 400, priced.code);
+        }
+
+        const nightlyRate = roundMoney((priced.totals.room + priced.totals.adjustments) / priced.nights);
+
+        // The previous version is the one read under the lock, so two managers
+        // cannot both append version 2 and the unique (reservationId, version)
+        // constraint is a second line of defence for direct writers.
+        const version = nextPriceVersion(current);
+        const previousTotal = current ? Number(current.grandTotal) : null;
 
         await tx.reservationRoom.update({
           where: { id: reservation.rooms[0].id },
@@ -170,7 +275,7 @@ export async function POST(
             reservationId: id,
             previousTotal: previousTotal ?? priced.totals.grandTotal,
             newTotal: priced.totals.grandTotal,
-            previousVersion: previous?.version ?? null,
+            previousVersion: current?.version ?? null,
             newVersion: version,
             reason,
             breakdown: priced as unknown as Prisma.InputJsonValue,
@@ -190,7 +295,7 @@ export async function POST(
             metadata: {
               previousTotal,
               newTotal: priced.totals.grandTotal,
-              previousVersion: previous?.version ?? null,
+              previousVersion: current?.version ?? null,
               newVersion: version,
               reason,
             },
@@ -199,13 +304,44 @@ export async function POST(
           { strict: true }
         );
 
-        return { snapshot, previousTotal, version };
+        return { snapshot, previousTotal, version, priced };
       },
       {
-        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        // READ COMMITTED on purpose. The critical section is already exclusive:
+        // every reservation and financial writer in the hotel takes the same
+        // advisory lock before touching anything, the reservation row is locked
+        // with SELECT ... FOR UPDATE, and (reservationId, version) is unique.
+        // Serializable would take its snapshot at the *first statement* — which
+        // is the advisory lock itself, i.e. before it blocks. A payment or
+        // reschedule that commits while this request waits would then be
+        // invisible to the re-read below, which is exactly the stale-data hole
+        // this endpoint has to close. READ COMMITTED makes every statement after
+        // the lock observe what was actually committed.
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
         timeout: 15_000,
       }
     );
+
+  try {
+    // A concurrent check-in, payment or reschedule can abort this transaction
+    // with a serialization failure. Nothing was committed, so retrying re-reads
+    // the locked state instead of returning a price computed from dead data.
+    let result: Awaited<ReturnType<typeof runRepricing>> | null = null;
+    for (let attempt = 1; attempt <= 3 && result === null; attempt += 1) {
+      try {
+        result = await runRepricing();
+      } catch (error) {
+        if (attempt === 3 || !isSerializationFailure(error)) throw error;
+        await new Promise((resolve) => setTimeout(resolve, attempt * 40));
+      }
+    }
+    if (result === null) {
+      throw new RepriceError(
+        "The reservation changed while it was being repriced. Please try again.",
+        409,
+        "WRITE_CONFLICT"
+      );
+    }
 
     return NextResponse.json({
       ok: true,
@@ -214,9 +350,15 @@ export async function POST(
       total: Number(result.snapshot.grandTotal),
       version: result.version,
       currency: result.snapshot.currency,
-      breakdown: priced,
+      breakdown: result.priced,
     });
   } catch (error) {
+    if (error instanceof RepriceError) {
+      return NextResponse.json(
+        { error: error.message, ...(error.code ? { code: error.code } : {}) },
+        { status: error.status }
+      );
+    }
     if (error instanceof AuditPersistenceError) {
       console.error("Repricing rolled back: the audit record could not be written.", error);
       return NextResponse.json(
@@ -230,12 +372,15 @@ export async function POST(
     }
     if (
       error instanceof Prisma.PrismaClientKnownRequestError &&
-      (error.code === "P2002" || error.code === "P2034")
+      (error.code === "P2002" || isSerializationFailure(error))
     ) {
       return NextResponse.json(
         { error: "Another change to this reservation was saved at the same time. Please try again." },
         { status: 409 }
       );
+    }
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") {
+      return NextResponse.json({ error: "Reservation not found." }, { status: 404 });
     }
     console.error("Repricing failed:", error);
     return NextResponse.json({ error: "Could not reprice the reservation." }, { status: 500 });

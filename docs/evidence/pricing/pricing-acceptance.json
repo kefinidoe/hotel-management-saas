@@ -1,6 +1,6 @@
 {
   "base": "http://127.0.0.1:3000",
-  "generatedAt": "2026-10-31T00:26:50.726Z",
+  "generatedAt": "2026-10-31T08:45:28.995Z",
   "hotel": "Riverside Grand Hotel",
   "currency": "KES",
   "passed": 35,
@@ -24,7 +24,7 @@
       "id": "api-config-read",
       "description": "the owner reads the pricing configuration",
       "status": "PASS",
-      "detail": "9 room types, 3 occupancies"
+      "detail": "8 room types, 1 occupancies"
     },
     {
       "id": "api-config-write-forbidden",
@@ -54,7 +54,7 @@
       "id": "api-meal-plan-created",
       "description": "a meal plan is created with an explicit pricing basis",
       "status": "PASS",
-      "detail": "65c74e1a-a450-49a0-8964-af0e9b54d999"
+      "detail": "e3f100cc-c063-4578-8cdd-fe8a8c4382bb"
     },
     {
       "id": "api-settings-updated",
@@ -216,7 +216,7 @@
       "id": "api-arrival-created",
       "description": "a same-day arrival is booked for the Front Desk",
       "status": "PASS",
-      "detail": "RES-2026-00033 @ 4,600"
+      "detail": "RES-2026-00010 @ 4,600"
     },
     {
       "id": "browser-config-edit-keeps-sold-price",

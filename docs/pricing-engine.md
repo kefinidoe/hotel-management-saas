@@ -30,6 +30,9 @@ executed, and the honest gaps.
 | Snapshot failures | Fail closed: a configured-price reservation whose snapshot cannot be written is rolled back and never sold. Legacy hotels unaffected. |
 | Repricing integrity | New version + `ReservationPriceChange` + reservation update + `RESERVATION_REPRICED` audit event in one serializable transaction; `500 AUDIT_UNAVAILABLE` and full rollback if the audit cannot be written. |
 | Financial retention | `ON DELETE RESTRICT` from reservation and hotel; the delete API refuses repriced reservations; only an explicit purge removes history. |
+| Repricing concurrency | Repricing takes the hotel's reservation advisory lock, then the reservation row lock, and prices only from data re-read after both. Proved with real concurrent HTTP requests against PostgreSQL. |
+| Financial-state eligibility | A reservation with any folio charge or any payment cannot be repriced (`409`); unpaid stays keep repricing. |
+| Reschedule safety | Moving a priced stay keeps the frozen price, flags `pricingNeedsReview` and writes a review audit row instead of quietly re-pricing. |
 | Folio consistency | `lib/stay-service.ts` bills the snapshot (`grandTotal`) and emits meal/extra/tax folio lines from the frozen breakdown. |
 | Configuration UI | `/dashboard/settings/pricing` — seven sections, currency labels, enable/disable, delete, management-only. |
 | Repricing UI | “Reprice” on Front Desk arrival cards (management only) → explicit confirm with a reason. |
@@ -210,15 +213,68 @@ than blocking the booking.
 ### Repricing is explicit, atomic and audited
 
 `POST /api/reservations/:id/reprice` (management only, pending/confirmed, single room) runs one
-serializable transaction that:
+transaction that:
 
-1. locks the reservation row (`SELECT … FOR UPDATE`) so two managers cannot write the same version;
-2. reads the current version and computes the next one;
-3. updates `ReservationRoom.rate` and the reservation discount;
-4. inserts the new immutable snapshot version;
-5. inserts the `ReservationPriceChange` (previous/new total, previous/new **version**, reason,
+1. takes the hotel's reservation advisory lock — the same `pg_advisory_xact_lock` that reservation
+   create/update, reschedule, extend, check-in, check-out, payments, charge-to-room and the POS
+   already take, so a repricing can never interleave with anything that moves dates, occupants,
+   rooms or money;
+2. locks the reservation row (`SELECT … FOR UPDATE`) as a second line of defence for a writer that
+   bypasses the advisory lock;
+3. re-reads the reservation **after** both locks: dates, room and room type, adults, children,
+   discount, status and the current price version;
+4. re-validates the status (pending/confirmed), the single-room condition and the financial-state
+   rule below;
+5. loads the pricing configuration **through the transaction client**, so the rates it prices with
+   are the committed ones at that moment;
+6. computes the price from those values and the request's intent (occupancy, meal plan, guests,
+   discount) — never from anything read before the lock;
+7. updates `ReservationRoom.rate` and the reservation discount;
+8. inserts the new immutable snapshot version;
+9. inserts the `ReservationPriceChange` (previous/new total, previous/new **version**, reason,
    breakdown, actor);
-6. writes the `RESERVATION_REPRICED` **audit event into the same transaction**, in strict mode.
+10. writes the `RESERVATION_REPRICED` **audit event into the same transaction**, in strict mode.
+
+#### Why the isolation level is READ COMMITTED
+
+The endpoint previously ran at `Serializable` and priced *before* the transaction. Both halves were
+wrong in the same direction. A serializable transaction takes its snapshot at its **first
+statement** — which is the advisory lock itself, i.e. while it is still blocked. Anything that
+committed while the request waited (a payment, a reschedule) would be invisible to a later read in
+that same transaction, so "re-read under the lock" would have re-read a stale snapshot. PostgreSQL's
+SSI does not necessarily abort that pattern either: without a cycle there is no dangerous structure.
+
+The critical section is exclusive by construction (advisory lock, then row lock, then unique
+`(reservationId, version)`), so `READ COMMITTED` is the correct level: every statement after the
+lock observes what was actually committed. Any genuine serialization failure that still surfaces —
+a direct writer outside the application, for example — is retried up to three times before the
+caller gets `409`.
+
+### Who may be repriced
+
+| State | Repricing |
+| --- | --- |
+| `PENDING` / `CONFIRMED`, one room, no charges, no payments | **Allowed**, audited, append-only |
+| Any folio charge (room charge, restaurant, laundry, service, discount, tax) | **Refused** `409 RESERVATION_HAS_FINANCIAL_ACTIVITY` |
+| Any payment — `COMPLETED`, `PENDING` (deposit in flight) or `REFUNDED` | **Refused** `409 RESERVATION_HAS_FINANCIAL_ACTIVITY` |
+| `CHECKED_IN`, `CHECKED_OUT`, `CANCELLED`, `NO_SHOW` | **Refused** `400` (status re-checked under the lock) |
+| More than one room on the reservation | **Refused** `400` |
+| Another hotel's reservation | **Refused** `404`, indistinguishable from not found |
+
+The rule is deliberately blunt: once money has been taken against a price, that price is no longer a
+paper agreement and silently changing it would leave the folio, the payment and the booking telling
+three different stories. The response names the reason (`2 folio charges and 1 payment`) and tells
+the manager what to do instead — adjust the folio, or cancel and rebook at the new price. A
+dedicated "financial adjustment" workflow (refund + new charge + reversal entries on a closed folio)
+is **not** built; it is listed under limitations rather than approximated.
+
+### A reschedule does not silently reprice
+
+Moving a stay's dates or room invalidates the agreed price for those nights, but automatically
+recomputing it would change an amount the guest already agreed to without anyone asking. The
+reschedule endpoint therefore keeps the frozen price, returns `pricingNeedsReview: true`, and writes
+a `RESERVATION_RATE_REVIEW_REQUIRED` audit row naming the old and new dates and room. The manager
+then decides: reprice explicitly (new audited version) or leave it.
 
 `recordAudit` already accepted a transaction client, and `AuditLog` lives in the same PostgreSQL
 database as the reservation, so no separate outbox is needed: the audit insert is part of the same
@@ -333,8 +389,9 @@ Environment: disposable local PostgreSQL 17 (`127.0.0.1:55433`, database
 | `DATABASE_URL=… DIRECT_URL=… npx prisma validate` | `The schema at prisma/schema.prisma is valid 🚀` |
 | `npx tsc --noEmit` | no output (clean) |
 | `next lint` | `✔ No ESLint warnings or errors` |
-| `vitest run` | **63 files, 953 passed, 6 skipped** |
+| `vitest run` | **63 files, 959 passed, 6 skipped** |
 | `node scripts/verify-pricing-acceptance.mjs --base http://127.0.0.1:3000 --json docs/evidence/pricing/pricing-acceptance.json` | **PASS — 35 passed, 0 failed** |
+| `node scripts/verify-repricing-concurrency.mjs --base http://127.0.0.1:3000 --json docs/evidence/pricing/repricing-concurrency.json` | **PASS — 8 passed, 0 failed** (real PostgreSQL, real HTTP) |
 | `node scripts/verify-reservation-acceptance.mjs --base http://127.0.0.1:3000` | **PASS — 13 passed, 0 failed** |
 | `node scripts/e2e-smoke.mjs --base http://127.0.0.1:3000` | **PASS — 55/55** |
 | `node scripts/browser-e2e.mjs --base http://127.0.0.1:3000` | **PASS — 33/33 browser steps** |
@@ -350,7 +407,7 @@ child pricing, extra beds, fixed and percentage discounts, taxes (inclusive and 
 invalid-input failure. Integration tests cover configuration CRUD, cross-tenant refusals, quote
 isolation, discount permissions, reservation pricing, snapshot freezing, repricing and audit.
 
-`__tests__/pricing/pricing-integrity.test.ts` (11 cases) runs the real routes and the real check-in
+`__tests__/pricing/pricing-integrity.test.ts` (17 cases) runs the real routes and the real check-in
 service against a Prisma double whose transactions genuinely roll back, and covers exactly the
 financial-integrity cases:
 
@@ -366,12 +423,39 @@ financial-integrity cases:
 | Another hotel's reservation | `404`, snapshots unchanged |
 | Receptionist repricing | `403` |
 | Reprice then check in | folio `required` equals the latest version; room charge + meal line equal the repriced breakdown; version 1 unchanged |
+| Payment on the reservation | `409 RESERVATION_HAS_FINANCIAL_ACTIVITY`; no version, change row or audit row |
+| Pending deposit | `409` — money in flight is not "not collected yet" |
+| Folio charge without a payment | `409`, and the message names the folio charge |
+| Empty folio, no money | repricing still works (`200`) — unpaid stays keep their flexibility |
+| Status changed to `CHECKED_IN` under the lock | `400`; nothing appended |
+| Stay lengthened before the request | the new version prices the current four nights, not the two agreed at booking |
 
 Browser/API acceptance (`scripts/verify-pricing-acceptance.mjs`, 35 checks) additionally proves
 against real PostgreSQL: two repricings produce versions 1–3 with the original intact, an
 `UPDATE` of a stored version is rejected by the database ("immutable"), a `DELETE` of a reservation
 with pricing history is refused by the foreign key, and the API itself answers `409` instead of
 deleting a repriced reservation.
+
+### Concurrency is proved against PostgreSQL, not a mock
+
+`scripts/verify-repricing-concurrency.mjs` drives the running application through real NextAuth
+sessions while a second PostgreSQL connection holds locks and writes rows, so the interleavings are
+genuine rather than simulated:
+
+| Check | What actually happens | Result on real PostgreSQL |
+| --- | --- | --- |
+| `http-race-two-managers` | manager and admin `POST /reprice` on the same reservation at the same time | both serialised by the advisory lock, versions contiguous `1,2,3`, one change row and one audit row per success, no `500` |
+| `http-race-reschedule-blocked` | a second connection takes the hotel advisory lock, the reprice queues, that connection then commits a 3→5 night reschedule | the reprice prices **5** nights (`30000`) — it read the committed dates after the lock, not the ones visible when the request arrived |
+| `http-race-reschedule-concurrent` | reschedule `PUT` and `POST /reprice` fired together | the price and the booking end up consistent, or the reschedule reports `pricingNeedsReview: true` with a `RESERVATION_RATE_REVIEW_REQUIRED` audit row; no `500`, no unrecorded change |
+| `http-race-payment-blocks` | a payment is inserted and committed under the same advisory lock while the reprice waits | the reprice answers `409 RESERVATION_HAS_FINANCIAL_ACTIVITY` and appends nothing |
+| `http-payment-refused` | committed payment, then reprice | `409`, no version, no change row, no audit row |
+| `http-audit-outage-rolls-back` | a real `BEFORE INSERT` trigger on `AuditLog` raises for this reservation | `500 AUDIT_UNAVAILABLE`; snapshot list, change rows, `ReservationRoom.rate` and the reservation discount are all byte-identical to before |
+| `http-tenant-isolation` | another hotel's manager reprices this hotel's reservation | `404`, nothing written |
+
+The script is self-contained: it creates room type `Concurrency Standard`, room `905`, occupancy
+`Concurrency Double` and its own rate, restores the hotel's `LEGACY_BASE_RATE` model at the end and
+deletes only the reservations it created. It was run three times in a row, `8/8` each time, because a
+race that only passes once is not evidence.
 
 The pricing acceptance script is intentionally independent of the seed data: it creates its own room
 types (rooms 903/904), occupancies (`Pricing Single/Double/Family`), a meal plan and its own rates,
@@ -393,6 +477,19 @@ drives the real UI in Chromium, and restores the hotel's original pricing model 
 - The immutability trigger blocks `UPDATE` only. `DELETE` remains possible for deliberate purges
   (the reservation-delete path and the test-data endpoint), and restoring a version from a backup is
   the recovery route for an erroneous purge.
+- Rescheduling a priced reservation does **not** reprice it automatically. The price stays frozen,
+  the endpoint returns `pricingNeedsReview: true` and writes a `RESERVATION_RATE_REVIEW_REQUIRED`
+  audit row; a manager still has to reprice deliberately. Automating it would change an agreed
+  amount without a human decision.
+- There is no deposit or invoice model in this application: money exists only as `Payment` rows on a
+  `Folio`, and invoices are not implemented. The financial-activity rule is therefore expressed in
+  those terms (any folio charge, any payment in any status). If a deposits/invoices module is added,
+  it must join the same rule and the same advisory lock.
+- Multi-room reservations cannot be repriced at all (`400`), so the concurrency guarantees are
+  proved for the single-room case that the UI offers.
+- Repricing a reservation whose status changes to `CHECKED_IN` between the request and the lock is
+  refused, but a stay that is checked in *after* a successful reprice keeps the (already audited)
+  new price — that is the intended order of events, not a race.
 - Pricing history currently records the *price* versions only. A full financial audit trail also
   wants folio/payment events; those are already recorded by their own modules and were not merged
   into this ledger.
@@ -421,6 +518,8 @@ acceptance run creates (rooms 903/904 and their rates) stays in place as a worke
 
 ## 12. Evidence index
 
+- `docs/evidence/pricing/repricing-concurrency.json` — the eight real-PostgreSQL concurrency and
+  financial-state checks with their details.
 - `docs/evidence/pricing/pricing-acceptance.json` — per-check results of the run above.
 - `pricing-01-settings-overview.png` — Pricing & Rates page, hotel currency, sections.
 - `pricing-02-rate-edit.png`, `pricing-03-rate-persisted.png` — editing and reloading a rate.
@@ -453,6 +552,7 @@ Changed: `prisma/schema.prisma`, `app/api/reservations/route.ts` (engine + snaps
 `scripts/migration-ledger.mjs`, `prisma/migration-release-manifest.json`.
 
 Tests: `__tests__/pricing/{engine,pricing-api,reservation-pricing,pricing-integrity}.test.ts`,
+`scripts/verify-repricing-concurrency.mjs`,
 `__tests__/frontend/{create-reservation,reprice-dialog}.test.tsx`,
 `__tests__/schema/migration-adoption.test.ts`, `scripts/verify-pricing-acceptance.mjs` (new),
 `scripts/verify-reservation-acceptance.mjs` (waits for the server-quoted rate).

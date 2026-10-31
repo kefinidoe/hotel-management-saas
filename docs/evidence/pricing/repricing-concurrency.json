@@ -1,0 +1,59 @@
+{
+  "generatedAt": "2026-10-31T08:45:33.775Z",
+  "base": "http://127.0.0.1:3000",
+  "database": "postgresql://127.0.0.1:55433/hotel_saas_demo_owner",
+  "total": 8,
+  "passed": 8,
+  "failed": 0,
+  "fixturesRemoved": 7,
+  "results": [
+    {
+      "id": "fixture-pricing-configured",
+      "description": "the hotel sells the fixture room by occupancy rate",
+      "status": "PASS",
+      "detail": "6000 per night, occupancy Concurrency Double"
+    },
+    {
+      "id": "http-race-two-managers",
+      "description": "two managers repricing at once never share a version or lose a change row",
+      "status": "PASS",
+      "detail": "200+200; versions 1,2,3; 2 recorded change(s)"
+    },
+    {
+      "id": "http-race-reschedule-blocked",
+      "description": "a repricing waiting on the lock prices the dates committed while it waited",
+      "status": "PASS",
+      "detail": "waited for the lock, then priced 5 nights at 30000.00"
+    },
+    {
+      "id": "http-race-reschedule-concurrent",
+      "description": "a reschedule racing a repricing never disagrees silently",
+      "status": "PASS",
+      "detail": "priced 4 nights, booking unchanged afterwards"
+    },
+    {
+      "id": "http-race-payment-blocks",
+      "description": "money recorded while a repricing waits stops the repricing",
+      "status": "PASS",
+      "detail": "payment committed first, repricing refused (RESERVATION_HAS_FINANCIAL_ACTIVITY)"
+    },
+    {
+      "id": "http-payment-refused",
+      "description": "a reservation that already has a completed payment cannot be repriced",
+      "status": "PASS",
+      "detail": "409 RESERVATION_HAS_FINANCIAL_ACTIVITY"
+    },
+    {
+      "id": "http-audit-outage-rolls-back",
+      "description": "a failing audit insert leaves no version, change row or price edit",
+      "status": "PASS",
+      "detail": "500 AUDIT_UNAVAILABLE, nothing persisted"
+    },
+    {
+      "id": "http-tenant-isolation",
+      "description": "another hotel's manager cannot reprice this hotel's reservation",
+      "status": "PASS",
+      "detail": "404, nothing written"
+    }
+  ]
+}
