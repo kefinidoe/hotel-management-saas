@@ -107,11 +107,38 @@ function validateTargetMatchesIdentifier(
   }
 }
 
+/**
+ * Resolves one safety input.
+ *
+ * The two modes are deliberately exclusive rather than layered:
+ *
+ *  - called with an explicit config (tests, tooling that knows the target), the
+ *    config is the whole truth: a key that is absent or explicitly `undefined`
+ *    resolves to `undefined`, so the guard fails closed instead of silently
+ *    borrowing whatever the ambient process environment happens to hold;
+ *  - called with no arguments (`lib/prisma.ts` and every maintenance script),
+ *    the process environment is the source.
+ *
+ * The previous `config?.x ?? process.env.X` form mixed the two: an explicit
+ * `undefined` fell through to `process.env`, so a caller that meant "this input
+ * is missing, abort" could be satisfied by an unrelated ambient value. Which
+ * branch a test took then depended on the developer's shell, on one platform
+ * and not another.
+ */
+function resolveSafetyInput(
+  config: DatabaseSafetyConfig | undefined,
+  key: keyof DatabaseSafetyConfig,
+  envName: string
+): string | undefined {
+  if (config === undefined) return process.env[envName];
+  return config[key];
+}
+
 export function assertDatabaseSafety(config?: DatabaseSafetyConfig): DatabaseTargetMetadata {
-  const env = config?.saasEnvironment ?? process.env.SAAS_ENVIRONMENT;
-  const identifier = config?.saasDatabaseIdentifier ?? process.env.SAAS_DATABASE_IDENTIFIER;
-  const dbUrl = config?.databaseUrl ?? process.env.DATABASE_URL;
-  const directUrl = config?.directUrl ?? process.env.DIRECT_URL;
+  const env = resolveSafetyInput(config, "saasEnvironment", "SAAS_ENVIRONMENT");
+  const identifier = resolveSafetyInput(config, "saasDatabaseIdentifier", "SAAS_DATABASE_IDENTIFIER");
+  const dbUrl = resolveSafetyInput(config, "databaseUrl", "DATABASE_URL");
+  const directUrl = resolveSafetyInput(config, "directUrl", "DIRECT_URL");
 
   // 1. Strict Environment Check
   if (!env || env.trim() === "") {

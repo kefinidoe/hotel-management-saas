@@ -66,8 +66,55 @@ export function readMigrations(migrationsRoot = MIGRATIONS_DIR) {
     .map((name) => {
       const sqlPath = path.join(migrationsRoot, name, "migration.sql");
       const sql = fs.readFileSync(sqlPath);
-      return { name, sqlPath, sql, checksum: sha256Hex(sql) };
+      const hasCrlfEol = sql.includes(0x0d);
+      const onDiskChecksum = sha256Hex(sql);
+      // Prisma hashes the bytes it deploys, and `.gitattributes` pins
+      // `*.sql text eol=lf`, so a CRLF working copy is a checkout artifact rather
+      // than content: Git would hand the deployment the LF bytes. The reviewed
+      // digest is therefore computed over the Git content on both platforms, while
+      // `onDiskChecksum` keeps what a deploy from *this* directory would record.
+      // Any path that writes a digest into a ledger refuses a CRLF tree outright
+      // (assertLfMigrationFiles), so the two can never disagree in practice.
+      const canonical = hasCrlfEol ? toLfBytes(sql) : sql;
+      return {
+        name,
+        sqlPath,
+        sql,
+        checksum: sha256Hex(canonical),
+        onDiskChecksum,
+        hasCrlfEol,
+      };
     });
+}
+
+/** LF-only copy of a buffer, without touching anything else. */
+export function toLfBytes(value) {
+  const buffer = Buffer.isBuffer(value) ? value : Buffer.from(String(value));
+  return Buffer.from(buffer.toString("latin1").replace(/\r\n/g, "\n"), "latin1");
+}
+
+/**
+ * Fail closed when a migration file carries CRLF line endings.
+ *
+ * `prisma migrate deploy` checksums raw file bytes, so adopting a CRLF working
+ * copy would record CRLF digests in `_prisma_migrations`; every later deploy from
+ * an LF checkout would then be rejected as modified. Adoption therefore refuses
+ * to run until the checkout is restored to the reviewed bytes.
+ */
+export function assertLfMigrationFiles(migrations) {
+  const crlf = migrations.filter((migration) => migration.hasCrlfEol).map((migration) => migration.name);
+  if (crlf.length === 0) return;
+  throw new Error(
+    [
+      `Refusing to record migration checksums: ${crlf.length} migration file(s) have CRLF line endings.`,
+      `Affected: ${crlf.join(", ")}`,
+      "Prisma checksums raw file bytes, so a CRLF checkout would record digests that a later LF deploy rejects.",
+      "Restore the reviewed LF bytes (the files are tracked, so nothing is lost):",
+      "  git config core.autocrlf false",
+      "  rm -rf prisma/migrations && git checkout -- prisma/migrations",
+      "Do not convert the line endings by hand and do not regenerate the manifest to match a CRLF tree.",
+    ].join("\n")
+  );
 }
 
 /**
@@ -610,7 +657,10 @@ export function buildReleaseManifest(migrations, { prismaVersion } = {}) {
     purpose:
       "Reviewed migration release artifacts. `node scripts/migrate-adopt.mjs` refuses to baseline a migration whose file no longer matches this manifest.",
     prismaVersion: prismaVersion ?? null,
-    migrations: migrations.map((migration) => ({ name: migration.name, sha256: migration.checksum })),
+    migrations: migrations.map((migration) => ({
+      name: migration.name,
+      sha256: migration.checksum,
+    })),
   };
 }
 
@@ -622,18 +672,32 @@ export function readReleaseManifest(manifestPath = RELEASE_MANIFEST_PATH) {
 /**
  * Compare the migration directory against the committed manifest. Any
  * add/remove/edit is reported; a release requires both to agree exactly.
+ *
+ * The comparison uses each file's canonical (LF) digest, because `.gitattributes`
+ * pins these files to LF and Git would land LF bytes in the deployment. A CRLF
+ * working copy is reported separately in `warnings`: it must not corrupt a
+ * manifest check, but it must never be forgotten either, since adoption refuses
+ * to run on it (assertLfMigrationFiles).
  */
 export function verifyReleaseManifest(migrations, manifest) {
   const problems = [];
-  if (!manifest) return { problems: ["prisma/migration-release-manifest.json is missing."], unchecked: [] };
+  const warnings = [];
+  if (!manifest) return { problems: ["prisma/migration-release-manifest.json is missing."], warnings, unchecked: [] };
 
   const listed = new Map(manifest.migrations.map((entry) => [entry.name, entry.sha256]));
   for (const migration of migrations) {
+    const digest = migration.checksum;
+    if (migration.hasCrlfEol) {
+      warnings.push(
+        `Migration '${migration.name}' has CRLF line endings in this checkout; it is compared by its LF (Git) bytes. ` +
+          "Restore LF with: git config core.autocrlf false && rm -rf prisma/migrations && git checkout -- prisma/migrations"
+      );
+    }
     if (!listed.has(migration.name)) {
       problems.push(`Migration '${migration.name}' is not listed in the release manifest.`);
-    } else if (listed.get(migration.name) !== migration.checksum) {
+    } else if (listed.get(migration.name) !== digest) {
       problems.push(
-        `Migration '${migration.name}' does not match the reviewed checksum (manifest=${listed.get(migration.name)}, file=${migration.checksum}).`
+        `Migration '${migration.name}' does not match the reviewed checksum (manifest=${listed.get(migration.name)}, file=${digest}).`
       );
     }
   }
@@ -642,7 +706,7 @@ export function verifyReleaseManifest(migrations, manifest) {
       problems.push(`Release manifest lists '${name}', which no longer exists in prisma/migrations.`);
     }
   }
-  return { problems, unchecked: [] };
+  return { problems, warnings, unchecked: [] };
 }
 
 /** Reads a checksum from the manifest for a migration name (used in reports). */
@@ -675,7 +739,8 @@ function runCli(argv) {
       return 0;
     }
     if (rest.includes("--check")) {
-      const { problems } = verifyReleaseManifest(migrations, readReleaseManifest());
+      const { problems, warnings } = verifyReleaseManifest(migrations, readReleaseManifest());
+      for (const warning of warnings) process.stderr.write(`! ${warning}\n`);
       if (problems.length > 0) {
         process.stderr.write(`${problems.join("\n")}\n`);
         return 1;

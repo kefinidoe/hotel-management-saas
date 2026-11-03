@@ -1,10 +1,12 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   CHECKPOINTS,
   PRISMA_LEDGER_DDL,
+  assertLfMigrationFiles,
   SCHEMA_FEATURES,
   buildAdoptionPlan,
   buildFeatureQuery,
@@ -337,5 +339,77 @@ describe("migration sources", () => {
     );
     expect(sql).toContain('CREATE UNIQUE INDEX IF NOT EXISTS "Order_hotelId_idempotencyOperation_idempotencyKey_key"');
     expect(sql).toContain('CONSTRAINT "Order_idempotency_triple_check"');
+  });
+});
+
+describe("line-ending independence (Windows/Linux checkouts)", () => {
+  /**
+   * Git stores migration SQL as LF and `.gitattributes` keeps it that way, but a
+   * Windows working copy cloned under `core.autocrlf=true` can still hold CRLF.
+   * Prisma checksums raw bytes, so that checkout must not corrupt the reviewed
+   * digests — and it must never be used to write ledger rows either.
+   */
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "migration-eol-"));
+  const lfSql = 'CREATE TABLE "Widget" (\n  "id" TEXT PRIMARY KEY\n);\n';
+  const crlfSql = lfSql.replace(/\n/g, "\r\n");
+
+  const lfDir = path.join(root, "20260101000000_lf");
+  const crlfDir = path.join(root, "20260102000000_crlf");
+  fs.mkdirSync(lfDir, { recursive: true });
+  fs.mkdirSync(crlfDir, { recursive: true });
+  fs.writeFileSync(path.join(lfDir, "migration.sql"), lfSql);
+  fs.writeFileSync(path.join(crlfDir, "migration.sql"), crlfSql);
+
+  it("reports the same reviewed digest for LF and CRLF copies of the same file", () => {
+    const entries = readMigrations(root);
+    expect(entries.map((entry: { name: string }) => entry.name)).toEqual([
+      "20260101000000_lf",
+      "20260102000000_crlf",
+    ]);
+
+    const [lf, crlf] = entries;
+    expect(lf.hasCrlfEol).toBe(false);
+    expect(crlf.hasCrlfEol).toBe(true);
+    expect(lf.checksum).toBe(sha256Hex(Buffer.from(lfSql)));
+    expect(crlf.checksum).toBe(lf.checksum);
+    // The raw bytes still have their own digest: this is what Prisma would record
+    // if it deployed from the CRLF checkout.
+    expect(crlf.onDiskChecksum).toBe(sha256Hex(Buffer.from(crlfSql)));
+    expect(crlf.onDiskChecksum).not.toBe(crlf.checksum);
+  });
+
+  it("passes the manifest check for a CRLF checkout but warns instead of staying silent", () => {
+    const entries = readMigrations(root);
+    const manifest = buildReleaseManifest(entries, { prismaVersion: "5.17.0" });
+    expect(manifest.migrations.map((entry: { sha256: string }) => entry.sha256)).toEqual([
+      sha256Hex(Buffer.from(lfSql)),
+      sha256Hex(Buffer.from(lfSql)),
+    ]);
+
+    const result = verifyReleaseManifest(entries, manifest);
+    expect(result.problems).toEqual([]);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain("20260102000000_crlf");
+    expect(result.warnings[0]).toContain("CRLF");
+  });
+
+  it("still flags real edits and additions, CRLF or not", () => {
+    const entries = readMigrations(root).map((entry) => ({ ...entry, checksum: "0".repeat(64) }));
+    const manifest = buildReleaseManifest(readMigrations(root));
+    expect(verifyReleaseManifest(entries, manifest).problems).toHaveLength(2);
+  });
+
+  it("refuses to check a CRLF tree into a ledger", () => {
+    expect(() => assertLfMigrationFiles(readMigrations(root))).toThrow(/CRLF line endings/);
+    // The LF-only tree is accepted.
+    const lfOnly = fs.mkdtempSync(path.join(os.tmpdir(), "migration-eol-"));
+    fs.mkdirSync(path.join(lfOnly, "20260101000000_lf"), { recursive: true });
+    fs.writeFileSync(path.join(lfOnly, "20260101000000_lf", "migration.sql"), lfSql);
+    expect(() => assertLfMigrationFiles(readMigrations(lfOnly))).not.toThrow();
+  });
+
+  it("holds for the repository itself, whatever this checkout's line endings are", () => {
+    const result = verifyReleaseManifest(readMigrations(), readReleaseManifest());
+    expect(result.problems).toEqual([]);
   });
 });

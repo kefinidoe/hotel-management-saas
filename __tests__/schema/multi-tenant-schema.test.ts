@@ -1,7 +1,16 @@
 // @vitest-environment node
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
-import { applyPendingMigrations } from "./migration-runner";
+import { PGLITE_MIGRATION_TIMEOUT_MS, applyPendingMigrations } from "./migration-runner";
+
+// This suite applies the entire migration chain to an in-memory PGlite database:
+// a WASM Postgres working through ~22 migration files. That is legitimately slow
+// and markedly slower on Windows (roughly 5-7s against ~2s on Linux), which the
+// default 5s per-test/per-hook budget does not cover. Raise the budget for this
+// file only — where that work actually happens — so a real hang elsewhere still
+// fails fast instead of hiding behind a global timeout.
+vi.setConfig({ testTimeout: PGLITE_MIGRATION_TIMEOUT_MS, hookTimeout: PGLITE_MIGRATION_TIMEOUT_MS });
+
 
 describe("Phase 3 Multi-Tenant Schema & Isolation Verification", () => {
   let db: PGlite;

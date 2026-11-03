@@ -147,6 +147,84 @@ describe("Database Safety Guard — Fail-Closed Behavior", () => {
   });
 });
 
+describe("Database Safety Guard — Explicit Config Is Hermetic", () => {
+  /**
+   * Regression: the guard used to resolve each input as
+   * `config?.x ?? process.env.X`. An explicit `undefined` is not "no opinion", it
+   * is "this input is absent", so falling through to `process.env` let an ambient
+   * variable satisfy a check the caller had deliberately left empty — making the
+   * fail-closed tests above pass or fail depending on the developer's shell.
+   */
+  const populated = {
+    SAAS_ENVIRONMENT: "saas",
+    SAAS_DATABASE_IDENTIFIER: "saas-hotel-db",
+    DATABASE_URL: "postgresql://postgres.saas-hotel-db:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
+    DIRECT_URL: "postgresql://postgres:secret@db.saas-hotel-db.supabase.co:5432/postgres",
+  };
+
+  it("does not borrow a populated process.env for an explicit undefined", () => {
+    withProcessEnvironment(populated, () => {
+      expect(() =>
+        assertDatabaseSafety({
+          saasEnvironment: undefined,
+          saasDatabaseIdentifier: "saas-hotel-db",
+          databaseUrl: populated.DATABASE_URL,
+        })
+      ).toThrow(/SAAS_ENVIRONMENT environment variable is MISSING/);
+
+      expect(() =>
+        assertDatabaseSafety({
+          saasEnvironment: "saas",
+          saasDatabaseIdentifier: undefined,
+          databaseUrl: populated.DATABASE_URL,
+        })
+      ).toThrow(/SAAS_DATABASE_IDENTIFIER environment variable is MISSING/);
+
+      expect(() =>
+        assertDatabaseSafety({
+          saasEnvironment: "saas",
+          saasDatabaseIdentifier: "saas-hotel-db",
+          databaseUrl: undefined,
+        })
+      ).toThrow(/DATABASE_URL is missing or empty/);
+    });
+  });
+
+  it("does not borrow process.env for keys the config object omits", () => {
+    withProcessEnvironment(populated, () => {
+      expect(() =>
+        assertDatabaseSafety({
+          saasDatabaseIdentifier: "saas-hotel-db",
+          databaseUrl: populated.DATABASE_URL,
+        })
+      ).toThrow(/SAAS_ENVIRONMENT environment variable is MISSING/);
+    });
+  });
+
+  it("still reads process.env when called with no config at all", () => {
+    withProcessEnvironment(populated, () => {
+      const result = assertDatabaseSafety();
+      expect(result.identifierMatched).toBe("saas-hotel-db");
+      expect(result.database).toBe("postgres");
+    });
+  });
+
+  it("rejects a config whose explicit undefined hides a URL that env would have validated", () => {
+    withProcessEnvironment(populated, () => {
+      // DATABASE_URL is deliberately undefined: the DIRECT_URL in env must not be
+      // promoted into its place, and DIRECT_URL itself must not be read either.
+      expect(() =>
+        assertDatabaseSafety({
+          saasEnvironment: "saas",
+          saasDatabaseIdentifier: "saas-hotel-db",
+          databaseUrl: undefined,
+          directUrl: undefined,
+        })
+      ).toThrow(/DATABASE_URL is missing or empty/);
+    });
+  });
+});
+
 describe("Database Safety Guard — Approved Target Acceptance", () => {
   it("accepts Supabase transaction pooler URL matching approved identifier in user prefix", () => {
     const result = assertDatabaseSafety({

@@ -149,8 +149,17 @@ try {
 // It is read from the generated files, so it needs neither a database nor a query
 // engine. Constructing a client would load the engine, which a build machine may
 // not have.
-let clientModels = Prisma?.dmmf?.datamodel?.models?.map((model) => model.name) ?? [];
-let checkedVia = "runtime data model";
+//
+// Only trustworthy when GENERATED_DIR *is* the client that was imported. When the
+// directory is overridden (fixture mode), `@prisma/client` still resolves to the
+// repository's installed client, so its data model would describe a different
+// directory than the one under test — and every fixture would pass. In that mode
+// the declaration files inside GENERATED_DIR are the only authority.
+const USING_FIXTURE_DIR = Boolean(process.env.PRISMA_CLIENT_CHECK_GENERATED_DIR);
+let clientModels = USING_FIXTURE_DIR
+  ? []
+  : Prisma?.dmmf?.datamodel?.models?.map((model) => model.name) ?? [];
+let checkedVia = USING_FIXTURE_DIR ? "generated type declarations" : "runtime data model";
 
 if (clientModels.length === 0) {
   // Some local verification harnesses replace the client entry point (e.g. to run

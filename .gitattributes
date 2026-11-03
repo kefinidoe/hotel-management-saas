@@ -1,0 +1,32 @@
+# Line endings
+# ------------
+# Git stores text as LF. On Windows the default `core.autocrlf=true` turns that
+# into CRLF in the working copy — harmless for source, but not for migration SQL:
+# Prisma checksums the *raw bytes* of `migration.sql`, so a CRLF checkout produces
+# digests that differ from the reviewed ones in
+# `prisma/migration-release-manifest.json` and from the rows already recorded in
+# `_prisma_migrations`. Pinning these paths to LF keeps every checkout, on every
+# platform, byte-identical to what was reviewed and deployed.
+#
+# `scripts/migration-ledger.mjs` verifies the manifest against the LF (Git)
+# content and refuses to record checksums from a CRLF tree.
+* text=auto
+
+*.sql    text eol=lf
+*.prisma text eol=lf
+*.sh     text eol=lf
+*.mjs    text eol=lf
+
+prisma/migration-release-manifest.json text eol=lf
+
+# Binaries Git must never touch.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.woff binary
+*.woff2 binary
+*.ttf  binary
+*.pdf  binary
+*.br   binary
