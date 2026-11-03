@@ -126,6 +126,25 @@ Both are fail-closed, re-runnable and self-documenting:
 `node scripts/migration-ledger.mjs manifest --write` and verified by `npm run migration:manifest`
 (also asserted by a unit test). Adoption and rehearsal both refuse to proceed on a mismatch.
 
+**D4a — Migration files are LF-only, on every platform.** A SHA-256 over a file's bytes is
+identical to a SHA-256 over its *content* only if the line endings are identical, and Prisma
+checksums exactly the bytes it finds on disk when it deploys. Git stores text as LF but, with
+`core.autocrlf=true` (the Windows default), checks it out as CRLF — which would make a Windows
+checkout hash differently from a Linux one and from the manifest. `.gitattributes` therefore pins
+`*.sql`, `*.prisma`, `prisma/migration-release-manifest.json` and `prisma/migrations/migration_lock.toml`
+to `eol=lf`. The consequences are deliberate:
+
+* manifest *verification* and manifest *generation* hash the LF (Git) bytes on both platforms, so a
+  CRLF working copy cannot corrupt a review or write a different manifest; the raw digest stays
+  available as `onDiskChecksum`, and the CLIs print a warning for every CRLF file
+  (`npm run migration:verify-eol` fails outright);
+* *adoption* — the only command that writes digests into `_prisma_migrations` — refuses a CRLF
+  working copy, so a digest that a later LF deploy would reject can never be recorded;
+* no migration SQL, no manifest entry and no Prisma checksum semantics were changed to achieve this.
+
+Because Git's line-ending conversion is not an edit, a Windows clone of this repository also
+standardises the checkout: `git add --renormalize .` reports no changes for the committed tree.
+
 **D5 — A ledgerless database is adopted, never replayed.**
 `scripts/migrate-adopt.mjs` fingerprints the live schema against explicit checkpoints, requires
 exactly one match, validates any existing ledger, and only then records the migrations whose
@@ -190,6 +209,27 @@ the two proposals were written; `saas_through_16` is also plausible if the last 
 membership-department migration). All are handled by the same steps — only the baseline list
 changes.
 
+### 4.0 If your working copy has CRLF line endings (Windows)
+
+Symptom: `npm run migration:verify-eol` exits 1, or `npm run migration:adopt` prints
+"Refusing to record migration checksums: N migration file(s) have CRLF line endings".
+Nothing is lost — the files are tracked, and the reviewed bytes are in Git.
+
+One-time recovery (this discards nothing that is committed):
+
+```bash
+git config core.autocrlf false
+rm -rf prisma/migrations
+git checkout -- prisma/migrations
+npm run migration:verify-eol        # expect: All 22 migration files use LF line endings.
+npm run migration:manifest          # expect: Release manifest matches 22 migration files.
+```
+
+`.gitattributes` keeps new clones correct, so this is only needed for a clone made before the pin
+existed (or a file rewritten by an editor that "fixed" the line endings). Never normalise the bytes
+by hand and never regenerate the manifest to match a CRLF tree: the manifest records what was
+reviewed and deployed.
+
 ### 4.1 Pre-flight (owner, read-only)
 
 1. Take a fresh backup and verify it restores into a disposable local PostgreSQL 17 database.
@@ -203,6 +243,7 @@ changes.
    migrations since this document was written, and the ledger must be reviewed before anything else.
 3. Confirm the target build is the one this document applies to:
    ```bash
+   npm run migration:verify-eol    # checkout is byte-identical to the reviewed files
    npm run migration:manifest      # release manifest must match the files
    npm run test:run                # schema + adoption logic
    ```

@@ -49,6 +49,7 @@ import { fileURLToPath } from 'node:url'
 import {
   PRISMA_LEDGER_DDL,
   buildFeatureQuery,
+  crlfWarnings,
   evaluateCheckpoints,
   readMigrations,
   readReleaseManifest,
@@ -62,6 +63,7 @@ const KEEP = process.env.VERIFY_KEEP === '1'
 const DB_PREFIX = 'prisma_engine_verify_'
 
 const migrations = readMigrations()
+for (const warning of crlfWarnings(migrations)) process.stderr.write(`${warning}\n`)
 const manifest = readReleaseManifest()
 const names = migrations.map((migration) => migration.name)
 

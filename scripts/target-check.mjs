@@ -47,6 +47,7 @@
 import {
   buildAdoptionPlan,
   buildFeatureQuery,
+  crlfWarnings,
   evaluateCheckpoints,
   readMigrations,
   readReleaseManifest,
@@ -406,6 +407,7 @@ function main() {
   }
 
   const migrations = readMigrations();
+  for (const warning of crlfWarnings(migrations)) process.stderr.write(`${warning}\n`);
   const manifest = readReleaseManifest();
   const manifestCheck = verifyReleaseManifest(migrations, manifest);
   const matching = evaluateCheckpoints(features);

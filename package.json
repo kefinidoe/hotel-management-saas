@@ -21,6 +21,7 @@
     "seed": "tsx prisma/seed.ts",
     "db:verify": "tsx scripts/verify-database-target.ts",
     "migration:manifest": "node scripts/migration-ledger.mjs manifest --check",
+    "migration:verify-eol": "node scripts/verify-migration-eol.mjs",
     "migration:checkpoints": "node scripts/migration-ledger.mjs checkpoints",
     "migration:adopt": "node scripts/migrate-adopt.mjs",
     "migration:rehearse": "node scripts/migration-rehearsal.mjs",

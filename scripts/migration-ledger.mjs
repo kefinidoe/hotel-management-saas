@@ -118,6 +118,23 @@ export function assertLfMigrationFiles(migrations) {
 }
 
 /**
+ * Operator-facing warnings for migrations checked out with CRLF line endings.
+ *
+ * Shared by the verification CLIs so a CRLF working copy is never silently
+ * tolerated: the digest comparison uses the LF (Git) bytes, which is only safe
+ * because adoption refuses to record checksums from such a checkout.
+ */
+export function crlfWarnings(migrations) {
+  return migrations
+    .filter((migration) => migration.hasCrlfEol)
+    .map(
+      (migration) =>
+        `! Migration '${migration.name}' has CRLF line endings in this checkout; digests are compared using the LF (Git) bytes. ` +
+        "Restore LF with: git config core.autocrlf false && rm -rf prisma/migrations && git checkout -- prisma/migrations"
+    );
+}
+
+/**
  * Schema features used by the checkpoint probes.
  *
  * Each entry is a self-contained SQL predicate returning a boolean, evaluated
@@ -681,18 +698,12 @@ export function readReleaseManifest(manifestPath = RELEASE_MANIFEST_PATH) {
  */
 export function verifyReleaseManifest(migrations, manifest) {
   const problems = [];
-  const warnings = [];
+  const warnings = crlfWarnings(migrations);
   if (!manifest) return { problems: ["prisma/migration-release-manifest.json is missing."], warnings, unchecked: [] };
 
   const listed = new Map(manifest.migrations.map((entry) => [entry.name, entry.sha256]));
   for (const migration of migrations) {
     const digest = migration.checksum;
-    if (migration.hasCrlfEol) {
-      warnings.push(
-        `Migration '${migration.name}' has CRLF line endings in this checkout; it is compared by its LF (Git) bytes. ` +
-          "Restore LF with: git config core.autocrlf false && rm -rf prisma/migrations && git checkout -- prisma/migrations"
-      );
-    }
     if (!listed.has(migration.name)) {
       problems.push(`Migration '${migration.name}' is not listed in the release manifest.`);
     } else if (listed.get(migration.name) !== digest) {

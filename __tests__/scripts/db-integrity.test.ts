@@ -2,7 +2,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 
-import { applyPendingMigrations } from "../schema/migration-runner";
+import { applyPendingMigrations, PGLITE_MIGRATION_TIMEOUT_MS } from "../schema/migration-runner";
 import {
   buildChecks,
   buildRowCountCheck,
@@ -106,7 +106,9 @@ describe("db-integrity — against the real migration chain (PGlite)", () => {
       INSERT INTO "Guest" (id, "hotelId", "fullName", "createdAt", "updatedAt")
       VALUES ('guest-a', 'hotel-a', 'Alice', now(), now());
     `);
-  }, 120_000);
+    // Same shared budget as the schema suites: the full migration chain in WASM
+    // Postgres is the slow part, and it is slower again on Windows.
+  }, PGLITE_MIGRATION_TIMEOUT_MS);
 
   afterAll(async () => {
     await db?.close();
