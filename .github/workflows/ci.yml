@@ -53,10 +53,13 @@ jobs:
         # GitHub runners can reach binaries.prisma.sh.
         run: npm ci --no-audit --no-fund
 
-      - name: Report the toolchain
+      - name: Assert the Node.js toolchain
+        # Fails loudly if the runner's Node major drifts from .nvmrc/engines.node,
+        # instead of quietly verifying a version the project does not support.
         run: |
           node --version
           npm --version
+          node -e "const major = process.versions.node.split('.')[0]; if (major !== process.env.NODE_VERSION) { console.error('Expected Node ' + process.env.NODE_VERSION + ', got ' + process.versions.node); process.exit(1); } console.log('Node ' + process.versions.node + ' matches the pinned major ' + process.env.NODE_VERSION);"
 
       - name: Prisma Client matches prisma/schema.prisma
         run: npm run check:prisma-client
