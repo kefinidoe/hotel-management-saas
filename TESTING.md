@@ -222,6 +222,20 @@ npm run test:ui
 npm run test:coverage
 ```
 
+### Node.js version
+
+The project runs on **Node.js 24**. `.nvmrc` and `package.json`'s `engines.node` (`>=24.0.0`) both
+say so, and CI installs 24 on both operating systems:
+
+```bash
+nvm use             # reads .nvmrc -> 24
+node --version      # v24.x
+```
+
+`vitest@5` supports `^22.12.0 || ^24.0.0 || >=26.0.0`; Node 24 is the supported line this project
+tests and deploys on. Node 22 still runs the suite locally, but `npm install` will warn with
+`EBADENGINE`, and nothing in CI or the deployment checklist is verified on it.
+
 ### Windows checkouts
 
 Migration checksums are byte-level: Prisma hashes the raw bytes of `migration.sql`. Git stores those
@@ -270,7 +284,8 @@ absent, which is the expected CI state.
 
 ## Test Results Summary
 
-Latest full run on the worktree (Node 22, Linux):
+Latest full local run (Node 22.22.3 on Linux); CI runs the identical suite on Node 24 on
+`ubuntu-latest` and `windows-latest` and reports the same counts:
 
 ```
 Test Files  68 passed (68)

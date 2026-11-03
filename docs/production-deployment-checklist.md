@@ -70,6 +70,12 @@ ambient variable. An empty check must fail on every machine, whatever the develo
 
 ## 3. Prisma engine
 
+**Runtime.** Build and run on **Node.js 24** (`.nvmrc` = `24`, `package.json` `engines.node` =
+`>=24.0.0`, CI installs 24 on Ubuntu and Windows). Do not let the build image or the platform drift
+to another major: the Prisma engine is loaded into the running Node ABI, and
+`npm run native-engine:verify` must be re-run on whichever major actually serves traffic. If the
+platform selects Node from `engines.node`, this field is what it will honour.
+
 The client must run on the **native** engine:
 
 * `prisma generate` (or `npm ci` without `--ignore-scripts`) must be able to reach `binaries.prisma.sh`;
