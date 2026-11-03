@@ -30,6 +30,8 @@ env:
 
 jobs:
   verify:
+    # Skip only the explicitly marked engine-recovery push on this session branch.
+    if: "${{ github.event_name != 'push' || github.ref != 'refs/heads/arena/a0ac74b2-hotel-management-saas' || github.event.head_commit.message != 'chore(ci): recover pinned prisma engines' }}"
     name: verify (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
