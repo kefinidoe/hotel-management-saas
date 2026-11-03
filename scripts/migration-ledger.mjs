@@ -129,7 +129,7 @@ export function crlfWarnings(migrations) {
     .filter((migration) => migration.hasCrlfEol)
     .map(
       (migration) =>
-        `! Migration '${migration.name}' has CRLF line endings in this checkout; digests are compared using the LF (Git) bytes. ` +
+        `Migration '${migration.name}' has CRLF line endings in this checkout; digests are compared using the LF (Git) bytes. ` +
         "Restore LF with: git config core.autocrlf false && rm -rf prisma/migrations && git checkout -- prisma/migrations"
     );
 }

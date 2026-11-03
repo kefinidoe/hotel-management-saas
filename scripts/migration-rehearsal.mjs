@@ -138,7 +138,7 @@ function createContext(options, psqlBin) {
   const prefix = `hotel_saas_rehearsal_${Date.now().toString(36)}`;
   const created = [];
   const migrations = readMigrations();
-  for (const warning of crlfWarnings(migrations)) process.stderr.write(`${warning}\n`);
+  for (const warning of crlfWarnings(migrations)) process.stderr.write(`! ${warning}\n`);
   const manifest = readReleaseManifest();
 
   const maintenanceUrl = databaseUrl(base.toString(), options.maintenance);
