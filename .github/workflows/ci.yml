@@ -74,6 +74,13 @@ jobs:
           DIRECT_URL: postgresql://ci_placeholder:ci_placeholder@127.0.0.1:5432/ci_placeholder_no_database
         run: npx prisma validate --schema prisma/schema.prisma
 
+      - name: Database command safeguards
+        # Static and behavioural checks that the Prisma scripts still route through
+        # scripts/prisma-safe.mjs, that migrate dev/reset/db push stay refused for a
+        # remote target, and that the identity rules keep their shape. No database
+        # is contacted: every case runs with --print-target or reads source text.
+        run: npx vitest run __tests__/scripts/prisma-script-guardrails.test.ts __tests__/safety/prisma-command-guard.test.ts __tests__/safety/database-identity.test.ts __tests__/scripts/db-integrity-identity.test.ts
+
       - name: Migration files are the reviewed LF bytes
         run: |
           node scripts/verify-migration-eol.mjs

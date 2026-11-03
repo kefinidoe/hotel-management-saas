@@ -111,7 +111,11 @@ There are 19 reviewed migrations, checksum-pinned in `prisma/migration-release-m
   database.
 
 Never run `migrate dev`, `db push`, `migrate resolve`, or reset against Supabase or any
-populated/shared database.
+populated/shared database. `npm run prisma:deploy` is the only approved remote migration command;
+`prisma:migrate` (migrate dev) is refused for a remote target because Prisma would create and drop a
+shadow database on the server, and `migrate reset` is refused for any remote database. These rules
+are enforced by `scripts/prisma-safe.mjs`; the full policy, including what a hand-typed
+`npx prisma ...` does *not* go through, is in [`docs/database-operation-policy.md`](database-operation-policy.md).
 
 `npm run seed` inserts fictional demo hotels and users. It is refused unless both database URLs
 point to the same loopback database named `hotel_saas_demo_<suffix>`,

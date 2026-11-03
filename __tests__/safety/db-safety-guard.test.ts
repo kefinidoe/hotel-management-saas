@@ -55,16 +55,16 @@ describe("Database Safety Guard — Fail-Closed Behavior", () => {
     expect(() =>
       assertDatabaseSafety({
         saasEnvironment: undefined,
-        saasDatabaseIdentifier: "saas-hotel-db",
-        databaseUrl: "postgresql://postgres.saas-hotel-db:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
+        saasDatabaseIdentifier: "saashoteldb123456789",
+        databaseUrl: "postgresql://postgres.saashoteldb123456789:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
       })
     ).toThrow(DatabaseSafetyError);
 
     expect(() =>
       assertDatabaseSafety({
         saasEnvironment: "",
-        saasDatabaseIdentifier: "saas-hotel-db",
-        databaseUrl: "postgresql://postgres.saas-hotel-db:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
+        saasDatabaseIdentifier: "saashoteldb123456789",
+        databaseUrl: "postgresql://postgres.saashoteldb123456789:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
       })
     ).toThrow(/SAAS_ENVIRONMENT environment variable is MISSING/);
   });
@@ -74,8 +74,8 @@ describe("Database Safety Guard — Fail-Closed Behavior", () => {
       expect(() =>
         assertDatabaseSafety({
           saasEnvironment: invalidEnv,
-          saasDatabaseIdentifier: "saas-hotel-db",
-          databaseUrl: "postgresql://postgres.saas-hotel-db:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
+          saasDatabaseIdentifier: "saashoteldb123456789",
+          databaseUrl: "postgresql://postgres.saashoteldb123456789:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
         })
       ).toThrow(/SAAS_ENVIRONMENT must be strictly 'saas'/);
     }
@@ -86,7 +86,7 @@ describe("Database Safety Guard — Fail-Closed Behavior", () => {
       assertDatabaseSafety({
         saasEnvironment: "saas",
         saasDatabaseIdentifier: undefined,
-        databaseUrl: "postgresql://postgres.saas-hotel-db:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
+        databaseUrl: "postgresql://postgres.saashoteldb123456789:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
       })
     ).toThrow(/SAAS_DATABASE_IDENTIFIER environment variable is MISSING/);
 
@@ -94,7 +94,7 @@ describe("Database Safety Guard — Fail-Closed Behavior", () => {
       assertDatabaseSafety({
         saasEnvironment: "saas",
         saasDatabaseIdentifier: "   ",
-        databaseUrl: "postgresql://postgres.saas-hotel-db:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
+        databaseUrl: "postgresql://postgres.saashoteldb123456789:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
       })
     ).toThrow(/SAAS_DATABASE_IDENTIFIER environment variable is MISSING/);
   });
@@ -103,7 +103,7 @@ describe("Database Safety Guard — Fail-Closed Behavior", () => {
     expect(() =>
       assertDatabaseSafety({
         saasEnvironment: "saas",
-        saasDatabaseIdentifier: "saas-hotel-db",
+        saasDatabaseIdentifier: "saashoteldb123456789",
         databaseUrl: "",
       })
     ).toThrow(/DATABASE_URL is missing or empty/);
@@ -157,9 +157,9 @@ describe("Database Safety Guard — Explicit Config Is Hermetic", () => {
    */
   const populated = {
     SAAS_ENVIRONMENT: "saas",
-    SAAS_DATABASE_IDENTIFIER: "saas-hotel-db",
-    DATABASE_URL: "postgresql://postgres.saas-hotel-db:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
-    DIRECT_URL: "postgresql://postgres:secret@db.saas-hotel-db.supabase.co:5432/postgres",
+    SAAS_DATABASE_IDENTIFIER: "saashoteldb123456789",
+    DATABASE_URL: "postgresql://postgres.saashoteldb123456789:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
+    DIRECT_URL: "postgresql://postgres:secret@db.saashoteldb123456789.supabase.co:5432/postgres",
   };
 
   it("does not borrow a populated process.env for an explicit undefined", () => {
@@ -167,7 +167,7 @@ describe("Database Safety Guard — Explicit Config Is Hermetic", () => {
       expect(() =>
         assertDatabaseSafety({
           saasEnvironment: undefined,
-          saasDatabaseIdentifier: "saas-hotel-db",
+          saasDatabaseIdentifier: "saashoteldb123456789",
           databaseUrl: populated.DATABASE_URL,
         })
       ).toThrow(/SAAS_ENVIRONMENT environment variable is MISSING/);
@@ -183,7 +183,7 @@ describe("Database Safety Guard — Explicit Config Is Hermetic", () => {
       expect(() =>
         assertDatabaseSafety({
           saasEnvironment: "saas",
-          saasDatabaseIdentifier: "saas-hotel-db",
+          saasDatabaseIdentifier: "saashoteldb123456789",
           databaseUrl: undefined,
         })
       ).toThrow(/DATABASE_URL is missing or empty/);
@@ -194,7 +194,7 @@ describe("Database Safety Guard — Explicit Config Is Hermetic", () => {
     withProcessEnvironment(populated, () => {
       expect(() =>
         assertDatabaseSafety({
-          saasDatabaseIdentifier: "saas-hotel-db",
+          saasDatabaseIdentifier: "saashoteldb123456789",
           databaseUrl: populated.DATABASE_URL,
         })
       ).toThrow(/SAAS_ENVIRONMENT environment variable is MISSING/);
@@ -204,7 +204,7 @@ describe("Database Safety Guard — Explicit Config Is Hermetic", () => {
   it("still reads process.env when called with no config at all", () => {
     withProcessEnvironment(populated, () => {
       const result = assertDatabaseSafety();
-      expect(result.identifierMatched).toBe("saas-hotel-db");
+      expect(result.identifierMatched).toBe("saashoteldb123456789");
       expect(result.database).toBe("postgres");
     });
   });
@@ -216,7 +216,7 @@ describe("Database Safety Guard — Explicit Config Is Hermetic", () => {
       expect(() =>
         assertDatabaseSafety({
           saasEnvironment: "saas",
-          saasDatabaseIdentifier: "saas-hotel-db",
+          saasDatabaseIdentifier: "saashoteldb123456789",
           databaseUrl: undefined,
           directUrl: undefined,
         })
@@ -229,26 +229,26 @@ describe("Database Safety Guard — Approved Target Acceptance", () => {
   it("accepts Supabase transaction pooler URL matching approved identifier in user prefix", () => {
     const result = assertDatabaseSafety({
       saasEnvironment: "saas",
-      saasDatabaseIdentifier: "hotel-saas-dev-1234",
-      databaseUrl: "postgresql://postgres.hotel-saas-dev-1234:pw123@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?pgbouncer=true",
+      saasDatabaseIdentifier: "hotelsaasdev12345678",
+      databaseUrl: "postgresql://postgres.hotelsaasdev12345678:pw123@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?pgbouncer=true",
     });
 
-    expect(result.identifierMatched).toBe("hotel-saas-dev-1234");
+    expect(result.identifierMatched).toBe("hotelsaasdev12345678");
     expect(result.host).toBe("aws-0-eu-west-1.pooler.supabase.com");
     expect(result.port).toBe("6543");
     expect(result.database).toBe("postgres");
-    expect(result.userPrefix).toBe("hotel-saas-dev-1234");
+    expect(result.userPrefix).toBe("hotelsaasdev12345678");
   });
 
   it("accepts Supabase direct URL matching approved identifier in host subdomain", () => {
     const result = assertDatabaseSafety({
       saasEnvironment: "saas",
-      saasDatabaseIdentifier: "hotel-saas-dev-1234",
-      databaseUrl: "postgresql://postgres:pw123@db.hotel-saas-dev-1234.supabase.co:5432/postgres",
+      saasDatabaseIdentifier: "hotelsaasdev12345678",
+      databaseUrl: "postgresql://postgres:pw123@db.hotelsaasdev12345678.supabase.co:5432/postgres",
     });
 
-    expect(result.identifierMatched).toBe("hotel-saas-dev-1234");
-    expect(result.host).toBe("db.hotel-saas-dev-1234.supabase.co");
+    expect(result.identifierMatched).toBe("hotelsaasdev12345678");
+    expect(result.host).toBe("db.hotelsaasdev12345678.supabase.co");
     expect(result.port).toBe("5432");
     expect(result.database).toBe("postgres");
   });
@@ -269,11 +269,11 @@ describe("Database Safety Guard — Approved Target Acceptance", () => {
   it("accepts both DATABASE_URL and DIRECT_URL when both match approved identifier", () => {
     const result = assertDatabaseSafety({
       saasEnvironment: "saas",
-      saasDatabaseIdentifier: "hotel-saas-dev-1234",
-      databaseUrl: "postgresql://postgres.hotel-saas-dev-1234:pw123@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?pgbouncer=true",
-      directUrl: "postgresql://postgres:pw123@db.hotel-saas-dev-1234.supabase.co:5432/postgres",
+      saasDatabaseIdentifier: "hotelsaasdev12345678",
+      databaseUrl: "postgresql://postgres.hotelsaasdev12345678:pw123@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?pgbouncer=true",
+      directUrl: "postgresql://postgres:pw123@db.hotelsaasdev12345678.supabase.co:5432/postgres",
     });
 
-    expect(result.identifierMatched).toBe("hotel-saas-dev-1234");
+    expect(result.identifierMatched).toBe("hotelsaasdev12345678");
   });
 });

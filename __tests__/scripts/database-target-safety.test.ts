@@ -7,22 +7,35 @@ const BACKUP_SCRIPT = readFileSync(resolve(__dirname, "../../scripts/backup-db.m
 const RESTORE_SCRIPT = readFileSync(resolve(__dirname, "../../scripts/restore-db.mjs"), "utf8");
 
 describe("standalone maintenance database target guard", () => {
-  it("accepts a target whose database name matches the explicit identifier", () => {
+  it("binds a loopback target by database name", () => {
     expect(
+      assertDatabaseTarget({
+        environment: "saas",
+        identifier: "hotel_stage",
+        databaseUrl: "postgresql://operator:secret@127.0.0.1:5432/hotel_stage",
+      })
+    ).toMatchObject({ host: "127.0.0.1", database: "hotel_stage", kind: "loopback", identifierMatched: "hotel_stage" });
+  });
+
+  it("refuses a remote target that only matches by database name", () => {
+    // Round 28: every Supabase project is called "postgres", so a database-name
+    // match identifies nothing. A remote host must be a Supabase endpoint whose
+    // project reference equals the identifier.
+    expect(() =>
       assertDatabaseTarget({
         environment: "saas",
         identifier: "hotel_stage",
         databaseUrl: "postgresql://operator:secret@db.example.test:5432/hotel_stage",
       })
-    ).toMatchObject({ host: "db.example.test", database: "hotel_stage", identifierMatched: "hotel_stage" });
+    ).toThrow(/does not match the approved SAAS_DATABASE_IDENTIFIER/);
   });
 
   it("accepts Supabase pooler targets only when the project reference matches", () => {
     expect(() =>
       assertDatabaseTarget({
         environment: "saas",
-        identifier: "projectref",
-        databaseUrl: "postgresql://postgres.projectref:secret@aws-0-region.pooler.supabase.com:6543/postgres",
+        identifier: "projectref1234567890",
+        databaseUrl: "postgresql://postgres.projectref1234567890:secret@aws-0-region.pooler.supabase.com:6543/postgres",
       })
     ).not.toThrow();
   });

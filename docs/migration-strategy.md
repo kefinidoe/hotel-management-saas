@@ -252,7 +252,7 @@ reviewed and deployed.
 
 ```bash
 SAAS_ENVIRONMENT=saas \
-SAAS_DATABASE_IDENTIFIER=<project-ref-or-db-name> \
+SAAS_DATABASE_IDENTIFIER=<project-ref> \
 DIRECT_URL='postgresql://...:5432/postgres' \
 npm run migration:adopt
 ```
