@@ -9,11 +9,10 @@
  * `migrate-adopt` can write (it baselines the ledger). Producing evidence about
  * a production database must not require a tool that is *able* to write to it.
  * This script has no write path at all: there is no --execute here, and every
- * statement is a SELECT issued on a connection whose session default is
- * `default_transaction_read_only = on`, enforced by the server rather than by
- * this script's good intentions. That setting is verified before any report is
- * trusted, so a server or pooler that silently ignores it fails the check
- * instead of quietly accepting writes later.
+ * query is executed in a server-enforced `BEGIN READ ONLY` transaction. Each
+ * query checks `transaction_read_only` on that same connection before its result
+ * is trusted, then rolls back. A pooler that ignores startup PGOPTIONS cannot
+ * silently weaken the check.
  *
  * What it reports
  * ---------------
@@ -35,7 +34,8 @@
  * only for a loopback host, which is how the check itself is rehearsed against a
  * disposable local database. Port 6543 (Supabase transaction pooler) is refused:
  * a pooler can hand consecutive statements to different backends, so session
- * state -- including this script's read-only default -- is not reliable there.
+ * state and multi-statement transactions can behave differently there; the
+ * script deliberately retains this existing restriction.
  *
  * Usage: node scripts/target-check.mjs [--url <url>] [--psql <path>]
  *          [--expect-checkpoint <id[,id...]>] [--expect-ledger present|absent]
@@ -47,13 +47,15 @@
 import {
   buildAdoptionPlan,
   buildFeatureQuery,
+  crlfWarnings,
   evaluateCheckpoints,
   readMigrations,
   readReleaseManifest,
   verifyReleaseManifest,
 } from "./migration-ledger.mjs";
 import { assertDatabaseTarget, DatabaseTargetSafetyError } from "./database-target-safety.mjs";
-import { psqlVersion, queryJson, queryScalar, PsqlError, resolvePsql } from "./psql.mjs";
+import { psqlVersion, PsqlError, resolvePsql } from "./psql.mjs";
+import { queryReadOnlyJson } from "./read-only-query.mjs";
 import { sanitiseForPgTools } from "./pg-url.mjs";
 
 const USAGE = `Usage: node scripts/target-check.mjs [options]
@@ -76,14 +78,9 @@ Required environment:
   SAAS_ENVIRONMENT=saas          (or 'rehearsal' for a loopback database)
   SAAS_DATABASE_IDENTIFIER=<id>  The approved project/database identifier.
 
-Every statement runs with default_transaction_read_only=on. This tool has no
---execute, no --apply and no DDL/DML path.
+Every inspection runs in a server-verified read-only transaction. This tool has
+no --execute, no --apply and no DDL/DML path.
 `;
-
-// Session-level read-only default. Set through PGOPTIONS so it is part of the
-// connection, not something a later statement in this script could undo: the
-// server rejects writes with "cannot execute ... in a read-only transaction".
-const READ_ONLY_PGOPTIONS = "-c default_transaction_read_only=on";
 
 function parseArgs(argv) {
   const options = {
@@ -219,7 +216,7 @@ function buildFingerprintQuery() {
 }
 
 function fetchIdentity(url, psqlBin) {
-  return queryJson({
+  return queryReadOnlyJson({
     url,
     psqlBin,
     sql: `SELECT json_build_object(
@@ -238,7 +235,7 @@ function fetchIdentity(url, psqlBin) {
 
 function fetchLedger(url, psqlBin, ledgerExists) {
   if (!ledgerExists) return [];
-  const raw = queryScalar({
+  return queryReadOnlyJson({
     url,
     psqlBin,
     sql: `SELECT coalesce(json_agg(row_to_json(rows))::text, '[]')
@@ -249,7 +246,6 @@ function fetchLedger(url, psqlBin, ledgerExists) {
             ORDER BY "started_at", "migration_name"
           ) rows;`,
   });
-  return JSON.parse(raw || "[]");
 }
 
 function compareChecksums(ledgerRows, migrations, manifest) {
@@ -280,7 +276,7 @@ function printHumanReport(report) {
   lines.push(`Server version       : ${report.target.serverVersion}`);
   lines.push(`psql client          : ${report.psqlVersion}`);
   lines.push(`Target binding       : ${report.target.identifierMatched}`);
-  lines.push(`Session read-only    : ${report.target.defaultReadOnly} (in transaction: ${report.target.readOnly})`);
+  lines.push(`Read-only transaction: ${report.target.readOnly} (session default: ${report.target.defaultReadOnly})`);
 
   const ledger = report.ledger;
   lines.push(
@@ -319,7 +315,7 @@ function printHumanReport(report) {
   lines.push("");
   lines.push(
     report.ok
-      ? "Result: PASS. No statements were written (every statement was a SELECT on a read-only session)."
+      ? "Result: PASS. No statements were written (each query ran in a verified read-only transaction)."
       : "Result: FAIL. See the failed checks above."
   );
   return lines.join("\n");
@@ -370,7 +366,7 @@ function main() {
     process.stderr.write(
       "The connection string uses port 6543 (transaction pooler). Read it through the session/direct " +
         "connection (port 5432) in DIRECT_URL: a pooler can move statements between backends, so the " +
-        "read-only session default is not guaranteed.\n"
+        "this tool intentionally requires a session/direct connection.\n"
     );
     return 1;
   }
@@ -384,10 +380,6 @@ function main() {
     return 1;
   }
 
-  // Attach the read-only default before the first connection. Every helper in
-  // scripts/psql.mjs inherits process.env, so this applies to all statements.
-  process.env.PGOPTIONS = `${process.env.PGOPTIONS ?? ""} ${READ_ONLY_PGOPTIONS}`.trim();
-
   let identity;
   let ledgerRows;
   let features;
@@ -395,8 +387,8 @@ function main() {
   try {
     identity = fetchIdentity(url, psqlBin);
     ledgerRows = fetchLedger(url, psqlBin, identity.ledgerExists);
-    features = queryJson({ url, psqlBin, sql: buildFeatureQuery() });
-    fingerprint = queryJson({ url, psqlBin, sql: buildFingerprintQuery() });
+    features = queryReadOnlyJson({ url, psqlBin, sql: buildFeatureQuery() });
+    fingerprint = queryReadOnlyJson({ url, psqlBin, sql: buildFingerprintQuery() });
   } catch (error) {
     if (error instanceof PsqlError) {
       process.stderr.write(`Could not read the target database (read-only): ${error.message}\n`);
@@ -406,6 +398,7 @@ function main() {
   }
 
   const migrations = readMigrations();
+  for (const warning of crlfWarnings(migrations)) process.stderr.write(`! ${warning}\n`);
   const manifest = readReleaseManifest();
   const manifestCheck = verifyReleaseManifest(migrations, manifest);
   const matching = evaluateCheckpoints(features);
@@ -419,9 +412,9 @@ function main() {
   const checks = [];
 
   checks.push({
-    name: "read-only session enforced by the server",
-    ok: identity.defaultReadOnly === "on" && identity.readOnly === "on",
-    detail: `default_transaction_read_only=${identity.defaultReadOnly}, transaction_read_only=${identity.readOnly}`,
+    name: "read-only transaction enforced for every query",
+    ok: identity.readOnly === "on",
+    detail: `transaction_read_only=${identity.readOnly}; session default=${identity.defaultReadOnly}`,
   });
   checks.push({
     name: "release manifest matches the repository",

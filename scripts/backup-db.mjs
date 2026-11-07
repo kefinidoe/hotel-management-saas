@@ -21,11 +21,12 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sanitiseForPgTools } from "./pg-url.mjs";
 import { assertDatabaseTarget } from "./database-target-safety.mjs";
+import { loadEnvFiles } from "./env-file.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -33,26 +34,6 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 function arg(name, fallback = undefined) {
   const index = process.argv.indexOf(`--${name}`);
   return index !== -1 && process.argv[index + 1] ? process.argv[index + 1] : fallback;
-}
-
-// ── .env ──────────────────────────────────────────────────────────────────────
-function readEnv() {
-  const file = join(ROOT, ".env");
-  if (!existsSync(file)) return {};
-  const env = {};
-  for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
-    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (!match) continue;
-    let value = match[2].trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    env[match[1]] = value;
-  }
-  return env;
 }
 
 // ── finding pg_dump ───────────────────────────────────────────────────────────
@@ -90,7 +71,10 @@ function run(command, args, { quiet = false } = {}) {
 
 // ── main ──────────────────────────────────────────────────────────────────────
 async function main() {
-  const env = { ...readEnv(), ...process.env };
+  // One loader for the whole repository: prisma/.env then .env, never overriding
+  // a variable the caller already exported (scripts/env-file.mjs).
+  loadEnvFiles({ rootDir: ROOT });
+  const env = process.env;
   const keep = Number(arg("keep", "30"));
   const outDir = resolve(ROOT, arg("out", "backups"));
 

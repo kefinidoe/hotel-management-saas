@@ -334,6 +334,7 @@ vi.doMock("@/lib/prisma", () => ({
         // The test double cannot exercise PostgreSQL advisory locks, but it does
         // execute the real quota check and its writes through this transaction client.
         $queryRaw: async () => [],
+        auditLog: { create: async ({ data }: any) => ({ ...data }) },
         user: {
           create: async ({ data }: any) => {
             const id = data.id || `user-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;

@@ -434,6 +434,16 @@ vi.doMock("@/lib/prisma", () => ({
             }
             return results;
           },
+          updateMany: async ({ where, data }: any) => {
+            const item = db.inventoryItems.get(where.id);
+            if (!item || item.hotelId !== where.hotelId || item.currentStock < Number(where.currentStock.gte)) return { count: 0 };
+            item.currentStock -= Number(data.currentStock.decrement);
+            return { count: 1 };
+          },
+          findUniqueOrThrow: async ({ where }: any) => {
+            const item = db.inventoryItems.get(where.id_hotelId.id);
+            return { ...item, currentStock: new (await import("@prisma/client/runtime/library")).Decimal(item.currentStock) };
+          },
           update: async ({ where, data }: any) => {
             const id = where?.id_hotelId ? where.id_hotelId.id : where.id;
             const hotelId = where?.id_hotelId ? where.id_hotelId.hotelId : undefined;
@@ -658,7 +668,7 @@ describe("Phase 4B: Restaurant POS Pay-Now Idempotency & Concurrency Hardening",
     expect(db.payments.size).toBe(1);
     expect(db.folioItems.size).toBe(1);
     expect(db.stockMovements.length).toBe(1);
-    expect(db.stockMovements[0].quantity).toBe(-2);
+    expect(Number(db.stockMovements[0].quantity)).toBe(-2);
     expect(db.inventoryItems.get("inv-a-patty").currentStock).toBe(98); // 100 - 2
   });
 

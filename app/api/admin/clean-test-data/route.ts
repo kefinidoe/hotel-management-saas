@@ -55,6 +55,11 @@ export async function POST() {
   const deletedReservationRooms = await prisma.reservationRoom.deleteMany({
     where: { reservation: { hotelId } },
   });
+  // Pricing history is protected by RESTRICT foreign keys so an accidental
+  // reservation delete cannot erase financial evidence. This endpoint is the
+  // deliberate test-data purge, so it removes the history explicitly, first.
+  const deletedPriceChanges = await prisma.reservationPriceChange.deleteMany({ where: { hotelId } });
+  const deletedPriceSnapshots = await prisma.reservationPriceSnapshot.deleteMany({ where: { hotelId } });
   const deletedReservations = await prisma.reservation.deleteMany({ where: { hotelId } });
   const deletedHousekeeping = await prisma.housekeepingTask.deleteMany({ where: { hotelId } });
   const deletedMaintenance = await prisma.maintenanceTicket.deleteMany({ where: { hotelId } });
@@ -84,6 +89,8 @@ export async function POST() {
       folios: deletedFolios.count,
       reservationRooms: deletedReservationRooms.count,
       reservations: deletedReservations.count,
+      reservationPriceSnapshots: deletedPriceSnapshots.count,
+      reservationPriceChanges: deletedPriceChanges.count,
       housekeepingTasks: deletedHousekeeping.count,
       maintenanceTickets: deletedMaintenance.count,
       stockMovements: deletedStockMovements.count,

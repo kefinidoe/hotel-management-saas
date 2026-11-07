@@ -96,6 +96,8 @@ vi.mock("@/lib/prisma", () => {
       folio: table,
       reservationRoom: table,
       reservation: table,
+      reservationPriceSnapshot: table,
+      reservationPriceChange: table,
       housekeepingTask: table,
       maintenanceTicket: table,
       stockMovement: table,

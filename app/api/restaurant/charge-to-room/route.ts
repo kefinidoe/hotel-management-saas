@@ -9,7 +9,7 @@ import {
   resolveCartLines,
   round2,
 } from "@/lib/restaurant";
-import { deductRecipeStock } from "@/lib/inventory";
+import { deductRecipeStock } from "@/lib/recipe-stock";
 import { syncLowStockAlerts } from "@/lib/notifications";
 
 type ChargeToRoomResult = {

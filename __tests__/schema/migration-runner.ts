@@ -4,6 +4,16 @@ import type { PGlite } from "@electric-sql/pglite";
 
 export const MIGRATIONS_DIR = "prisma/migrations";
 
+/**
+ * Timeout for tests and hooks that apply the full migration chain to PGlite.
+ *
+ * This is a WASM Postgres running ~22 migration files; it is legitimately slow,
+ * and markedly slower on Windows (typically 5-7s versus ~2s on Linux), which the
+ * default 5s per-test budget does not cover. The budget is raised only where this
+ * work happens, so a genuine hang anywhere else still fails fast.
+ */
+export const PGLITE_MIGRATION_TIMEOUT_MS = 120_000;
+
 export function migrationDirectories(): string[] {
   return fs
     .readdirSync(MIGRATIONS_DIR)

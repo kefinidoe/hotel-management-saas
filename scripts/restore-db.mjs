@@ -16,11 +16,12 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, statSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sanitiseForPgTools } from "./pg-url.mjs";
 import { assertDatabaseTarget } from "./database-target-safety.mjs";
+import { loadEnvFiles } from "./env-file.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -29,17 +30,6 @@ function arg(name, fallback = undefined) {
   return index !== -1 && process.argv[index + 1] ? process.argv[index + 1] : fallback;
 }
 const hasFlag = (name) => process.argv.includes(`--${name}`);
-
-function readEnv() {
-  const file = join(ROOT, ".env");
-  if (!existsSync(file)) return {};
-  const env = {};
-  for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
-    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (match) env[match[1]] = match[2].trim().replace(/^["']|["']$/g, "");
-  }
-  return env;
-}
 
 /**
  * Which database is this, really?
@@ -108,7 +98,9 @@ function findPgTool(name) {
 }
 
 async function main() {
-  const env = { ...readEnv(), ...process.env };
+  // One loader for the whole repository (scripts/env-file.mjs).
+  loadEnvFiles({ rootDir: ROOT });
+  const env = process.env;
   const file = arg("file");
   const target = arg("target");
 

@@ -16,6 +16,10 @@ export async function POST(req: Request) {
   const auth = await requireAuth();
   if (auth instanceof NextResponse) return auth;
 
+  const { limitAuthRequest } = await import("@/lib/auth-rate-limit");
+  const limited = await limitAuthRequest(req, "password", auth.user.id);
+  if (limited) return limited;
+
   const body = await req.json();
   const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
   const newPassword = body.newPassword;

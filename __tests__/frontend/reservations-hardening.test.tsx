@@ -81,7 +81,8 @@ function renderCalendar(responseBody: unknown, rooms = [room]) {
     <ReservationsClient
       rooms={rooms}
       roomTypes={[roomType]}
-      currentUserRole={"RECEPTIONIST" as never}
+      currency="KES"
+        currentUserRole={"RECEPTIONIST" as never}
     />,
   );
 }
@@ -180,6 +181,7 @@ describe("ReservationsClient response and drag/drop hardening", () => {
       <ReservationsClient
         rooms={[room]}
         roomTypes={[roomType]}
+        currency="KES"
         currentUserRole={"RECEPTIONIST" as never}
       />,
     );
@@ -204,7 +206,8 @@ describe("ReservationsClient response and drag/drop hardening", () => {
       .mockReturnValueOnce(mutationRequest.promise)
       .mockResolvedValueOnce(jsonResponse([]));
     render(
-      <ReservationsClient rooms={[room]} roomTypes={[roomType]} currentUserRole={"RECEPTIONIST" as never} />,
+      <ReservationsClient rooms={[room]} roomTypes={[roomType]} currency="KES"
+        currentUserRole={"RECEPTIONIST" as never} />,
     );
     const transfer = await dragReservation();
     fireEvent.drop(
@@ -243,7 +246,8 @@ describe("ReservationsClient response and drag/drop hardening", () => {
       .mockReturnValueOnce(mutationRequest.promise)
       .mockResolvedValueOnce(jsonResponse([]));
     render(
-      <ReservationsClient rooms={[room]} roomTypes={[roomType]} currentUserRole={"RECEPTIONIST" as never} />,
+      <ReservationsClient rooms={[room]} roomTypes={[roomType]} currency="KES"
+        currentUserRole={"RECEPTIONIST" as never} />,
     );
     fireEvent.click(await screen.findByText(validReservation.guestName));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
@@ -270,7 +274,8 @@ describe("ReservationsClient response and drag/drop hardening", () => {
   it("keeps a create-modal failure labeled with the week where the modal was opened", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse([])).mockResolvedValueOnce(jsonResponse([]));
     render(
-      <ReservationsClient rooms={[room]} roomTypes={[roomType]} currentUserRole={"RECEPTIONIST" as never} />,
+      <ReservationsClient rooms={[room]} roomTypes={[roomType]} currency="KES"
+        currentUserRole={"RECEPTIONIST" as never} />,
     );
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     fireEvent.click(
@@ -306,7 +311,8 @@ describe("ReservationsClient response and drag/drop hardening", () => {
     };
     fetchMock.mockReturnValueOnce(olderRequest.promise).mockReturnValueOnce(newerRequest.promise);
     render(
-      <ReservationsClient rooms={[room]} roomTypes={[roomType]} currentUserRole={"RECEPTIONIST" as never} />,
+      <ReservationsClient rooms={[room]} roomTypes={[roomType]} currency="KES"
+        currentUserRole={"RECEPTIONIST" as never} />,
     );
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: "Next week" }));
@@ -341,7 +347,8 @@ describe("ReservationsClient response and drag/drop hardening", () => {
     };
     fetchMock.mockReturnValueOnce(olderRequest.promise).mockReturnValueOnce(newerRequest.promise);
     render(
-      <ReservationsClient rooms={[room]} roomTypes={[roomType]} currentUserRole={"RECEPTIONIST" as never} />,
+      <ReservationsClient rooms={[room]} roomTypes={[roomType]} currency="KES"
+        currentUserRole={"RECEPTIONIST" as never} />,
     );
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: "Next week" }));
@@ -370,7 +377,8 @@ describe("ReservationsClient response and drag/drop hardening", () => {
       .mockReturnValueOnce(olderRequest.promise)
       .mockResolvedValueOnce(jsonResponse({ error: "Week B calendar unavailable." }, 409));
     render(
-      <ReservationsClient rooms={[room]} roomTypes={[roomType]} currentUserRole={"RECEPTIONIST" as never} />,
+      <ReservationsClient rooms={[room]} roomTypes={[roomType]} currency="KES"
+        currentUserRole={"RECEPTIONIST" as never} />,
     );
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: "Next week" }));

@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { X } from "lucide-react";
+import { useDurableMutation } from "@/components/recovery/DurableMutationProvider";
 
 function inputClass() {
   return "w-full rounded-control border border-border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent";
@@ -23,18 +24,17 @@ export default function AddItemModal({
   const [supplier, setSupplier] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const { submit: submitDurable } = useDurableMutation();
+  const requestSku = useRef<string | null>(null);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     setError(null);
-    const sku = `SKU-${name.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "-").slice(0, 20)}-${Date.now()
-      .toString()
-      .slice(-4)}`;
-    const res = await fetch("/api/inventory", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    requestSku.current ??= `SKU-${name.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "-").slice(0, 20)}-${crypto.randomUUID().slice(0, 8)}`;
+    const sku = requestSku.current;
+    try {
+    const res = await submitDurable("OPENING_BALANCE", "/api/inventory", "POST", {
         sku,
         name,
         category,
@@ -43,8 +43,7 @@ export default function AddItemModal({
         reorderLevel: Number(reorderLevel) || 0,
         costPerUnit: Number(costPerUnit) || 0,
         supplier: supplier || null,
-      }),
-    });
+      });
     setLoading(false);
     const data = await res.json();
     if (!res.ok) {
@@ -52,6 +51,10 @@ export default function AddItemModal({
       return;
     }
     onCreated();
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Network error. Retry the saved request to check its outcome.");
+      setLoading(false);
+    }
   }
 
   return (

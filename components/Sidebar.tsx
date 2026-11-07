@@ -20,6 +20,7 @@ import {
   BarChart3,
   UserCog,
   Settings,
+  Tags,
   CreditCard,
   ChevronsLeft,
   ChevronsRight,
@@ -74,6 +75,7 @@ const NAV: NavGroup[] = [
     items: [
       { label: "Staff", href: "/dashboard/staff", icon: UserCog, roles: ROLE_GROUPS.STAFF_VIEW },
       { label: "Subscription", href: "/dashboard/subscription", icon: CreditCard, roles: ROLE_GROUPS.STAFF_ADMIN },
+      { label: "Pricing & Rates", href: "/dashboard/settings/pricing", icon: Tags, roles: ROLE_GROUPS.MANAGEMENT },
       { label: "Settings", href: "/dashboard/settings", icon: Settings, roles: ROLE_GROUPS.STAFF_ADMIN },
       { label: "Audit Trail", href: "/dashboard/audit", icon: ScrollText, roles: ROLE_GROUPS.STAFF_ADMIN },
     ],

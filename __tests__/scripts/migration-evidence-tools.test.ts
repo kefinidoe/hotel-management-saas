@@ -56,7 +56,7 @@ describe("scripts/target-check.mjs — refusals before any connection", () => {
     const { status, stdout } = run("target-check.mjs", ["--help"]);
     expect(status).toBe(0);
     expect(stdout).toContain("without writing anything");
-    expect(stdout).toContain("default_transaction_read_only");
+    expect(stdout).toContain("server-verified read-only transaction");
   });
 
   it("rejects write-shaped flags outright", () => {

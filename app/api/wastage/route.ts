@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
-import type { WastageReason } from "@prisma/client";
+import { Prisma, type WastageReason } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { syncLowStockAlerts } from "@/lib/notifications";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { findActiveHotelStaff } from "@/lib/hotel-staff";
+import { inventoryRequest } from "@/lib/inventory-idempotency";
 
 const WASTAGE_REASONS = new Set<WastageReason>([
   "SPOILAGE",
@@ -72,7 +73,13 @@ export async function POST(req: Request) {
   const blocked = await requireModule(tenant.hotelId, "INVENTORY");
   if (blocked) return blocked;
 
-  const body = await req.json();
+  let body: any;
+  try { body = await req.json(); } catch {
+    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ error: "Request body must be a JSON object." }, { status: 400 });
+  }
   const inventoryItemId =
     typeof body.inventoryItemId === "string" ? body.inventoryItemId.trim() : "";
   const quantity = Number(body.quantity);
@@ -90,6 +97,7 @@ export async function POST(req: Request) {
     !inventoryItemId ||
     !Number.isFinite(quantity) ||
     quantity <= 0 ||
+    !new Prisma.Decimal(quantity).mul(100).isInteger() ||
     !WASTAGE_REASONS.has(reason as WastageReason)
   ) {
     return NextResponse.json(
@@ -98,99 +106,62 @@ export async function POST(req: Request) {
     );
   }
 
-  let accountableUserId: string | null = null;
-  let accountableName = manualAccountableName;
-  let accountableDepartment: string | null = null;
+  if (!requestedAccountableUserId && !manualAccountableName) {
+    return NextResponse.json({ error: "Choose or enter the person accountable for this wastage." }, { status: 400 });
+  }
+  if (manualAccountableName.length > 120 || department.length > 100) {
+    return NextResponse.json({ error: "Accountable name or department is too long." }, { status: 400 });
+  }
 
-  if (requestedAccountableUserId) {
-    const accountableStaff = await findActiveHotelStaff(tenant.hotelId, requestedAccountableUserId);
-    if (!accountableStaff) {
-      return NextResponse.json(
-        { error: "Choose an active staff member from this hotel who is accountable for the wastage." },
-        { status: 400 }
-      );
+  const amount = new Prisma.Decimal(quantity);
+  // The conditional decrement locks the item row and rechecks the balance in
+  // the database. All related records use that same transaction and row lock.
+  const response = await inventoryRequest(req, tenant.hotelId, tenant.userId, "WASTAGE", body, async (tx) => {
+    let accountableUserId: string | null = null;
+    let accountableName = manualAccountableName;
+    let accountableDepartment: string | null = null;
+    if (requestedAccountableUserId) {
+      const staff = await findActiveHotelStaff(tenant.hotelId, requestedAccountableUserId, tx);
+      if (!staff) return { status: 400, body: { error: "Choose an active staff member from this hotel who is accountable for the wastage." } };
+      accountableUserId = staff.user.id;
+      accountableName = staff.user.name;
+      accountableDepartment = staff.department;
     }
-    accountableUserId = accountableStaff.user.id;
-    accountableName = accountableStaff.user.name;
-    accountableDepartment = accountableStaff.department;
-  }
-
-  if (!accountableName) {
-    return NextResponse.json(
-      { error: "Choose or enter the person accountable for this wastage." },
-      { status: 400 }
-    );
-  }
-  if (accountableName.length > 120) {
-    return NextResponse.json(
-      { error: "The accountable person's name is too long." },
-      { status: 400 }
-    );
-  }
-  if (department.length > 100) {
-    return NextResponse.json(
-      { error: "The department name is too long." },
-      { status: 400 }
-    );
-  }
-
-  const item = await prisma.inventoryItem.findUnique({
-    where: { id_hotelId: { id: inventoryItemId, hotelId: tenant.hotelId } },
-  });
-  if (!item) {
-    return NextResponse.json(
-      { error: "Inventory item not found." },
-      { status: 404 }
-    );
-  }
-
-  const before = Number(item.currentStock);
-  if (quantity > before) {
-    return NextResponse.json(
-      {
-        error: `Only ${before} ${item.unit} of "${item.name}" in stock — can't log wastage of ${quantity}. If the physical count is actually lower, use Adjust Stock instead.`,
-      },
-      { status: 400 }
-    );
-  }
-  const after = before - quantity;
-  const savedDepartment = department || accountableDepartment || null;
-
-  const [wastage] = await prisma.$transaction([
-    prisma.wastage.create({
+    if (!accountableName || accountableName.length > 120) return { status: 400, body: { error: "Invalid accountable person name." } };
+    const savedDepartment = department || accountableDepartment || null;
+    const changed = await tx.inventoryItem.updateMany({
+      where: { id: inventoryItemId, hotelId: tenant.hotelId, currentStock: { gte: amount } },
+      data: { currentStock: { decrement: amount }, stockVersion: { increment: 1 } },
+    });
+    if (changed.count !== 1) {
+      const item = await tx.inventoryItem.findUnique({
+        where: { id_hotelId: { id: inventoryItemId, hotelId: tenant.hotelId } },
+      });
+      return { body: { error: item ? "Insufficient stock for this wastage." : "Inventory item not found." }, status: item ? 400 : 404 };
+    }
+    const item = await tx.inventoryItem.findUniqueOrThrow({
+      where: { id_hotelId: { id: inventoryItemId, hotelId: tenant.hotelId } },
+    });
+    const after = item.currentStock;
+    const before = after.add(amount);
+    const wastage = await tx.wastage.create({
       data: {
-        hotelId: tenant.hotelId,
-        inventoryItemId: item.id,
-        quantity,
-        reason: reason as WastageReason,
-        department: savedDepartment,
-        recordedById: tenant.userId,
-        accountableUserId,
-        accountableName,
+        hotelId: tenant.hotelId, inventoryItemId: item.id, quantity: amount,
+        reason: reason as WastageReason, department: savedDepartment,
+        recordedById: tenant.userId, accountableUserId, accountableName,
       },
-    }),
-    prisma.inventoryItem.update({
-      where: { id_hotelId: { id: item.id, hotelId: tenant.hotelId } },
-      data: { currentStock: after },
-    }),
-    prisma.stockMovement.create({
+    });
+    await tx.stockMovement.create({
       data: {
-        hotelId: tenant.hotelId,
-        inventoryItemId: item.id,
-        type: "WASTAGE",
-        quantity: -quantity,
-        beforeQty: before,
-        afterQty: after,
+        hotelId: tenant.hotelId, inventoryItemId: item.id, type: "WASTAGE",
+        quantity: amount.negated(), beforeQty: before, afterQty: after,
         reference: `Wastage: ${reason} — Accountable: ${accountableName}`,
         userId: tenant.userId,
       },
-    }),
-  ]);
+    });
+    return { status: 201, body: { ...wastage, accountableName } };
+  });
 
-  await syncLowStockAlerts(tenant.hotelId);
-
-  return NextResponse.json(
-    { ...wastage, accountableName },
-    { status: 201 }
-  );
+  if (response.ok) await syncLowStockAlerts(tenant.hotelId);
+  return response;
 }

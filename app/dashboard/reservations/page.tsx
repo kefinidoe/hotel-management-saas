@@ -25,6 +25,7 @@ export default async function ReservationsPage() {
   const initialRooms = rooms.map((r) => ({
     id: r.id,
     number: r.number,
+    roomTypeId: r.roomTypeId,
     roomTypeName: r.roomType.name,
     baseRate: Number(r.roomType.baseRate),
     status: r.status,
@@ -34,6 +35,7 @@ export default async function ReservationsPage() {
     <ReservationsClient
       rooms={initialRooms}
       roomTypes={roomTypes.map((type) => ({ ...type, baseRate: Number(type.baseRate) }))}
+      currency={tenant.hotel.currency}
       currentUserRole={tenant.role}
     />
   );

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { X } from "lucide-react";
+import { useDurableMutation } from "@/components/recovery/DurableMutationProvider";
 import { formatQty } from "@/lib/inventory";
 import type { InventoryItemRow } from "./InventoryClient";
 
@@ -18,6 +19,7 @@ export default function AdjustStockModal({
   const [reason, setReason] = useState("Physical stock count");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const { submit: submitDurable } = useDurableMutation();
 
   const delta = Number(newQuantity) - item.currentStock;
 
@@ -25,11 +27,8 @@ export default function AdjustStockModal({
     e.preventDefault();
     setLoading(true);
     setError(null);
-    const res = await fetch(`/api/inventory/${item.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ newQuantity: Number(newQuantity), reason }),
-    });
+    try {
+    const res = await submitDurable("ADJUSTMENT", `/api/inventory/${item.id}`, "PATCH", { newQuantity: Number(newQuantity), expectedQuantity: item.currentStock, expectedVersion: item.stockVersion, reason });
     setLoading(false);
     if (!res.ok) {
       const data = await res.json();
@@ -37,6 +36,10 @@ export default function AdjustStockModal({
       return;
     }
     onSaved();
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Network error. Retry the saved request to check its outcome.");
+      setLoading(false);
+    }
   }
 
   return (

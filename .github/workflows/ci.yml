@@ -1,0 +1,115 @@
+name: CI
+
+# Verification only. No job in this workflow connects to a database, runs a
+# migration, seeds data, or deploys anything: every Prisma command below is
+# offline (client generation, schema parsing) or points at a placeholder URL.
+#
+# Why two operating systems: the application is developed on Windows and deployed
+# from Linux. Migration checksums are a byte-level contract (Prisma hashes the raw
+# bytes of `migration.sql`), so a checkout that silently turns LF into CRLF changes
+# the digest on one platform only. `.gitattributes` pins the migration files to LF;
+# the Windows job proves the pin actually holds there.
+
+on:
+  push:
+    branches: [main, "arena/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "24"
+  NEXT_TELEMETRY_DISABLED: "1"
+  CI: "true"
+
+jobs:
+  verify:
+    # Skip only the explicitly marked engine-recovery push on this session branch.
+    if: "${{ github.event_name != 'push' || github.ref != 'refs/heads/arena/a0ac74b2-hotel-management-saas' || github.event.head_commit.message != 'chore(ci): recover pinned prisma engines' }}"
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies from the lockfile
+        # `postinstall` runs `prisma generate`, which needs the Prisma engines;
+        # GitHub runners can reach binaries.prisma.sh.
+        run: npm ci --no-audit --no-fund
+
+      - name: Assert the Node.js toolchain
+        # Fails loudly if the runner's Node major drifts from .nvmrc/engines.node,
+        # instead of quietly verifying a version the project does not support.
+        run: |
+          node --version
+          npm --version
+          node -e "const major = process.versions.node.split('.')[0]; if (major !== process.env.NODE_VERSION) { console.error('Expected Node ' + process.env.NODE_VERSION + ', got ' + process.versions.node); process.exit(1); } console.log('Node ' + process.versions.node + ' matches the pinned major ' + process.env.NODE_VERSION);"
+
+      - name: Prisma Client matches prisma/schema.prisma
+        run: npm run check:prisma-client
+
+      - name: Prisma schema validation (placeholder values, no connection)
+        # `prisma validate` parses the schema; it does not open a connection. The
+        # URLs are deliberately unroutable placeholders and no credentials exist.
+        env:
+          SAAS_ENVIRONMENT: saas
+          SAAS_DATABASE_IDENTIFIER: ci_placeholder_no_database
+          DATABASE_URL: postgresql://ci_placeholder:ci_placeholder@127.0.0.1:5432/ci_placeholder_no_database
+          DIRECT_URL: postgresql://ci_placeholder:ci_placeholder@127.0.0.1:5432/ci_placeholder_no_database
+        run: npx prisma validate --schema prisma/schema.prisma
+
+      - name: Database command safeguards
+        # Static and behavioural checks that the Prisma scripts still route through
+        # scripts/prisma-safe.mjs, that migrate dev/reset/db push stay refused for a
+        # remote target, and that the identity rules keep their shape. No database
+        # is contacted: every case runs with --print-target or reads source text.
+        run: npx vitest run __tests__/scripts/prisma-script-guardrails.test.ts __tests__/safety/prisma-command-guard.test.ts __tests__/safety/database-identity.test.ts __tests__/scripts/db-integrity-identity.test.ts
+
+      - name: Migration files are the reviewed LF bytes
+        run: |
+          node scripts/verify-migration-eol.mjs
+          node scripts/migration-ledger.mjs manifest --check
+
+      - name: TypeScript
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Tests
+        # The full suite. Tests that need a real PostgreSQL server are skipped by
+        # their own guards (see docs/migration-strategy.md §4.0); they are reported
+        # as skipped, never silently omitted or weakened.
+        run: npx vitest run
+
+      - name: Production build
+        run: npm run build
+
+      - name: "Windows: migration line-ending protections"
+        if: runner.os == 'Windows'
+        # Proves the `.gitattributes` pin survives `core.autocrlf=true` (the runner
+        # default) and that the CRLF detection/refusal logic is exercised on the
+        # platform where CRLF actually appears.
+        run: |
+          git config core.autocrlf
+          node scripts/verify-migration-eol.mjs
+          node scripts/migration-ledger.mjs manifest --check
+          npx vitest run __tests__/schema/migration-adoption.test.ts -t "line-ending independence"
