@@ -1,15 +1,5 @@
 name: CI
 
-# Verification only. No job in this workflow connects to a database, runs a
-# migration, seeds data, or deploys anything: every Prisma command below is
-# offline (client generation, schema parsing) or points at a placeholder URL.
-#
-# Why two operating systems: the application is developed on Windows and deployed
-# from Linux. Migration checksums are a byte-level contract (Prisma hashes the raw
-# bytes of `migration.sql`), so a checkout that silently turns LF into CRLF changes
-# the digest on one platform only. `.gitattributes` pins the migration files to LF;
-# the Windows job proves the pin actually holds there.
-
 on:
   push:
     branches: [main, "arena/**"]
@@ -18,7 +8,6 @@ on:
 
 permissions:
   contents: read
-
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -29,87 +18,185 @@ env:
   CI: "true"
 
 jobs:
-  verify:
-    # Skip only the explicitly marked engine-recovery push on this session branch.
-    if: "${{ github.event_name != 'push' || github.ref != 'refs/heads/arena/a0ac74b2-hotel-management-saas' || github.event.head_commit.message != 'chore(ci): recover pinned prisma engines' }}"
-    name: verify (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-
+  linux:
+    name: Linux full baseline (two disposable PostgreSQL targets)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_disposable_only
+          POSTGRES_DB: hotel_saas_disposable_rehearsal
+        ports:
+          - 55435:5432
+        options: >-
+          --label hotel-saas.disposable=ci-restore-only
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     steps:
-      - name: Check out the repository
-        uses: actions/checkout@v7
-
-      - name: Set up Node.js ${{ env.NODE_VERSION }}
-        uses: actions/setup-node@v7
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-
-      - name: Install dependencies from the lockfile
-        # `postinstall` runs `prisma generate`, which needs the Prisma engines;
-        # GitHub runners can reach binaries.prisma.sh.
-        run: npm ci --no-audit --no-fund
-
-      - name: Assert the Node.js toolchain
-        # Fails loudly if the runner's Node major drifts from .nvmrc/engines.node,
-        # instead of quietly verifying a version the project does not support.
+      - name: Install Node dependencies and PostgreSQL 17 server and client tools
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          if ! command -v rsync >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y rsync
+          fi
+          for bin in initdb postgres pg_ctl createdb psql pg_dump pg_restore; do
+            if [ ! -x "/usr/lib/postgresql/17/bin/$bin" ]; then
+              sudo apt-get update
+              sudo apt-get install -y postgresql-common
+              sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+              sudo apt-get install -y postgresql-17 postgresql-client-17
+              break
+            fi
+          done
+          echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
+      - name: Check toolchain, Prisma client, and migration bytes
         run: |
           node --version
           npm --version
-          node -e "const major = process.versions.node.split('.')[0]; if (major !== process.env.NODE_VERSION) { console.error('Expected Node ' + process.env.NODE_VERSION + ', got ' + process.versions.node); process.exit(1); } console.log('Node ' + process.versions.node + ' matches the pinned major ' + process.env.NODE_VERSION);"
-
-      - name: Prisma Client matches prisma/schema.prisma
-        run: npm run check:prisma-client
-
-      - name: Prisma schema validation (placeholder values, no connection)
-        # `prisma validate` parses the schema; it does not open a connection. The
-        # URLs are deliberately unroutable placeholders and no credentials exist.
+          test "$(node -p 'process.versions.node.split(`.`)[0]')" = "$NODE_VERSION"
+          initdb --version
+          pg_ctl --version
+          psql --version
+          pg_dump --version
+          pg_restore --version
+          npm run check:prisma-client
+          node scripts/verify-migration-eol.mjs
+          node scripts/migration-ledger.mjs manifest --check
+      - name: Offline Prisma schema validation
         env:
-          SAAS_ENVIRONMENT: saas
-          SAAS_DATABASE_IDENTIFIER: ci_placeholder_no_database
           DATABASE_URL: postgresql://ci_placeholder:ci_placeholder@127.0.0.1:5432/ci_placeholder_no_database
           DIRECT_URL: postgresql://ci_placeholder:ci_placeholder@127.0.0.1:5432/ci_placeholder_no_database
         run: npx prisma validate --schema prisma/schema.prisma
-
-      - name: Database command safeguards
-        # Static and behavioural checks that the Prisma scripts still route through
-        # scripts/prisma-safe.mjs, that migrate dev/reset/db push stay refused for a
-        # remote target, and that the identity rules keep their shape. No database
-        # is contacted: every case runs with --print-target or reads source text.
-        run: npx vitest run __tests__/scripts/prisma-script-guardrails.test.ts __tests__/safety/prisma-command-guard.test.ts __tests__/safety/database-identity.test.ts __tests__/scripts/db-integrity-identity.test.ts
-
-      - name: Migration files are the reviewed LF bytes
+      - name: Verify disposable service container identity before restore tests
+        env:
+          SERVICE_ID: ${{ job.services.postgres.id }}
+          PGPASSWORD: ci_disposable_only
         run: |
-          node scripts/verify-migration-eol.mjs
-          node scripts/migration-ledger.mjs manifest --check
+          set -euo pipefail
+          test "$(docker inspect -f '{{ index .Config.Labels "hotel-saas.disposable" }}' "$SERVICE_ID")" = ci-restore-only
+          test "$(docker inspect -f '{{ (index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort }}' "$SERVICE_ID")" = 55435
+          container_id=$(docker exec "$SERVICE_ID" psql -U postgres -d postgres -Atc 'SELECT system_identifier FROM pg_control_system()')
+          tcp_id=$(psql -h 127.0.0.1 -p 55435 -U postgres -d postgres -Atc 'SELECT system_identifier FROM pg_control_system()')
+          test -n "$container_id" && test "$container_id" = "$tcp_id"
+          echo 'Verified labelled disposable restore service on port 55435.'
+      - name: Prepare isolated source and marked local PostgreSQL
+        run: |
+          set -euo pipefail
+          root=$(mktemp -d "$RUNNER_TEMP/hms-ci-disposable-XXXXXXXX")
+          echo "CI_DISPOSABLE_ROOT=$root" >> "$GITHUB_ENV"
+          mkdir "$root/source"
+          rsync -a --exclude='/.git' --exclude='/.next' --exclude='/.owner-test' --exclude='/HOTEL-SAAS-SNAPSHOT.zip.download' "$GITHUB_WORKSPACE/" "$root/source/"
+          bash "$root/source/.github/scripts/ci-local-postgres.sh" "$root" /usr/lib/postgresql/17/bin
+      - name: Apply migrations from scratch and create fictional fixture
+        working-directory: ${{ env.CI_DISPOSABLE_ROOT }}/source
+        env:
+          DATABASE_URL: postgresql://postgres@127.0.0.1:55434/hotel_saas_disposable_audit
+          DIRECT_URL: postgresql://postgres@127.0.0.1:55434/hotel_saas_disposable_audit
+        run: |
+          set -euo pipefail
+          test "$(psql -h "$CI_DISPOSABLE_ROOT" -p 55434 -U postgres -d hotel_saas_disposable_audit -Atc 'SHOW data_directory')" = "$CI_DISPOSABLE_ROOT/pgdata"
+          npx prisma migrate deploy
+          psql -h "$CI_DISPOSABLE_ROOT" -p 55434 -U postgres -d hotel_saas_disposable_audit -v ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO "Hotel" (id, name, slug, "updatedAt") VALUES ('ci-disposable-hotel-a', 'Fictional CI Hotel', 'ci-disposable-hotel-a', CURRENT_TIMESTAMP);
+          INSERT INTO "Subscription" (id, "hotelId", "planId", status, "currentPeriodEndsAt", "updatedAt") VALUES ('ci-disposable-subscription-a', 'ci-disposable-hotel-a', 'GROWTH', 'ACTIVE', CURRENT_TIMESTAMP + INTERVAL '30 days', CURRENT_TIMESTAMP);
+          SQL
+          printf '%s\n' '{"hotels":{"a":{"id":"ci-disposable-hotel-a"}}}' > "$CI_DISPOSABLE_ROOT/fixtures.json"
+      - name: TypeScript, lint, and production build
+        working-directory: ${{ env.CI_DISPOSABLE_ROOT }}/source
+        run: |
+          npx tsc --noEmit
+          npm run lint
+          npm run build
+          # The guarded integration tests use this exact local filename. Prisma
+          # normally generates the platform-qualified filename on GitHub runners.
+          engine=node_modules/.prisma/client/libquery_engine.so.node
+          if [ ! -f "$engine" ]; then
+            cp -n node_modules/.prisma/client/libquery_engine-debian-openssl-3.0.x.so.node "$engine"
+          fi
+          echo '077e86821d96c3225ec75c4e2172822f8969cd4f720942f944bc853ea1b77f9f  '"$engine" | sha256sum --check
+      - name: Full suite including real PostgreSQL tests
+        working-directory: ${{ env.CI_DISPOSABLE_ROOT }}/source
+        env:
+          REHEARSAL_TEST_BASE_URL: postgresql://postgres:ci_disposable_only@127.0.0.1:55435
+        run: |
+          set +e
+          npm test -- --run --reporter=verbose --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-linux.json"
+          test_status=$?
+          node .github/scripts/ci-vitest-summary.mjs "$RUNNER_TEMP/vitest-linux.json" linux
+          summary_status=$?
+          test "$test_status" -eq 0 && test "$summary_status" -eq 0
+      - name: Stop marked local PostgreSQL
+        if: always() && env.CI_DISPOSABLE_ROOT != ''
+        run: |
+          set -euo pipefail
+          root="$CI_DISPOSABLE_ROOT"
+          test "$(cat "$root/DISPOSABLE")" = DISPOSABLE_HOTEL_SAAS_ONLY
+          if test -f "$root/pgdata/postmaster.pid"; then
+            test "$(sed -n '2p' "$root/pgdata/postmaster.pid")" = "$root/pgdata"
+            /usr/lib/postgresql/17/bin/pg_ctl -D "$root/pgdata" -m fast -w stop
+          fi
 
-      - name: TypeScript
-        run: npx tsc --noEmit
-
-      - name: Lint
-        run: npm run lint
-
-      - name: Tests
-        # The full suite. Tests that need a real PostgreSQL server are skipped by
-        # their own guards (see docs/migration-strategy.md §4.0); they are reported
-        # as skipped, never silently omitted or weakened.
-        run: npx vitest run
-
-      - name: Production build
-        run: npm run build
-
-      - name: "Windows: migration line-ending protections"
-        if: runner.os == 'Windows'
-        # Proves the `.gitattributes` pin survives `core.autocrlf=true` (the runner
-        # default) and that the CRLF detection/refusal logic is exercised on the
-        # platform where CRLF actually appears.
+  windows:
+    name: Windows baseline (real-server suites explicitly reported)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install and check tools
+        run: |
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --version
+          npm --version
+          node -e "if (process.versions.node.split('.')[0] !== process.env.NODE_VERSION) process.exit(1)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run check:prisma-client
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Offline Prisma schema validation
+        env:
+          DATABASE_URL: postgresql://ci_placeholder:ci_placeholder@127.0.0.1:5432/ci_placeholder_no_database
+          DIRECT_URL: postgresql://ci_placeholder:ci_placeholder@127.0.0.1:5432/ci_placeholder_no_database
+        run: npx prisma validate --schema prisma/schema.prisma
+      - name: Migration line endings and manifest
         run: |
           git config core.autocrlf
           node scripts/verify-migration-eol.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/migration-ledger.mjs manifest --check
-          npx vitest run __tests__/schema/migration-adoption.test.ts -t "line-ending independence"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: TypeScript, lint, and production build
+        run: |
+          npx tsc --noEmit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run lint
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Full suite and explicit skipped-test summary
+        run: |
+          $marker = Join-Path (Split-Path -Parent (Get-Location).Path) 'DISPOSABLE'
+          if (Test-Path $marker) { throw 'Unexpected parent DISPOSABLE marker: refusing to run guarded Linux-only tests on Windows.' }
+          Write-Host 'Windows: rate-limit and cleanup real-Postgres suites skip because their /proc identity checks are Linux-only; names are listed below.'
+          npm test -- --run --reporter=verbose --reporter=json --outputFile.json="$env:RUNNER_TEMP/vitest-windows.json"
+          $testStatus = $LASTEXITCODE
+          node .github/scripts/ci-vitest-summary.mjs "$env:RUNNER_TEMP/vitest-windows.json" windows
+          $summaryStatus = $LASTEXITCODE
+          if ($testStatus -ne 0 -or $summaryStatus -ne 0) { exit 1 }
+      - name: Windows migration line-ending protections
+        run: npx vitest run __tests__/schema/migration-adoption.test.ts -t "line-ending independence" --reporter=verbose
