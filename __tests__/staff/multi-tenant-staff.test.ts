@@ -23,6 +23,11 @@ export const PlatformRole = {
 
 vi.doMock("server-only", () => ({}));
 
+// This suite mocks persistence; exercise staff behavior with an allowed limiter
+// unless a test explicitly supplies a limiter response.
+const mockLimitAuthRequest = vi.fn();
+vi.doMock("@/lib/auth-rate-limit", () => ({ limitAuthRequest: mockLimitAuthRequest }));
+
 vi.doMock("bcryptjs", () => ({
   default: {
     hash: async (pw: string) => `hashed-${pw}`,
@@ -384,6 +389,7 @@ let deleteStaffRoute: any = null;
 
 describe("Phase 5: Multi-Tenant Staff Management", () => {
   beforeEach(async () => {
+    mockLimitAuthRequest.mockReset().mockResolvedValue(null);
     db = resetDB();
     mockTenantContext = {
       hotelId: "hotel-a",
@@ -416,6 +422,35 @@ describe("Phase 5: Multi-Tenant Staff Management", () => {
   });
 
   describe("2. POST /api/staff (Adding Staff & Role Privilege Checks)", () => {
+    it("returns 503 without changing staff when the limiter is unavailable", async () => {
+      mockLimitAuthRequest.mockResolvedValueOnce(CustomNextResponse.json({ error: "RATE_LIMIT_UNAVAILABLE" }, { status: 503 }));
+      const before = { users: db.users.size, memberships: db.memberships.size };
+      const req = new Request("http://localhost:3000/api/staff", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Test Staff", email: "staff@example.test", role: "WAITER" }),
+      });
+      const res = await postStaffRoute(req);
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: "RATE_LIMIT_UNAVAILABLE" });
+      expect(mockLimitAuthRequest).toHaveBeenCalledWith(req, "invitationCreate", "staff@example.test", "user-a-owner");
+      expect({ users: db.users.size, memberships: db.memberships.size }).toEqual(before);
+    });
+
+    it("returns 429 with Retry-After without changing staff when limited", async () => {
+      mockLimitAuthRequest.mockResolvedValueOnce(CustomNextResponse.json({ error: "RATE_LIMITED" }, { status: 429, headers: { "Retry-After": "60" } }));
+      const before = { users: db.users.size, memberships: db.memberships.size };
+      const req = new Request("http://localhost:3000/api/staff", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Test Staff", email: "staff@example.test", role: "WAITER" }),
+      });
+      const res = await postStaffRoute(req);
+      expect(res.status).toBe(429);
+      expect(res.headers.get("Retry-After")).toBe("60");
+      expect(await res.json()).toEqual({ error: "RATE_LIMITED" });
+      expect(mockLimitAuthRequest).toHaveBeenCalledWith(req, "invitationCreate", "staff@example.test", "user-a-owner");
+      expect({ users: db.users.size, memberships: db.memberships.size }).toEqual(before);
+    });
+
     it("successfully creates and assigns a new staff member to active hotel", async () => {
       const req = new Request("http://localhost:3000/api/staff", {
         method: "POST",

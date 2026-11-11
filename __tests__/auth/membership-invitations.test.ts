@@ -21,6 +21,9 @@ class CustomNextResponse extends Response {
 
 vi.doMock("server-only", () => ({}));
 vi.doMock("next/server", () => ({ NextResponse: CustomNextResponse }));
+// This is a mocked invitation-lifecycle suite, not a limiter-store test.
+const mockLimitAuthRequest = vi.fn();
+vi.doMock("@/lib/auth-rate-limit", () => ({ limitAuthRequest: mockLimitAuthRequest }));
 
 let currentUserId: string | null = null;
 vi.doMock("next-auth", () => ({
@@ -229,6 +232,7 @@ function post(path: string) {
 }
 
 beforeEach(() => {
+  mockLimitAuthRequest.mockReset().mockResolvedValue(null);
   // The route refuses to run at all when the database is not configured.
   vi.stubEnv("DATABASE_URL", "postgresql://test-role@db.example.test:5432/hms_recovery");
   reset();

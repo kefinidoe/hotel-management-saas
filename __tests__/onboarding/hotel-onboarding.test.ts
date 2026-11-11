@@ -21,6 +21,10 @@ export const HotelStatus = {
 
 vi.doMock("server-only", () => ({}));
 
+// Registration persistence is mocked in this suite; limiter storage is tested separately.
+const mockLimitAuthRequest = vi.fn();
+vi.doMock("@/lib/auth-rate-limit", () => ({ limitAuthRequest: mockLimitAuthRequest }));
+
 vi.doMock("bcryptjs", () => ({
   default: {
     hash: async (pw: string) => `hashed-${pw}`,
@@ -255,6 +259,7 @@ describe("Phase 5: User Registration & Hotel Onboarding", () => {
   afterEach(() => vi.unstubAllEnvs());
 
   beforeEach(async () => {
+    mockLimitAuthRequest.mockReset().mockResolvedValue(null);
     vi.stubEnv("DATABASE_URL", "postgresql://mock:mock@localhost/mock");
     db = resetDB();
     forceRegistrationUniqueConflict = false;
