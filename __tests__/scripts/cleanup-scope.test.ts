@@ -9,7 +9,9 @@ const SOURCE = readFileSync(resolve(__dirname, "../../scripts/clean-test-data.ts
 
 describe("test-data cleanup script safety", () => {
   it("requires the configured database safety check and an exact hotel ID confirmation", () => {
-    expect(SOURCE).toContain("assertDatabaseSafety();");
+    expect(SOURCE).toContain("assertDisposableDatabaseSafety();");
+    expect(SOURCE).toContain("assertDisposableDatabaseIdentity(disposableTarget, identity);");
+    expect(SOURCE.indexOf("assertDisposableDatabaseIdentity(disposableTarget, identity);")).toBeLessThan(SOURCE.indexOf("tx.payment.deleteMany"));
     expect(SOURCE).toContain('valueAfter("--hotel-id")');
     expect(SOURCE).toContain('valueAfter("--confirm-hotel-id")');
     expect(SOURCE).toContain("hotelId !== confirmation");

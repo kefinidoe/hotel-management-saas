@@ -24,6 +24,9 @@
  * Anything else that is not loopback is refused outright.
  */
 
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
+
 export class DatabaseSafetyError extends Error {
   constructor(message: string) {
     super(`[CRITICAL DATABASE SAFETY VIOLATION] ${message}`);
@@ -421,4 +424,54 @@ export function assertDatabaseSafety(
     projectRef: identity.projectRef,
     directKind: directIdentity?.kind,
   };
+}
+
+/** Extra fail-closed guard for the destructive, local-only cleanup CLI. */
+export function assertDisposableDatabaseSafety(): { database: string; dataDirectory: string } {
+  const target = assertDatabaseSafety();
+  if (process.env.NODE_ENV === "production") {
+    throw new DatabaseSafetyError("Cleanup is local-only and cannot run in production mode.");
+  }
+  if (target.kind !== "loopback" || !/(^|[_-])disposable($|[_-])/i.test(target.database)) {
+    throw new DatabaseSafetyError("Cleanup is restricted to a loopback database explicitly named disposable.");
+  }
+  if (process.env.DIRECT_URL?.trim()) {
+    const direct = extractSafeMetadata(process.env.DIRECT_URL);
+    if (direct.hostname.toLowerCase() !== target.host.toLowerCase() || direct.port !== target.port || direct.databaseName !== target.database) {
+      throw new DatabaseSafetyError("Cleanup requires DATABASE_URL and DIRECT_URL to name the same local server and database.");
+    }
+  }
+
+  const root = process.env.DISPOSABLE_DATABASE_ROOT?.trim();
+  if (!root || !isAbsolute(root) || root.startsWith("\\\\") || root.startsWith("//")) {
+    throw new DatabaseSafetyError("Cleanup requires an absolute DISPOSABLE_DATABASE_ROOT with a disposable marker.");
+  }
+  try {
+    const marker = join(root, "DISPOSABLE");
+    if (!lstatSync(marker).isFile() || readFileSync(marker, "utf8").trim() !== "DISPOSABLE_HOTEL_SAAS_ONLY") {
+      throw new Error("invalid marker");
+    }
+    const dataPath = join(root, "pgdata");
+    if (!lstatSync(dataPath).isDirectory()) throw new Error("invalid pgdata directory");
+    const dataDirectory = realpathSync(dataPath);
+    return { database: target.database, dataDirectory };
+  } catch {
+    throw new DatabaseSafetyError("Cleanup requires a valid disposable marker and its local pgdata directory.");
+  }
+}
+
+/** Compare identity on the same database transaction that will do the cleanup. */
+export function assertDisposableDatabaseIdentity(
+  expected: { database: string; dataDirectory: string },
+  actual: { database: string; dataDirectory: string }
+): void {
+  let realDirectory: string;
+  try {
+    realDirectory = realpathSync(actual.dataDirectory);
+  } catch {
+    throw new DatabaseSafetyError("Cleanup could not verify the connected PostgreSQL data directory.");
+  }
+  if (actual.database !== expected.database || realDirectory !== expected.dataDirectory) {
+    throw new DatabaseSafetyError("Cleanup refused: connected PostgreSQL identity is not the marked disposable cluster.");
+  }
 }

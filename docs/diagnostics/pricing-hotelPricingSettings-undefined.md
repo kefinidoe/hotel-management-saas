@@ -149,7 +149,7 @@ Note: a **missing table would produce a different error** (Prisma `P2021` "The t
 ## 7. Does the app import the expected client, and are there multiple clients/versions?
 
 * **Single expected instance.** `lib/prisma.ts:69-77` is the only application-level instantiation (`new PrismaClient({...})`), cached on `globalThis` outside production, exported as `prisma`. `lib/pricing/admin.ts` and `lib/pricing/config.ts` both import `{ prisma } from "@/lib/prisma"`.
-* Other `new PrismaClient()` sites are standalone CLI scripts only, and they also resolve `@prisma/client` from the same root `node_modules`: `scripts/clean-test-data.ts:9`, `scripts/reset-password.ts:26`, `prisma/seed.ts:17`, `scripts/owner-test/seed-demo.ts:37`.
+* Other `new PrismaClient()` sites are standalone CLI scripts only, and they also resolve `@prisma/client` from the same root `node_modules`: `scripts/clean-test-data.ts`, `scripts/reset-password.ts:26`, `prisma/seed.ts:17`, `scripts/owner-test/seed-demo.ts:37`.
 * `package-lock.json` has exactly one `node_modules/@prisma/client` and one `node_modules/prisma` entry — **no duplicate/nested client**, no workspace hoisting, no second `output` path. (This sandbox cannot enumerate `node_modules` to double-check for stray copies, but the lockfile and generator config rule out a configured second client.)
 * **No client-side bundling of Prisma.** No `"use client"` file imports `@/lib/prisma`, `@/lib/pricing/admin` or `@/lib/pricing/config` (checked across `app/` and `components/`). `app/dashboard/settings/pricing/page.tsx` is a server component (`export const dynamic = "force-dynamic"`), so the stack you saw in Chrome is the **server-side** error surfaced by the Next.js error overlay/dev overlay — not a browser bundle executing Prisma.
 

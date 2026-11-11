@@ -79,7 +79,6 @@ Phase 4 finalizes the migration of the Hotel Management System from a single-ten
 | `/api/staff` | `POST` | Invite / Add Property Staff | `getTenantFromRoute()` | `requireHotelRole(ROLE_GROUPS.STAFF_ADMIN)` | Creates or looks up `User`, creates `HotelMembership` with `hotelId: tenant.hotelId, role: body.role` | Bounded to `tenant.hotelId` |
 | `/api/staff/[id]` | `PATCH`, `DELETE` | Staff Membership & Role Update | `getTenantFromRoute()` | `requireHotelRole(ROLE_GROUPS.STAFF_ADMIN)` | Mutates `HotelMembership` where `userId: params.id, hotelId: tenant.hotelId`. Cannot demote last `HOTEL_OWNER` | Composite lookup with `hotelId: tenant.hotelId` |
 | `/api/search` | `GET` | Omnisearch Bar | `getTenantFromRoute()` | `requireHotelRole(ROLE_GROUPS.ALL_STAFF)` | Searches guests, rooms, reservations where `hotelId === tenant.hotelId` | Bounded to `tenant.hotelId` |
-| `/api/admin/clean-test-data` | `POST` | Test Data Purge | `getTenantFromRoute()` | `requireHotelRole([HotelRole.HOTEL_OWNER, HotelRole.HOTEL_ADMIN])` | Every `deleteMany` explicitly scoped with `where: { hotelId: tenant.hotelId }`. Preserves user accounts and other hotels | Zero cross-tenant data purge |
 
 ---
 
@@ -142,7 +141,7 @@ Phase 4 finalizes the migration of the Hotel Management System from a single-ten
   - KPI cards in `/dashboard` (Revenue, Occupancy, Outstanding Balance) calculate strictly from `tenant.hotelId`.
   - Financial reports in `/api/reports` aggregate zero numbers from other hotel tenants.
 - [ ] **Bulk Deletions & Cleanups Scoping:**
-  - `/api/admin/clean-test-data` wipes test folios, reservations, and tasks ONLY where `hotelId === tenant.hotelId`.
+  - The former cleanup API route is removed; local cleanup must target a marked disposable database and one explicitly confirmed hotel.
   - All other tenant databases remain 100% intact with zero deleted records.
 
 ### 4.3 Legacy Role Removal Verification Criteria
@@ -176,7 +175,7 @@ Phase 4 finalizes the migration of the Hotel Management System from a single-ten
 - [x] **1.8** Update `middleware.ts` to protect `/dashboard/:path*` and `/api/:path*`.
 
 ### Workstream 2: API Route Tenant Scoping (All 34+ Endpoints)
-- [x] **2.1** Update `/api/admin/clean-test-data/route.ts` to enforce `getTenantFromRoute()` and scope all deletions strictly to `where: { hotelId: tenant.hotelId }`.
+- [x] **2.1** The former cleanup API route was removed; the local CLI remains disposable-only.
 - [ ] **2.2** Update Room Endpoints (`/api/rooms`, `/api/rooms/[id]`, `/api/room-types`, `/api/room-types/[id]`) with `getTenantFromRoute()` and `hotelId` scoping.
 - [ ] **2.3** Update Guest & Booking Endpoints (`/api/guests`, `/api/guests/[id]`, `/api/reservations`, `/api/reservations/[id]`, `/api/reservations/[id]/extend`) with `getTenantFromRoute()` and `hotelId` scoping.
 - [ ] **2.4** Update Front Desk & Billing Endpoints (`/api/check-in`, `/api/check-out`, `/api/folios/[id]`, `/api/payments`, `/api/payment-methods`) with `getTenantFromRoute()` and transaction-level `hotelId` validation.

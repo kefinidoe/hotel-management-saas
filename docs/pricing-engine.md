@@ -352,10 +352,17 @@ price history. That is no longer possible:
   cancelled so the history is kept;
 - a reservation that was never paid and never repriced can still be deleted, and its frozen quote is
   removed deliberately in the same transaction (it is a discarded quotation, not a financial event);
-- the admin test-data purge (`/api/admin/clean-test-data`, disabled in SaaS environments) removes
-  pricing rows explicitly before the reservations, so a deliberate teardown still works;
+- the local-only `scripts/clean-test-data.ts` CLI removes pricing rows before reservations only for
+  a verified, marked disposable database; the former admin API route has been removed;
 - the only way to alter a version afterwards is a forensic operation that first disables the
   immutability trigger — deliberately awkward, and never something the app does.
+
+For the local-only cleanup CLI, `DISPOSABLE_DATABASE_ROOT` must be the absolute path of an
+already-marked disposable cluster directory containing a `DISPOSABLE` file with the exact text
+`DISPOSABLE_HOTEL_SAAS_ONLY` and a `pgdata` subdirectory. The loopback database name must contain
+`disposable`; the database guard checks the actual PostgreSQL data directory inside the cleanup
+transaction. The CLI also requires matching `--hotel-id` and `--confirm-hotel-id` arguments and
+refuses production mode. Never mark an existing or non-disposable database for this purpose.
 
 ### Folio consistency
 
@@ -650,7 +657,7 @@ drives the real UI in Chromium, and restores the hotel's original pricing model 
   hotel row that still has pricing history now fails by design; a legitimate teardown has to remove
   or export the financial records first. That is the intended retention policy, not an oversight.
 - The immutability trigger blocks `UPDATE` only. `DELETE` remains possible for deliberate purges
-  (the reservation-delete path and the test-data endpoint), and restoring a version from a backup is
+  (the reservation-delete path and the disposable-only cleanup CLI), and restoring a version from a backup is
   the recovery route for an erroneous purge.
 - Rescheduling a priced reservation does **not** reprice it automatically. The price stays frozen,
   the endpoint returns `pricingNeedsReview: true` and writes a `RESERVATION_RATE_REVIEW_REQUIRED`

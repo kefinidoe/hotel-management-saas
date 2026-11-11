@@ -52,7 +52,7 @@ This is a **partial review**, not a security certification. The 41 model declara
 
 Targeted = relevant sections inspected, not complete assurance. Unreviewed = listed only.
 
-- `app/api/admin/clean-test-data/route.ts` — targeted
+- The formerly reviewed admin cleanup route has been removed.
 - `app/api/audit-logs/route.ts` — unreviewed
 - `app/api/auth/[...nextauth]/route.ts` — unreviewed
 - `app/api/auth/invitations/[id]/route.ts` — targeted
@@ -120,9 +120,8 @@ Targeted = relevant sections inspected, not complete assurance. Unreviewed = lis
 
 ## Data access and operating paths
 
-The following 79 app/lib files contain Prisma/transaction/raw-query search matches. Enumeration is not function-level review; most remain unreviewed. Cross-reference their route/page callers before release.
+The following is the historical app/lib Prisma/transaction/raw-query inventory; the cleanup route has since been removed. Enumeration is not function-level review; most remain unreviewed. Cross-reference their route/page callers before release.
 
-- `app/api/admin/clean-test-data/route.ts`
 - `app/api/audit-logs/route.ts`
 - `app/api/auth/invitations/[id]/route.ts`
 - `app/api/auth/memberships/route.ts`

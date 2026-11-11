@@ -1,10 +1,9 @@
 import { PrismaClient } from "@prisma/client";
-import { assertDatabaseSafety } from "../lib/db-safety-guard";
+import { assertDisposableDatabaseSafety, assertDisposableDatabaseIdentity } from "../lib/db-safety-guard";
 
-// Validate the configured target before constructing a client or issuing queries.
-// This guard only checks the configured identifier; the explicit, matching hotel
-// ID confirmation below is an additional safeguard, not proof that a DB is safe.
-assertDatabaseSafety();
+// Refuse remote, production-mode, unmarked and non-disposable targets before
+// constructing a client. The connected cluster is checked inside the transaction.
+const disposableTarget = assertDisposableDatabaseSafety();
 
 const prisma = new PrismaClient();
 
@@ -30,6 +29,11 @@ async function main() {
   console.log("Starting hotel test-data cleanup for the explicitly confirmed hotel.\n");
 
   await prisma.$transaction(async (tx) => {
+    const [identity] = await tx.$queryRaw<Array<{ database: string; dataDirectory: string }>>`
+      SELECT current_database() AS "database", current_setting('data_directory') AS "dataDirectory"
+    `;
+    assertDisposableDatabaseIdentity(disposableTarget, identity);
+
     const hotel = await tx.hotel.findUnique({
       where: { id: hotelId },
       select: { id: true, name: true, slug: true },

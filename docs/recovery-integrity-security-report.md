@@ -102,14 +102,14 @@ Modified:
 | Control | Evidence |
 |---|---|
 | A — no admin password reset | `app/api/staff/[id]/route.ts` rejects `newPassword` with 403 before any write; `__tests__/staff/multi-tenant-staff.test.ts` asserts 403 **and** that `passwordHash` is unchanged. Password writes exist in exactly three places: self-service change (requires the current password), new-user creation, and the break-glass CLI |
-| B — entitlements on APIs and pages | 42/57 routes call `requireModule`; 14 dashboard pages call `requirePageRole(role, module)`; the 15 routes without it are auth, platform, billing-recovery, profile and the disabled cleanup endpoint. `__tests__/subscriptions/subscription-entitlements.test.ts` — 48 tests |
+| B — entitlements on APIs and pages | 42/57 routes call `requireModule`; 14 dashboard pages call `requirePageRole(role, module)`; the then-existing 15 routes without it included auth, platform, billing-recovery, profile and the cleanup endpoint (since removed). `__tests__/subscriptions/subscription-entitlements.test.ts` — 48 tests |
 | C — subscription endpoint authorisation | `getBillingTenantFromRoute()` → `getTenantContext()` (ACTIVE membership + active user) then `requireRole(…, STAFF_ADMIN)` |
 | D — financial reporting restricted | `app/api/reports/route.ts` and `app/dashboard/reports/page.tsx` both use `ROLE_GROUPS.FINANCIAL_REPORTS`; dashboard KPIs gated with `hasRole`. Front-desk folio balances remain visible to front desk by design (operational need), which is a deliberate boundary, not an oversight |
 | E — assignees must be same-hotel active members | `findActiveHotelStaff(hotelId, assigneeId, tx)` inside the update transaction in both `housekeeping/[id]` and `maintenance/[id]`; check-out creates tasks with no assignee |
 | No mass assignment | no `...body` spread anywhere in `app/` or `lib/` |
 | No unscoped id lookups | every tenant-model lookup in `app/api` scopes by `hotelId` or the composite `id_hotelId`; the only bare `where: { id }` calls are `Hotel` by its own id, platform endpoints, and the token's own user |
 | No uploads / unsafe file handling | no `FormData`, `writeFile` or upload handler exists in the app |
-| Dangerous admin endpoint | `/api/admin/clean-test-data` returns 403 in production or without `ALLOW_TEST_DATA_CLEANUP=true`, and is hotel-scoped |
+| Dangerous admin endpoint | The cleanup API route has been removed; only the disposable-only local CLI remains |
 
 ## 7. Tenant isolation results
 
