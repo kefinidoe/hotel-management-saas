@@ -91,21 +91,17 @@ export default function StaffClient({
       const res = await fetch(`/api/staff/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: newStatus }),
+        body: JSON.stringify(newStatus === "ACTIVE" ? { reinvite: true } : { status: newStatus }),
       });
       const data = await res.json();
       if (!res.ok) {
         setActionError(data.error || "Could not update staff status.");
         return;
       }
-      setStaff((prev) =>
-        prev.map((s) =>
-          s.id === id
-            ? { ...s, status: newStatus, isActive: newStatus === "ACTIVE" }
-            : s
-        )
-      );
-      setActionMessage(`Staff member ${newStatus === "ACTIVE" ? "reactivated" : "suspended"}.`);
+      setStaff((prev) => prev.map((s) => s.id === id
+        ? { ...s, status: "SUSPENDED", isActive: false, invitationPending: newStatus === "ACTIVE" }
+        : s));
+      setActionMessage(newStatus === "ACTIVE" ? "Invitation sent; the account holder must accept before access is restored." : "Staff member suspended.");
     } catch {
       setActionError("Network error while updating status.");
     } finally {

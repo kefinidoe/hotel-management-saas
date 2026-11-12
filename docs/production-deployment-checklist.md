@@ -58,7 +58,23 @@ work around. `scripts/db-safety-guard` refuses to connect when `SAAS_ENVIRONMENT
    (dry run first) — [migration-strategy.md](migration-strategy.md) §4.2.
 8. Seat the checkpoint: `npm run migration:verify-engine` must pass on the production host.
 
+**Database safety guard contract.** Every database entry point (`lib/prisma.ts` and the maintenance
+scripts) calls `assertDatabaseSafety()` with **no arguments**, which reads `SAAS_ENVIRONMENT`,
+`SAAS_DATABASE_IDENTIFIER`, `DATABASE_URL` and `DIRECT_URL` from the process environment and fails
+closed unless it can prove the target is the approved SaaS database. Passing a config object —
+`assertDatabaseSafety({ saasEnvironment, saasDatabaseIdentifier, databaseUrl, directUrl })`, used by
+tests and target-aware tooling — switches the guard to fully explicit mode: a key that is absent or
+`undefined` means "this input is missing" and throws; it is never filled in from `process.env`. The
+two modes are exclusive on purpose, so an explicit "missing" can never be satisfied by an unrelated
+ambient variable. An empty check must fail on every machine, whatever the developer's shell holds.
+
 ## 3. Prisma engine
+
+**Runtime.** Build and run on **Node.js 24** (`.nvmrc` = `24`, `package.json` `engines.node` =
+`>=24.0.0`, CI installs 24 on Ubuntu and Windows). Do not let the build image or the platform drift
+to another major: the Prisma engine is loaded into the running Node ABI, and
+`npm run native-engine:verify` must be re-run on whichever major actually serves traffic. If the
+platform selects Node from `engines.node`, this field is what it will honour.
 
 The client must run on the **native** engine:
 

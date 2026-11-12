@@ -37,6 +37,7 @@ import path from "node:path";
 import { queryJson, queryScalar, resolvePsql, psqlVersion, runPsql, PsqlError } from "./psql.mjs";
 import {
   buildFeatureQuery,
+  crlfWarnings,
   evaluateCheckpoints,
   readMigrations,
   readReleaseManifest,
@@ -137,6 +138,7 @@ function createContext(options, psqlBin) {
   const prefix = `hotel_saas_rehearsal_${Date.now().toString(36)}`;
   const created = [];
   const migrations = readMigrations();
+  for (const warning of crlfWarnings(migrations)) process.stderr.write(`! ${warning}\n`);
   const manifest = readReleaseManifest();
 
   const maintenanceUrl = databaseUrl(base.toString(), options.maintenance);

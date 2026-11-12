@@ -103,6 +103,12 @@ export async function POST(req: Request) {
   const department = typeof body?.department === "string" ? body.department.trim() : null;
   const phone = typeof body?.phone === "string" ? body.phone.trim() : null;
 
+  // This endpoint creates invitations for existing accounts. Bound both the
+  // target email and the inviting actor before looking up the target account.
+  const { limitAuthRequest } = await import("@/lib/auth-rate-limit");
+  const limited = await limitAuthRequest(req, "invitationCreate", email, tenant.userId);
+  if (limited) return limited;
+
   if (!name || name.length < 2 || name.length > 100) {
     return NextResponse.json(
       { error: "Staff name is required (2-100 characters)." },
@@ -176,23 +182,21 @@ export async function POST(req: Request) {
       // (no access) and becomes ACTIVE when the invitee accepts — see
       // lib/invitations.ts. Seat limits are enforced at acceptance, because an
       // invitation does not occupy a seat.
-      const newMembership = await prisma.hotelMembership.create({
-        data: {
-          userId: existingUser.id,
-          hotelId: tenant.hotelId,
-          role: requestedRole as HotelRole,
-          department: department || null,
-          status: MembershipStatus.SUSPENDED,
-        },
-        include: { user: { select: { id: true, name: true, email: true, phone: true } } },
-      });
-
-      await recordInvitationCreated({
-        hotelId: tenant.hotelId,
-        membershipId: newMembership.id,
-        invitedUserId: existingUser.id,
-        role: newMembership.role,
-        invitedByUserId: tenant.userId,
+      const newMembership = await prisma.$transaction(async (tx) => {
+        const membership = await tx.hotelMembership.create({
+          data: {
+            userId: existingUser.id, hotelId: tenant.hotelId,
+            role: requestedRole as HotelRole, department: department || null,
+            status: MembershipStatus.SUSPENDED,
+          },
+          include: { user: { select: { id: true, name: true, email: true, phone: true } } },
+        });
+        await recordInvitationCreated({
+          hotelId: tenant.hotelId, membershipId: membership.id,
+          invitedUserId: existingUser.id, role: membership.role,
+          invitedByUserId: tenant.userId, client: tx,
+        });
+        return membership;
       });
 
       return NextResponse.json(

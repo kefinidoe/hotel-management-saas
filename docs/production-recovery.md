@@ -1,3 +1,5 @@
+> **Safety notice:** Historical raw Prisma database commands below bypass the current guard. Do not run them. Use guarded scripts only, and obtain explicit approval before any database operation. `migrate diff` is disabled by the wrapper.
+
 # Production recovery and operations runbook
 
 This document is the operator's path back to a working system after a bad deploy, a bad delete,
@@ -50,7 +52,7 @@ Copy `.env.example` and fill it in. **Never commit `.env`.** Required variables:
 | `DATABASE_URL` | Pooled application connection (Supabase transaction pooler, port 6543) |
 | `DIRECT_URL` | Direct connection (port 5432) — used by backups, restores and migrations |
 | `SAAS_ENVIRONMENT` | Must be exactly `saas`; the safety guard aborts on anything else |
-| `SAAS_DATABASE_IDENTIFIER` | Must match the Supabase project ref / database name; every backup and restore checks it |
+| `SAAS_DATABASE_IDENTIFIER` | Must be the Supabase **project reference** (20 lowercase characters) — a database name is not accepted for a remote target, because every Supabase project's database is called `postgres`; every guard, backup and restore checks it |
 | `NEXTAUTH_SECRET` | Session signing secret (`openssl rand -base64 32`) |
 | `NEXTAUTH_URL` | Public base URL of the deployment |
 

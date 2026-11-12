@@ -1,7 +1,8 @@
+import { DurableMutationProvider } from "@/components/recovery/DurableMutationProvider";
 import { prisma } from "@/lib/prisma";
 import ExpensesClient from "@/components/expenses/ExpensesClient";
 import { requirePageRole } from "@/lib/page-auth";
-import { ROLE_GROUPS } from "@/lib/permissions";
+import { hasRole, ROLE_GROUPS } from "@/lib/permissions";
 
 export const dynamic = "force-dynamic";
 
@@ -11,7 +12,7 @@ export default async function ExpensesPage() {
   const tenant = await requirePageRole(ROLE_GROUPS.ALL_STAFF, "EXPENSES");
 
   const expenses = await prisma.expense.findMany({
-    where: { hotelId: tenant.hotelId },
+    where: { hotelId: tenant.hotelId, ...(hasRole(tenant.role, ROLE_GROUPS.FINANCIAL_REPORTS) ? {} : { requestedById: tenant.userId }) },
     include: {
       requestedBy: {
         select: {
@@ -53,11 +54,13 @@ export default async function ExpensesPage() {
   const pendingCount = initialExpenses.filter((e) => e.status === "PENDING_APPROVAL").length;
 
   return (
+    <DurableMutationProvider hotelId={tenant.hotelId} actorId={tenant.userId}>
     <ExpensesClient
       initialExpenses={initialExpenses}
       approvedThisMonth={approvedThisMonth}
       pendingCount={pendingCount}
       currentUserRole={tenant.role}
     />
+    </DurableMutationProvider>
   );
 }

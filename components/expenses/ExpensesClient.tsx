@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Plus, X, Check, XCircle } from "lucide-react";
+import { useDurableMutation } from "@/components/recovery/DurableMutationProvider";
 import { formatDisplayDate } from "@/lib/dates";
 
 type Expense = {
@@ -179,23 +180,21 @@ function AddExpenseModal({
   const [reference, setReference] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const { submit: submitDurable } = useDurableMutation();
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     setError(null);
-    const res = await fetch("/api/expenses", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    try {
+    const res = await submitDurable("EXPENSE_CREATE", "/api/expenses", "POST", {
         category,
         description,
         amount: Number(amount),
         paymentMethod,
         supplier: supplier || undefined,
         reference: reference || undefined,
-      }),
-    });
+      });
     setLoading(false);
     const data = await res.json();
     if (!res.ok) {
@@ -214,6 +213,10 @@ function AddExpenseModal({
       requestedByName: "You",
       createdAt: data.createdAt,
     });
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Network error. Retry the saved request to check its outcome.");
+      setLoading(false);
+    }
   }
 
   return (

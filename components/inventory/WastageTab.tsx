@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Plus, X } from "lucide-react";
+import { useDurableMutation } from "@/components/recovery/DurableMutationProvider";
 import type { InventoryItemRow } from "./InventoryClient";
 import { formatDisplayDate } from "@/lib/dates";
 
@@ -144,6 +145,7 @@ function RecordWastageModal({
   const [manualAccountableName, setManualAccountableName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const { submit: submitDurable } = useDurableMutation();
 
   const item = inventoryItems.find((i) => i.id === inventoryItemId);
 
@@ -167,10 +169,8 @@ function RecordWastageModal({
     e.preventDefault();
     setLoading(true);
     setError(null);
-    const res = await fetch("/api/wastage", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    try {
+    const res = await submitDurable("WASTAGE", "/api/wastage", "POST", {
         inventoryItemId,
         quantity: Number(quantity),
         reason,
@@ -183,8 +183,7 @@ function RecordWastageModal({
           accountableSelection === MANUAL_ACCOUNTABILITY
             ? manualAccountableName
             : undefined,
-      }),
-    });
+      });
     setLoading(false);
     const data = await res.json();
     if (!res.ok) {
@@ -192,6 +191,10 @@ function RecordWastageModal({
       return;
     }
     onSaved();
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Network error. Retry the saved request to check its outcome.");
+      setLoading(false);
+    }
   }
 
   return (

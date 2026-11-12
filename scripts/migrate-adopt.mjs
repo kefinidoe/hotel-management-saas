@@ -43,6 +43,7 @@ import { sanitiseForPgTools } from "./pg-url.mjs";
 import { queryJson, queryScalar, resolvePsql, psqlVersion, runPsql, PsqlError } from "./psql.mjs";
 import {
   PRISMA_LEDGER_DDL,
+  assertLfMigrationFiles,
   buildAdoptionPlan,
   buildFeatureQuery,
   CHECKPOINTS,
@@ -287,6 +288,15 @@ function main() {
   }
 
   const migrations = readMigrations();
+  // Adoption writes each migration's digest into `_prisma_migrations`. Prisma
+  // checksums raw file bytes, so a CRLF working copy would record digests that a
+  // later deploy from Git's LF content rejects. Refuse instead of recording them.
+  try {
+    assertLfMigrationFiles(migrations);
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
   const releaseManifest = readReleaseManifest();
   const manifestCheck = verifyReleaseManifest(migrations, releaseManifest);
 

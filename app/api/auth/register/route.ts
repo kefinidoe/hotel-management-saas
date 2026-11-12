@@ -29,6 +29,14 @@ export async function POST(req: Request) {
   const password = typeof body?.password === "string" ? body.password : "";
   const phone = typeof body?.phone === "string" ? body.phone.trim() : null;
 
+  // Count parseable registration attempts before field validation, while
+  // preserving the existing offline-preview responses when no DB is configured.
+  if (isDatabaseConfigured()) {
+    const { limitAuthRequest } = await import("@/lib/auth-rate-limit");
+    const limited = await limitAuthRequest(req, "registration", email);
+    if (limited) return limited;
+  }
+
   if (!name || name.length < 2 || name.length > 100) {
     return NextResponse.json(
       { error: "Full name is required (2-100 characters)." },

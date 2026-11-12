@@ -116,9 +116,9 @@ export async function POST(req: Request) {
   const idempotencyKey =
     typeof rawIdempotencyKey === "string" ? rawIdempotencyKey.trim() : undefined;
 
-  if (idempotencyKey !== undefined && (idempotencyKey.length < 4 || idempotencyKey.length > 128)) {
+  if (!idempotencyKey || idempotencyKey.length < 4 || idempotencyKey.length > 128) {
     return NextResponse.json(
-      { error: "Idempotency key must be between 4 and 128 characters." },
+      { error: "An idempotency key between 4 and 128 characters is required." },
       { status: 400 }
     );
   }

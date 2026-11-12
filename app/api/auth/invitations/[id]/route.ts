@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { isDatabaseConfigured } from "@/lib/db-safety-guard";
+import { isSameOriginRequest } from "@/lib/request-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +28,8 @@ export async function POST(
     );
   }
 
+  if (!isSameOriginRequest(req)) return NextResponse.json({ error: "CSRF_ORIGIN_INVALID" }, { status: 403 });
+
   const { authOptions } = await import("@/lib/auth");
   const { prisma } = await import("@/lib/prisma");
   const { withUsageLimitLock } = await import("@/lib/entitlements");
@@ -37,15 +40,19 @@ export async function POST(
     return NextResponse.json({ error: "UNAUTHENTICATED" }, { status: 401 });
   }
 
-  let body: any = null;
-  if (req.headers.get("content-type")?.includes("application/json")) {
-    try {
-      body = await req.json();
-    } catch {
-      body = null;
-    }
+  const { limitAuthRequest } = await import("@/lib/auth-rate-limit");
+  const limited = await limitAuthRequest(req, "invitation", session.user.id);
+  if (limited) return limited;
+
+  let body: any;
+  try { body = await req.json(); } catch {
+    return NextResponse.json({ error: "INVALID_REQUEST_BODY" }, { status: 400 });
   }
-  const decision = body?.action === "decline" ? "decline" : "accept";
+  if (!body || (body.action !== "accept" && body.action !== "decline")) {
+    return NextResponse.json({ error: "An explicit invitation decision is required." }, { status: 400 });
+  }
+  const decision = body.action;
+
 
   // 404 rather than 403 for somebody else's invitation: do not confirm that an
   // arbitrary membership id exists.
@@ -68,61 +75,51 @@ export async function POST(
     );
   }
 
-  if (decision === "decline") {
-    // The membership never granted access, so it carries no history to protect.
-    await prisma.hotelMembership.delete({ where: { id } });
-    await recordInvitationResolved({
-      hotelId: membership.hotelId,
-      membershipId: id,
-      userId: session.user.id,
-      action: INVITATION_ACTIONS.DECLINED,
+  // Recheck ownership, state, expiry, and hotel status inside the transaction.
+  // Conditional writes ensure that a replay or concurrent resolution cannot
+  // transition a membership which is no longer suspended.
+  const resolve = async (tx: any) => {
+    const activeUser = await tx.user.findUnique({ where: { id: session.user.id }, select: { isActive: true } });
+    if (!activeUser?.isActive) throw new Error("INVITATION_NOT_AVAILABLE");
+    const pendingNow = await isPendingInvitationFor(id, session.user.id, tx);
+    const current = await tx.hotelMembership.findUnique({
+      where: { id },
+      include: { hotel: { select: { id: true, name: true, slug: true, status: true } } },
     });
-    return NextResponse.json({ ok: true, decision: "declined" });
-  }
+    if (!pendingNow || !current || current.userId !== session.user.id || current.hotelId !== membership.hotelId ||
+        !["ACTIVE", "TRIALING"].includes(current.hotel.status)) throw new Error("INVITATION_NOT_AVAILABLE");
+    const where = { id, userId: session.user.id, hotelId: membership.hotelId, status: "SUSPENDED" as const };
+    const changed = await tx.hotelMembership.updateMany({ where, data: { status: decision === "decline" ? "SUSPENDED" : "ACTIVE" } });
+    if (changed.count !== 1) throw new Error("INVITATION_NOT_AVAILABLE");
+    await recordInvitationResolved({
+      hotelId: membership.hotelId, membershipId: id, userId: session.user.id,
+      action: decision === "decline" ? INVITATION_ACTIONS.DECLINED : INVITATION_ACTIONS.ACCEPTED,
+      client: tx,
+    });
+    return current;
+  };
 
   try {
-    const result = await withUsageLimitLock(membership.hotelId, "maxStaff", 1, async (tx) =>
-      tx.hotelMembership.update({
-        where: { id },
-        data: { status: "ACTIVE" },
-        include: { hotel: { select: { id: true, name: true, slug: true } } },
-      })
-    );
+    if (decision === "decline") {
+      await prisma.$transaction(resolve, { isolationLevel: "Serializable" });
+      return NextResponse.json({ ok: true, decision: "declined" });
+    }
+    const result = await withUsageLimitLock(membership.hotelId, "maxStaff", 1, resolve);
     if (!result.allowed) {
       return NextResponse.json(
-        {
-          error: result.limit.code || "PLAN_LIMIT_EXCEEDED",
-          message: result.limit.reason,
-        },
-        {
-          status:
-            result.limit.code === "SUBSCRIPTION_STATUS_UNAVAILABLE" ||
-            result.limit.code === "USAGE_LIMIT_UNAVAILABLE"
-              ? 503
-              : 403,
-        }
+        { error: result.limit.code || "PLAN_LIMIT_EXCEEDED", message: result.limit.reason },
+        { status: result.limit.code === "SUBSCRIPTION_STATUS_UNAVAILABLE" || result.limit.code === "USAGE_LIMIT_UNAVAILABLE" ? 503 : 403 }
       );
     }
-
-    await recordInvitationResolved({
-      hotelId: membership.hotelId,
-      membershipId: id,
-      userId: session.user.id,
-      action: INVITATION_ACTIONS.ACCEPTED,
-    });
-
     return NextResponse.json({
-      ok: true,
-      decision: "accepted",
+      ok: true, decision: "accepted",
       membership: {
-        id: result.value.id,
-        hotelId: result.value.hotelId,
-        hotelName: result.value.hotel.name,
-        role: result.value.role,
-        status: result.value.status,
+        id: result.value.id, hotelId: result.value.hotelId,
+        hotelName: result.value.hotel.name, role: result.value.role, status: "ACTIVE",
       },
     });
   } catch (error: any) {
+    if (error?.message === "INVITATION_NOT_AVAILABLE") return NextResponse.json({ error: "Invitation not found." }, { status: 404 });
     if (error?.code === "SUBSCRIPTION_STATUS_UNAVAILABLE" || error?.code === "USAGE_LIMIT_UNAVAILABLE") {
       return NextResponse.json({ error: error.code, message: error.message }, { status: 503 });
     }

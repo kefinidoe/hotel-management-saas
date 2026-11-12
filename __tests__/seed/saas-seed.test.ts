@@ -1,7 +1,12 @@
 // @vitest-environment node
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
-import { applyPendingMigrations } from "../schema/migration-runner";
+import { applyPendingMigrations, PGLITE_MIGRATION_TIMEOUT_MS } from "../schema/migration-runner";
+
+// The hook below applies the entire migration chain to a WASM Postgres (~22 files),
+// which is legitimately slow and markedly slower on Windows. Budget it the same way
+// as the three schema suites rather than relying on the 10s default hook budget.
+vi.setConfig({ testTimeout: PGLITE_MIGRATION_TIMEOUT_MS, hookTimeout: PGLITE_MIGRATION_TIMEOUT_MS });
 
 function countValue(result: { rows: unknown[] }): number {
   return Number((result.rows[0] as { c: number | string }).c);

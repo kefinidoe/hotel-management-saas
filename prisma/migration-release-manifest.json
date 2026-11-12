@@ -78,6 +78,26 @@
     {
       "name": "20261029130000_add_tenant_composite_join_fks",
       "sha256": "f2c5e918f612eb6ce7e5a1aaa12315821ef5f881ffb3c64dc77b472806abfab8"
+    },
+    {
+      "name": "20261031120000_add_pricing_engine",
+      "sha256": "27642ce20ea2a605c98a5e80d49ea8bf892087c99875dfc7f6a4383e054b6a91"
+    },
+    {
+      "name": "20261031160000_price_version_history",
+      "sha256": "405f03934214c00f2f57b7cc88ac95d27856bd4a2bd5db9ab819e624d0214d47"
+    },
+    {
+      "name": "20261101120000_add_reservation_extension_history",
+      "sha256": "ab6f0e295a99a3ff0b8fa4ae87f69913ea42f3215593b43845761a69717d6296"
+    },
+    {
+      "name": "20261104120000_inventory_request_ledger",
+      "sha256": "7999f587961e2e93ffbb5c5844589596794eaa73f384c20d13189760813fae62"
+    },
+    {
+      "name": "20261107120000_auth_rate_limit",
+      "sha256": "dc24bc2f9a5833a8511936e9869b3b0c3728f027e9d94da3f44d9ed60dd3afcd"
     }
   ]
 }

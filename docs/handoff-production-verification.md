@@ -134,7 +134,7 @@ It checks, in order:
 1. **artifact** — the file exists, is not a placeholder, and its SHA-256 equals the pin in
    `scripts/prisma-engine-pins.mjs` (`077e8682…f9f`), so a wrong or rebuilt engine cannot slip through;
 2. **loadable** — `require()`s the shared object into the running Node build, proving the ABI matches
-   (Node 22 here; use the same major as production);
+   (Node 24 — the project's pinned runtime (`.nvmrc`, `engines.node`); use the same major as production);
 3. **client** — the application's own Prisma client reports `engineType: "library"`, i.e. it is *not*
    running on the WASM shim or a driver adapter;
 4. **queries** — `SELECT version()`, a real `hotel.count()`, and a write inside a transaction that is

@@ -17,7 +17,11 @@
  * in a read-only session against a restored database.
  *
  * Safety: the session is opened with `default_transaction_read_only=on`, and a
- * non-loopback target is refused unless `--allow-remote-target` is passed.
+ * non-loopback target is refused unless `--allow-remote-target` is passed. Since
+ * round 28 a remote target must ALSO pass the shared identity check
+ * (`assertDatabaseTarget`): `--allow-remote-target` permits a remote host, it does
+ * not permit an unverified project. `--print-target` shows the decision without
+ * connecting.
  */
 
 import { spawnSync } from "node:child_process";
@@ -25,6 +29,13 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { queryJson, queryScalar, PsqlError, resolvePsql } from "./psql.mjs";
+import {
+  DatabaseTargetSafetyError,
+  assertDatabaseTarget,
+  classifyDatabaseTarget,
+  isLoopbackHost,
+} from "./database-target-safety.mjs";
+import { loadEnvFiles } from "./env-file.mjs";
 
 /** Every application table the migrations should create. */
 export const EXPECTED_TABLES = [
@@ -322,9 +333,19 @@ Options:
                              DATABASE_URL.
   --json                     Print machine-readable output.
   --allow-remote-target      Permit a non-loopback host. Only for a disposable
-                             restored copy — never the live database.
+                             restored copy - never the live database. A remote
+                             host must ALSO match SAAS_DATABASE_IDENTIFIER.
+  --print-target             Show which database would be checked and exit
+                             without connecting.
   --psql <path>              psql binary (default PSQL_BIN, then PATH).
   --help, -h                 Show this text.
+
+Environment:
+  SAAS_ENVIRONMENT=saas      Required for any non-loopback target.
+  SAAS_DATABASE_IDENTIFIER   Required for any non-loopback target; must be the
+                             Supabase project reference the host belongs to.
+  .env                       Loaded (prisma/.env, then .env) exactly as the
+                             Prisma CLI loads it. Exported variables win.
 `;
 
 function main(argv) {
@@ -332,6 +353,7 @@ function main(argv) {
     url: null,
     json: false,
     allowRemote: false,
+    printTarget: false,
     help: false,
     psql: process.env.PSQL_BIN || undefined,
   };
@@ -347,6 +369,9 @@ function main(argv) {
         break;
       case "--allow-remote-target":
         options.allowRemote = true;
+        break;
+      case "--print-target":
+        options.printTarget = true;
         break;
       case "--psql":
         options.psql = argv[++i] ?? null;
@@ -366,6 +391,8 @@ function main(argv) {
     return 0;
   }
 
+  loadEnvFiles();
+
   const raw = options.url || process.env.DIRECT_URL || process.env.DATABASE_URL;
   if (!raw) {
     return fail("No database configured: pass --url or set DIRECT_URL / DATABASE_URL.\n", 1);
@@ -377,13 +404,49 @@ function main(argv) {
   } catch {
     return fail("The database URL is not a valid URL (it is never echoed, since it may hold a password).\n", 1);
   }
-  const loopback = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(parsed.hostname);
+  const loopback = isLoopbackHost(parsed.hostname);
   if (!loopback && !options.allowRemote) {
     return fail(
       `Refusing to inspect '${parsed.hostname}': these checks are for a restored, disposable copy.\n` +
         "If that host really is disposable, re-run with --allow-remote-target.\n",
       1
     );
+  }
+
+  // A remote host is not enough: --allow-remote-target authorises the *network*,
+  // not the project. Bind the target to SAAS_DATABASE_IDENTIFIER before psql runs.
+  const identity = classifyDatabaseTarget({ host: parsed.hostname, userPrefix: parsed.username.split(".")[1] });
+
+  if (!loopback) {
+    try {
+      assertDatabaseTarget({
+        environment: process.env.SAAS_ENVIRONMENT,
+        identifier: process.env.SAAS_DATABASE_IDENTIFIER,
+        databaseUrl: raw,
+      });
+    } catch (error) {
+      if (!(error instanceof DatabaseTargetSafetyError)) throw error;
+      return fail(
+        `${error.message}\n` +
+          "A remote integrity run needs SAAS_ENVIRONMENT=saas and SAAS_DATABASE_IDENTIFIER set to the\n" +
+          "Supabase project reference that host belongs to. --allow-remote-target alone is not enough.\n",
+        1
+      );
+    }
+  }
+
+  if (options.printTarget) {
+    const database = parsed.pathname.replace(/^\//, "");
+    const lines = [
+      `target: ${parsed.hostname}:${parsed.port || "5432"}/${database}`,
+      `class: ${identity.kind}`,
+      identity.projectRef ? `project: ${identity.projectRef}` : "project: (not applicable)",
+      `identity: ${loopback ? "loopback (no project reference required)" : process.env.SAAS_DATABASE_IDENTIFIER}`,
+      "decision: allow (read-only)",
+      "nothing was executed",
+    ];
+    process.stdout.write(options.json ? `${JSON.stringify({ target: lines[0], decision: "allow" }, null, 2)}\n` : `${lines.join("\n")}\n`);
+    return 0;
   }
 
   const psqlArgs = { url: raw, psqlBin: resolvePsql(options.psql), singleTransaction: true };

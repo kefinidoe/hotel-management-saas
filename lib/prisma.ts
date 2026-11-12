@@ -1,5 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import { assertDatabaseSafety } from "./db-safety-guard";
+import { assertPricingDelegates } from "./pricing/delegates";
 
 const PRISMA_ALLOWED_PARAMS = new Set([
   "schema",
@@ -74,3 +75,14 @@ export const prisma =
   });
 
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+
+// Fail fast, and say why, when the generated client is older than the schema.
+//
+// A client generated before the pricing models existed still answers for
+// `prisma.hotel`, so the process starts happily and then dies inside a page with
+// `TypeError: Cannot read properties of undefined (reading 'findUnique')`. The
+// check below costs eleven property reads, runs once per process, and turns that
+// unreadable crash into a named error telling the operator to run
+// `npx prisma generate` and restart. It is deliberately at start-up as well as in
+// the pricing readers: pricing must never run on a client it cannot trust.
+assertPricingDelegates(prisma, "application start-up");

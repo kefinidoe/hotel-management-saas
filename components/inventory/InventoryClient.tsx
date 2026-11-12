@@ -17,6 +17,7 @@ export type InventoryItemRow = {
   category: string;
   unit: string;
   currentStock: number;
+  stockVersion: number;
   reorderLevel: number;
   costPerUnit: number;
   supplier: string | null;

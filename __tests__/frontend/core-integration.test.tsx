@@ -90,6 +90,7 @@ describe("core frontend API integrations", () => {
       <ReservationsClient
         rooms={[room]}
         roomTypes={[roomType]}
+        currency="KES"
         currentUserRole={"RECEPTIONIST" as never}
       />,
     );
@@ -105,6 +106,7 @@ describe("core frontend API integrations", () => {
       <ReservationsClient
         rooms={[room]}
         roomTypes={[roomType]}
+        currency="KES"
         currentUserRole={"RECEPTIONIST" as never}
       />,
     );
@@ -119,6 +121,7 @@ describe("core frontend API integrations", () => {
       <ReservationsClient
         rooms={[room]}
         roomTypes={[roomType]}
+        currency="KES"
         currentUserRole={"RECEPTIONIST" as never}
       />,
     );
@@ -146,6 +149,7 @@ describe("core frontend API integrations", () => {
       <ReservationsClient
         rooms={[room]}
         roomTypes={[roomType]}
+        currency="KES"
         currentUserRole={"RECEPTIONIST" as never}
       />,
     );
