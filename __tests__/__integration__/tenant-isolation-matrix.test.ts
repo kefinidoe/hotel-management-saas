@@ -6,7 +6,7 @@ const prisma = new PrismaClient();
 describe('Item 6: Advanced Real-PostgreSQL Tenant Isolation & RBAC Matrix', () => {
   let hotelAId: string | undefined;
   let hotelBId: string | undefined;
-  let staffAId: string | undefined;
+  let userAId: string | undefined;
 
   beforeAll(async () => {
     // 1. Create two distinct tenant hotels
@@ -20,23 +20,24 @@ describe('Item 6: Advanced Real-PostgreSQL Tenant Isolation & RBAC Matrix', () =
     hotelAId = hotelA.id;
     hotelBId = hotelB.id;
 
-    // 2. Create staff member associated with Hotel A
-    const staffMember = await prisma.staff.create({
+    // 2. Create user associated with Hotel A
+    const userMember = await prisma.user.create({
       data: {
         name: 'Alpha Manager',
         email: 'alpha.manager@security.test',
         role: 'MANAGER',
-        hotelId: hotelAId
+        hotelId: hotelAId,
+        passwordHash: 'mock-hash-for-testing'
       }
     });
-    staffAId = staffMember.id;
+    userAId = userMember.id;
   });
 
   afterAll(async () => {
     // Clean up test records securely using guarded array filters
     const hIds = [hotelAId, hotelBId].filter(Boolean) as string[];
     if (hIds.length > 0) {
-      await prisma.staff.deleteMany({ where: { hotelId: { in: hIds } } });
+      await prisma.user.deleteMany({ where: { hotelId: { in: hIds } } });
       await prisma.hotel.deleteMany({ where: { id: { in: hIds } } });
     }
     await prisma.$disconnect();
@@ -49,17 +50,17 @@ describe('Item 6: Advanced Real-PostgreSQL Tenant Isolation & RBAC Matrix', () =
       expect(hotelAId).not.toEqual(hotelBId);
     });
 
-    it('enforces hotelId scoping on staff members', async () => {
-      expect(staffAId).toBeDefined();
-      const staff = await prisma.staff.findUnique({ where: { id: staffAId } });
-      expect(staff?.hotelId).toEqual(hotelAId);
-      expect(staff?.hotelId).not.toEqual(hotelBId);
+    it('enforces hotelId scoping on users', async () => {
+      expect(userAId).toBeDefined();
+      const user = await prisma.user.findUnique({ where: { id: userAId } });
+      expect(user?.hotelId).toEqual(hotelAId);
+      expect(user?.hotelId).not.toEqual(hotelBId);
     });
 
     it('prevents cross-tenant record queries by strict hotelId partitioning', async () => {
-      // Attempting to query Hotel A staff using Hotel B ID must return zero results
-      const crossTenantQuery = await prisma.staff.findMany({
-        where: { id: staffAId, hotelId: hotelBId }
+      // Attempting to query Hotel A user using Hotel B ID must return zero results
+      const crossTenantQuery = await prisma.user.findMany({
+        where: { id: userAId, hotelId: hotelBId }
       });
       expect(crossTenantQuery).toHaveLength(0);
     });
