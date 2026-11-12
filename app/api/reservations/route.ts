@@ -1,3 +1,4 @@
+import { validateReservationPayload } from '@/lib/reservation-mutation-validation';
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -490,3 +491,4 @@ async function persistPriceSnapshot(
     );
   }
 }
+
