@@ -115,6 +115,7 @@ async function signIn(account: Account) {
   const { csrfToken } = await response.json();
   response = await fetch(`${base}/api/auth/callback/credentials`, {
     method: "POST", redirect: "manual",
+    // Verify the real NextAuth credentials flow works without an Origin header.
     headers: { cookie: jar.header(), "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ csrfToken, email: account.email, password: account.password, json: "true" }),
   });
