@@ -20,10 +20,11 @@ describe('Item 6: Advanced Real-PostgreSQL Tenant Isolation & RBAC Matrix', () =
     hotelAId = hotelA.id;
     hotelBId = hotelB.id;
 
-    // 2. Create guest associated with Hotel A (tenant partitioning)
+    // 2. Create guest associated with Hotel A using firstName and lastName
     const guestMember = await prisma.guest.create({
       data: {
-        name: 'Alpha Guest',
+        firstName: 'Alpha',
+        lastName: 'Guest',
         email: 'alpha.guest@security.test',
         hotelId: hotelAId
       }
