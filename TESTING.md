@@ -1,35 +1,31 @@
 # HMS Testing Documentation
 
-> ## ⚠️ Read this first — most of what this document claims is not true
+> ## Current verification status
 >
-> `npm run test:run` currently reports **265 passing tests**. **146** of them execute real
-> application code; the other **119** still import nothing from `app/`, `lib/` or `components/`.
-> Verify it yourself:
+> The latest full run reports **451 tests: 448 pass and 3 fail**. The three failures are
+> in `schema/migrations.test.ts`: the multi-tenant migration conflicts with earlier migrations
+> when applied to an empty database. Do not deploy or reset a database to work around this.
 >
-> ```bash
-> grep -rEc "from ['\"](@/|\.\./\.\./(app|lib|components))" \
->   __tests__/workflows/guest-lifecycle.test.ts \
->   __tests__/api/endpoints.test.ts \
->   __tests__/utilities/helpers.test.ts
-> # 0  0  0
-> ```
+> The former 46-test `api/endpoints.test.ts` placeholder suite has been replaced with **10
+> tests that invoke the real guest API route handlers**. The guest lifecycle suite (36 tests)
+> and utility helpers suite (37 tests) still contain placeholder assertions; those 73 tests
+> should not be treated as proof that the corresponding workflows work.
 >
-> They assert against object literals written inside the test, so breaking
-> `app/api/check-in/route.ts` leaves all 119 green. **The "Test Coverage" sections below
-> describe the intent of those three files, not what they actually verify.** Keep them as a
-> specification of what the real suite should eventually cover.
+> `npm run lint` passes and `npm audit` reports zero known package vulnerabilities. A full
+> TypeScript/build check is still unverified here because Prisma Client generation needs a
+> binary download unavailable in this environment.
 
 ## Overview
-Testing suite for the Hotel Management System: **265 tests**, of which **146** exercise real
-code and **119** are placeholder assertions awaiting replacement.
+The current suite contains **451 tests**: 378 exercise application code and 73 remain
+placeholder assertions. The full suite is not yet green because of the migration failures above.
 
-The 146 that test real code, by suite:
+The tests that exercise real code, by suite:
 
 | Suite | Tests | What it pins down |
 |---|---|---|
 | `seed/seed.test.ts` | 8 | runs the real `prisma/seed.ts` against a fake Prisma client that enforces P2025 and foreign keys, so seed *ordering* cannot regress; also asserts every tariff name matches its occupancy prefix |
 | `seed/cleanup-guard.test.ts` | 24 | the pure rules deciding whether the destructive placeholder-room cleanup may run |
-| `schema/migrations.test.ts` | 4 | applies all 12 migrations to a real PostgreSQL (PGlite), then diffs the result against `schema.prisma` |
+| `schema/migrations.test.ts` | 4 | applies all 16 migration files to PostgreSQL (PGlite), then diffs the result against `schema.prisma`; currently exposes the broken multi-tenant migration chain |
 | `rooms/room-status.test.ts` | 13 | the floor-board status rules |
 | `rooms/tariffs.test.ts` | 12 | tariff matching across occupancy x meal plan |
 | `auth/session-revocation.test.ts` | 7 | session invalidation |
@@ -71,9 +67,9 @@ __tests__/
 ├── auth/
 │   └── session-revocation.test.ts     # REAL: session invalidation (7 tests)
 ├── workflows/
-│   └── guest-lifecycle.test.ts        # Full guest lifecycle workflow (36 tests)
+│   └── guest-lifecycle.test.ts        # PLACEHOLDER: workflow spec (36 tests)
 ├── api/
-│   └── endpoints.test.ts              # API endpoint tests (46 tests)
+│   └── endpoints.test.ts              # REAL: guest route handler behavior (10 tests)
 ├── utilities/
 │   ├── helpers.test.ts                # PLACEHOLDER: 37 tests, imports nothing real
 │   └── dates.test.ts                  # REAL: timezone-pinned date display (8 tests)
@@ -84,8 +80,9 @@ __tests__/
 
 ## Test Coverage
 
-### 1. Full Workflow Tests (`guest-lifecycle.test.ts`)
-Complete end-to-end guest lifecycle with 36 tests:
+### 1. Guest Lifecycle Specification (`guest-lifecycle.test.ts`)
+The 36 assertions below are placeholders: they describe desired coverage but do not invoke the
+application or its API routes. They are not end-to-end tests yet. The planned workflow is:
 
 - **Guest Registration (3 tests)**
   - Create guest with valid information
@@ -141,20 +138,17 @@ Complete end-to-end guest lifecycle with 36 tests:
   - Handle concurrent operations
   - Audit all transactions
 
-### 2. API Endpoint Tests (`endpoints.test.ts`)
-46 tests covering all critical API routes:
+### 2. Guest API Route Tests (`endpoints.test.ts`)
+Ten tests invoke the actual guest route handlers with mocked tenant and Prisma boundaries:
 
-- **Guests API (5 tests)** - CRUD operations
-- **Reservations API (6 tests)** - Booking management
-- **Rooms API (6 tests)** - Room management
-- **Folios API (5 tests)** - Billing operations
-- **Payments API (5 tests)** - Payment processing
-- **Check-in API (3 tests)** - Check-in workflow
-- **Check-out API (4 tests)** - Check-out workflow
-- **Housekeeping API (4 tests)** - Housekeeping tasks
-- **Maintenance API (3 tests)** - Maintenance tickets
-- **Staff API (2 tests)** - Staff management
-- **Error Responses (4 tests)** - Error handling (401, 404, 500, etc.)
+- Hotel-scoped guest listing and nested reservation queries
+- Trimmed case-insensitive search and archived-guest filtering
+- Authentication and role checks before database access
+- Compound `(guestId, hotelId)` lookups, folio totals, and cross-tenant not-found behavior
+- Preventing archive of checked-in guests and scoping archive writes to the active hotel
+
+Other areas in the old endpoint suite were object-literal placeholders and were removed; they
+need new route tests before their behavior can be considered covered.
 
 ### 3. Utility & Helper Tests (`helpers.test.ts`)
 37 tests for critical utility functions:
@@ -213,19 +207,23 @@ npm run test:coverage
 
 ## Test Results Summary
 
+Latest full run in this workspace:
+
 ```
-Test Files  6 passed (6)
-     Tests  133 passed (133)
-  Duration  ~4.5s (environment ~70%, setup ~18%, transform ~10%)
+Test Files  29 passed, 1 failed (30)
+     Tests  448 passed, 3 failed (451)
 ```
 
-### Breakdown by Module
-- Seed script (real code, `prisma/seed.ts`): 6/6 ✅
-- Migrations vs real PostgreSQL + `schema.prisma` (real): 4/4 ✅
-- Middleware matcher (real code, `middleware.ts`): 4/4 ✅
-- Guest Lifecycle: 36/36 ⚠️ placeholder assertions
-- API Endpoints: 46/46 ⚠️ placeholder assertions
-- Utilities & Helpers: 37/37 ⚠️ placeholder assertions
+The three failing assertions are in `schema/migrations.test.ts`. The 16-file chain fails at
+`20261008123000_multi_tenant_saas_init` because it recreates types already established by
+earlier migrations; the remaining schema-diff failures are consequences of that incomplete
+migration run. This needs a data-safe migration repair before deployment.
+
+### Coverage notes
+- The 10-test guest API suite exercises actual route handlers.
+- Guest lifecycle (36) and utility helper (37) suites remain placeholder assertions.
+- Focused tenant-auth and subscription suites pass with mocked Prisma enum exports.
+- Inventory, POS, and folio-payment suites have targeted behavior tests.
 
 ### The suites that test real code
 
@@ -399,14 +397,16 @@ Add to your GitHub Actions or CI pipeline:
 
 ## Summary
 
-✅ **119 comprehensive tests** covering:
-- Complete guest workflow (6 major steps)
-- All API endpoints
-- Critical utilities and calculations
-- Edge cases and error handling
-- Data validation and integrity
+The suite now has targeted tests for selected application logic and real guest API handlers.
+It does **not** yet prove the full guest lifecycle or all API endpoints: 73 legacy tests are
+placeholders, and the migration suite currently fails as described above.
 
-The test suite ensures:
+The next coverage priorities are:
+- Real guest lifecycle tests against the route handlers
+- Tenant-isolation tests for reservation, room, and billing routes
+- Database integration tests after the migration chain is repaired
+
+The test suite is intended to ensure:
 - Reliability of booking workflow
 - Correctness of financial calculations
 - Proper error handling

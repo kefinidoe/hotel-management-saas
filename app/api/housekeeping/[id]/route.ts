@@ -1,7 +1,5 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
-import { authOptions } from "@/lib/auth";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 
 const ROOM_STATUS_FOR: Record<string, string> = {
@@ -19,14 +17,8 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.HOUSEKEEPING);
   if (forbidden) return forbidden;
 
-  const { checkModuleEntitlement } = await import("@/lib/entitlements");
-  const moduleCheck = await checkModuleEntitlement(tenant.hotelId, "HOUSEKEEPING");
-  if (!moduleCheck.allowed) {
-    return NextResponse.json(
-      { error: moduleCheck.code || "MODULE_NOT_ENTITLED", message: moduleCheck.reason },
-      { status: 403 }
-    );
-  }
+  const blocked = await requireModule(tenant.hotelId, "HOUSEKEEPING");
+  if (blocked) return blocked;
 
   const existing = await prisma.housekeepingTask.findFirst({
     where: { id, hotelId: tenant.hotelId },

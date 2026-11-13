@@ -13,22 +13,30 @@ import {
 
 export const dynamic = "force-dynamic";
 
-const frontDeskInclude = {
-  guest: true,
-  rooms: { include: { room: true } },
-  folios: {
-    include: {
-      items: { select: { total: true } },
-      payments: {
-        where: { status: "COMPLETED" },
-        select: { amount: true },
+function frontDeskInclude(hotelId: string) {
+  return {
+    guest: true,
+    // ReservationRoom itself has no hotelId, so constrain the related Room as
+    // well as the parent Reservation to avoid serializing an invalid cross-tenant link.
+    rooms: {
+      where: { room: { is: { hotelId } } },
+      include: { room: true },
+    },
+    folios: {
+      where: { hotelId },
+      include: {
+        items: { select: { total: true } },
+        payments: {
+          where: { hotelId, status: "COMPLETED" },
+          select: { amount: true },
+        },
       },
     },
-  },
-} satisfies Prisma.ReservationInclude;
+  } satisfies Prisma.ReservationInclude;
+}
 
 type FrontDeskReservation = Prisma.ReservationGetPayload<{
-  include: typeof frontDeskInclude;
+  include: ReturnType<typeof frontDeskInclude>;
 }>;
 
 function startOfToday() {
@@ -86,6 +94,7 @@ export default async function FrontDeskPage() {
     prisma.reservation.findMany({
       relationLoadStrategy: "join",
       where: {
+        hotelId: session.hotelId,
         OR: [
           {
             checkInDate: { gte: todayStart, lt: todayEnd },
@@ -94,14 +103,14 @@ export default async function FrontDeskPage() {
           { status: "CHECKED_IN" },
         ],
       },
-      include: frontDeskInclude,
+      include: frontDeskInclude(session.hotelId),
       orderBy: { checkInDate: "asc" },
     }),
     prisma.room.findMany({
       relationLoadStrategy: "join",
       // Retired rooms keep their history but are not part of the rooms a guest
       // can be given, so they never appear on the board.
-      where: { isActive: true },
+      where: { hotelId: session.hotelId, isActive: true },
       include: { roomType: true },
       orderBy: { number: "asc" },
     }),

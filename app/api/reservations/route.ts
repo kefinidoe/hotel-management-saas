@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { rangesOverlap } from "@/lib/dates";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { accommodationRequired, parseMoney, stayNights } from "@/lib/billing";
 import { hasRole } from "@/lib/permissions";
 import { nextReservationCode } from "@/lib/reservation-code";
@@ -27,6 +27,8 @@ export async function GET(req: Request) {
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.GUEST_STAYS);
   if (forbidden) return forbidden;
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   const hotelId = tenant.hotelId;
   const { searchParams } = new URL(req.url);
@@ -77,17 +79,8 @@ export async function POST(req: Request) {
   const hotelId = tenant.hotelId;
 
   // Enforce SaaS Subscription Plan Module Entitlement
-  const { checkModuleEntitlement } = await import("@/lib/entitlements");
-  const moduleCheck = await checkModuleEntitlement(hotelId, "RESERVATIONS");
-  if (!moduleCheck.allowed) {
-    return NextResponse.json(
-      {
-        error: moduleCheck.code || "MODULE_NOT_ENTITLED",
-        message: moduleCheck.reason,
-      },
-      { status: 403 }
-    );
-  }
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   let body: any;
   try {

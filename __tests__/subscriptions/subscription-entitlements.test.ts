@@ -1,4 +1,35 @@
 import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest";
+
+vi.mock("@prisma/client", () => ({
+  HotelRole: {
+    HOTEL_OWNER: "HOTEL_OWNER",
+    HOTEL_ADMIN: "HOTEL_ADMIN",
+    MANAGER: "MANAGER",
+    RECEPTIONIST: "RECEPTIONIST",
+    ACCOUNTANT: "ACCOUNTANT",
+    HOUSEKEEPER: "HOUSEKEEPER",
+    WAITER: "WAITER",
+    CASHIER: "CASHIER",
+    TECHNICIAN: "TECHNICIAN",
+  },
+  HotelStatus: { ACTIVE: "ACTIVE", TRIALING: "TRIALING", SUSPENDED: "SUSPENDED", CANCELLED: "CANCELLED" },
+  MembershipStatus: { ACTIVE: "ACTIVE", SUSPENDED: "SUSPENDED", INVITED: "INVITED" },
+  PlatformRole: {
+    PLATFORM_SUPER_ADMIN: "PLATFORM_SUPER_ADMIN",
+    PLATFORM_SUPPORT: "PLATFORM_SUPPORT",
+    PLATFORM_BILLING: "PLATFORM_BILLING",
+  },
+  Prisma: {
+    TransactionIsolationLevel: { Serializable: "Serializable" },
+    PrismaClientKnownRequestError: class PrismaClientKnownRequestError extends Error {
+      code: string;
+      constructor(message: string, code: string) {
+        super(message);
+        this.code = code;
+      }
+    },
+  },
+}));
 import {
   SUBSCRIPTION_PLANS,
   getPlan,
@@ -11,6 +42,7 @@ import {
 let evaluateSubscriptionStatus: typeof import("@/lib/entitlements").evaluateSubscriptionStatus;
 let checkModuleEntitlement: typeof import("@/lib/entitlements").checkModuleEntitlement;
 let checkUsageLimit: typeof import("@/lib/entitlements").checkUsageLimit;
+let withUsageLimitLock: typeof import("@/lib/entitlements").withUsageLimitLock;
 let getOrBootstrapSubscription: typeof import("@/lib/entitlements").getOrBootstrapSubscription;
 let getHotelUsageAndSubscription: typeof import("@/lib/entitlements").getHotelUsageAndSubscription;
 import {
@@ -406,6 +438,7 @@ vi.doMock("@/lib/prisma", () => ({
         }
         return null;
       },
+      findMany: async ({ where }: any) => Array.from(db.rooms.values()).filter((room) => room.hotelId === where?.hotelId),
       create: async ({ data }: any) => {
         const id = `room-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         const r = { id, isActive: true, ...data };
@@ -532,6 +565,16 @@ vi.doMock("@/lib/prisma", () => ({
       }
       return fnOrArray({
         $queryRaw: async () => [{ locked: "true" }],
+        room: {
+          count: async ({ where }: any) => Array.from(db.rooms.values()).filter((room) =>
+            room.hotelId === where?.hotelId && (where?.isActive === undefined || room.isActive === where.isActive)
+          ).length,
+        },
+        hotelMembership: {
+          count: async ({ where }: any) => Array.from(db.memberships.values()).filter((membership) =>
+            membership.hotelId === where?.hotelId && (!where?.status || membership.status === where.status)
+          ).length,
+        },
         subscription: {
           update: async ({ where, data }: any) => {
             const existing = db.subscriptions.get(where.hotelId);
@@ -591,6 +634,7 @@ beforeAll(async () => {
   evaluateSubscriptionStatus = entitlements.evaluateSubscriptionStatus;
   checkModuleEntitlement = entitlements.checkModuleEntitlement;
   checkUsageLimit = entitlements.checkUsageLimit;
+  withUsageLimitLock = entitlements.withUsageLimitLock;
   getOrBootstrapSubscription = entitlements.getOrBootstrapSubscription;
   getHotelUsageAndSubscription = entitlements.getHotelUsageAndSubscription;
 });
@@ -599,6 +643,7 @@ describe("Phase 7: SaaS Subscription Foundation and Plan Enforcement", () => {
   beforeEach(() => {
     db = resetDB();
     mockCurrentSession = null;
+    mockActiveCookie = null;
   });
 
   describe("1. Plan Definitions and Metadata", () => {
@@ -688,16 +733,34 @@ describe("Phase 7: SaaS Subscription Foundation and Plan Enforcement", () => {
       expect(res.isOverdue).toBe(false);
     });
 
-    it("evaluates paid subscription past current period as PAST_DUE (overdue grace period)", () => {
+    it("keeps an expired ACTIVE period operational only during the configured past-due grace period", () => {
       const pastPeriod = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000);
-      const res = evaluateSubscriptionStatus({
+      const inGrace = evaluateSubscriptionStatus({
         status: SubscriptionStatus.ACTIVE,
         currentPeriodEndsAt: pastPeriod,
       });
+      const afterGrace = evaluateSubscriptionStatus({
+        status: SubscriptionStatus.ACTIVE,
+        currentPeriodEndsAt: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000),
+      });
 
-      expect(res.effectiveStatus).toBe("PAST_DUE");
-      expect(res.isOperational).toBe(false);
-      expect(res.isOverdue).toBe(true);
+      expect(inGrace.effectiveStatus).toBe("PAST_DUE");
+      expect(inGrace.isOperational).toBe(true);
+      expect(inGrace.isOverdue).toBe(true);
+      expect(afterGrace.effectiveStatus).toBe("PAST_DUE");
+      expect(afterGrace.isOperational).toBe(false);
+    });
+
+    it("applies the same grace window to stored PAST_DUE status and fails closed when its due date is missing", () => {
+      expect(evaluateSubscriptionStatus({
+        status: SubscriptionStatus.PAST_DUE,
+        currentPeriodEndsAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
+      }).isOperational).toBe(true);
+      expect(evaluateSubscriptionStatus({
+        status: SubscriptionStatus.PAST_DUE,
+        currentPeriodEndsAt: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000),
+      }).isOperational).toBe(false);
+      expect(() => evaluateSubscriptionStatus({ status: SubscriptionStatus.PAST_DUE })).toThrow("Past-due subscription period end is missing.");
     });
 
     it("evaluates suspended status as SUSPENDED and strictly non-operational", () => {
@@ -706,6 +769,12 @@ describe("Phase 7: SaaS Subscription Foundation and Plan Enforcement", () => {
       });
 
       expect(res.effectiveStatus).toBe("SUSPENDED");
+      expect(res.isOperational).toBe(false);
+    });
+
+    it("evaluates cancelled status as CANCELLED and strictly non-operational", () => {
+      const res = evaluateSubscriptionStatus({ status: SubscriptionStatus.CANCELLED });
+      expect(res.effectiveStatus).toBe("CANCELLED");
       expect(res.isOperational).toBe(false);
     });
   });
@@ -752,6 +821,35 @@ describe("Phase 7: SaaS Subscription Foundation and Plan Enforcement", () => {
       expect(res.code).toBe("SUBSCRIPTION_SUSPENDED");
       expect(res.reason).toContain("Non-payment");
     });
+
+    it("keeps subscription status and billing details readable after a trial expires", async () => {
+      mockCurrentSession = { user: { id: "user-a-owner" } };
+      mockActiveCookie = "hotel-a";
+      db.hotels.set("hotel-a", { ...db.hotels.get("hotel-a"), status: HotelStatus.SUSPENDED });
+      db.subscriptions.set("hotel-a", {
+        ...db.subscriptions.get("hotel-a"),
+        trialEndsAt: new Date(Date.now() - 1_000),
+      });
+      const { GET } = await import("@/app/api/hotel/subscription/route");
+
+      const response = await GET();
+      const json = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(json.hotel.status).toBe(HotelStatus.SUSPENDED);
+      expect(json.subscription.effectiveStatus).toBe("TRIAL_EXPIRED");
+      expect(json.subscription.isOperational).toBe(false);
+      expect(json.policy.pastDueGracePeriodDays).toBe(7);
+    });
+
+    it("retains every core module across all active room bands", () => {
+      const coreModules = ["RESERVATIONS", "FOLIOS", "HOUSEKEEPING", "RESTAURANT_POS", "INVENTORY", "EXPENSES", "MAINTENANCE", "REPORTS"];
+      for (const plan of getAllPlans(true)) {
+        for (const module of coreModules) {
+          expect(plan.modules, `${plan.id} includes ${module}`).toContain(module);
+        }
+      }
+    });
   });
 
   describe("4. Usage Limit Enforcement & Cross-Tenant Isolation", () => {
@@ -780,6 +878,42 @@ describe("Phase 7: SaaS Subscription Foundation and Plan Enforcement", () => {
       expect(check.currentCount).toBe(15);
       expect(check.maxLimit).toBe(15);
       expect(check.reason).toContain("allows a maximum of 15 rooms");
+    });
+
+    it("checks quota and performs a room write in one advisory-locked transaction", async () => {
+      const { prisma } = await import("@/lib/prisma");
+      const order: string[] = [];
+      const tx = {
+        $queryRaw: async () => { order.push("lock"); return []; },
+        room: { count: async () => { order.push("count"); return 14; } },
+      };
+      const transactionSpy = vi.spyOn(prisma as any, "$transaction").mockImplementation(
+        ((callback: any) => Promise.resolve(callback(tx))) as any
+      );
+      const result = await withUsageLimitLock("hotel-a", "maxRooms", 1, async (sameTx) => {
+        expect(sameTx).toBe(tx);
+        order.push("write");
+        return "room-created";
+      });
+
+      expect(result).toEqual({ allowed: true, value: "room-created" });
+      expect(order).toEqual(["lock", "count", "write"]);
+      transactionSpy.mockRestore();
+    });
+
+    it("fails closed when the quota lock cannot be acquired", async () => {
+      const { prisma } = await import("@/lib/prisma");
+      const transactionSpy = vi.spyOn(prisma as any, "$transaction").mockImplementation(
+        ((callback: any) => Promise.resolve(callback({ $queryRaw: async () => { throw new Error("database unavailable"); } }))) as any
+      );
+      const operation = vi.fn(async () => "should-not-write");
+
+      await expect(withUsageLimitLock("hotel-a", "maxRooms", 1, operation)).rejects.toMatchObject({
+        code: "USAGE_LIMIT_UNAVAILABLE",
+        statusCode: 503,
+      });
+      expect(operation).not.toHaveBeenCalled();
+      transactionSpy.mockRestore();
     });
 
     it("enforces staff member usage limits for active memberships", async () => {
@@ -1317,12 +1451,66 @@ describe("Phase 7: SaaS Subscription Foundation and Plan Enforcement", () => {
         createdAt: new Date(),
       });
 
-      const sub1 = await getOrBootstrapSubscription("hotel-new-bootstrap");
-      const sub2 = await getOrBootstrapSubscription("hotel-new-bootstrap");
+      const [sub1, sub2] = await Promise.all([
+        getOrBootstrapSubscription("hotel-new-bootstrap"),
+        getOrBootstrapSubscription("hotel-new-bootstrap"),
+      ]);
 
       expect(sub1.id).toBe(sub2.id);
       expect(sub1.hotelId).toBe("hotel-new-bootstrap");
       expect(sub1.planId).toBe(DEFAULT_PLAN_ID);
+      expect(db.subscriptions.size).toBe(5);
+    });
+
+    it("leaves an existing subscription record untouched during authorization reads", async () => {
+      const { prisma } = await import("@/lib/prisma");
+      const original = structuredClone(db.subscriptions.get("hotel-a"));
+      const upsertSpy = vi.spyOn((prisma as any).subscription, "upsert");
+
+      await getOrBootstrapSubscription("hotel-a");
+
+      expect(db.subscriptions.get("hotel-a")).toEqual(original);
+      expect(upsertSpy).not.toHaveBeenCalled();
+      upsertSpy.mockRestore();
+    });
+
+    it("does not bootstrap a trial when the subscription lookup itself fails", async () => {
+      const { prisma } = await import("@/lib/prisma");
+      const findSpy = vi.spyOn((prisma as any).subscription, "findUnique").mockRejectedValueOnce(new Error("database unavailable"));
+      const upsertSpy = vi.spyOn((prisma as any).subscription, "upsert");
+
+      await expect(getOrBootstrapSubscription("hotel-a")).rejects.toMatchObject({
+        code: "SUBSCRIPTION_STATUS_UNAVAILABLE",
+        statusCode: 503,
+      });
+      expect(upsertSpy).not.toHaveBeenCalled();
+      findSpy.mockRestore();
+      upsertSpy.mockRestore();
+    });
+
+    it("does not silently turn malformed persisted state into an operational default", async () => {
+      const { prisma } = await import("@/lib/prisma");
+      const findSpy = vi.spyOn((prisma as any).subscription, "findUnique").mockResolvedValueOnce({
+        ...db.subscriptions.get("hotel-a"),
+        status: "UNRECOGNIZED",
+      });
+
+      await expect(getOrBootstrapSubscription("hotel-a")).rejects.toMatchObject({
+        code: "SUBSCRIPTION_STATUS_UNAVAILABLE",
+      });
+      findSpy.mockRestore();
+    });
+
+    it("returns a consistent 503 from the shared operational authorization path when subscription lookup fails", async () => {
+      const { prisma } = await import("@/lib/prisma");
+      const findSpy = vi.spyOn((prisma as any).subscription, "findUnique").mockRejectedValueOnce(new Error("database unavailable"));
+      const { requireModule } = await import("@/lib/authz");
+
+      const response = await requireModule("hotel-a", "EXPENSES");
+
+      expect(response?.status).toBe(503);
+      expect(await response?.json()).toMatchObject({ error: "SUBSCRIPTION_STATUS_UNAVAILABLE" });
+      findSpy.mockRestore();
     });
   });
 });

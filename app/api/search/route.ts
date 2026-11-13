@@ -1,28 +1,33 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 
 const RESULT_LIMIT = 5;
 
 export async function GET(req: Request) {
-    const auth = await requireAuth();
-  if (auth instanceof NextResponse) return auth;
+  const tenant = await getTenantFromRoute();
+  if (tenant instanceof NextResponse) return tenant;
 
-  const forbidden = requireRole(auth, ROLE_GROUPS.FRONT_DESK);
+  const forbidden = requireRole(tenant.role, ROLE_GROUPS.FRONT_DESK);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
+
   const { searchParams } = new URL(req.url);
   const q = searchParams.get("q")?.trim() ?? "";
 
   // Require at least 2 characters — avoids scanning the whole guest table
-  // on every keystroke of a 1-letter query, which is wasted DB load for
-  // results no one can usefully read anyway.
+  // on every keystroke of a 1-letter query.
   if (q.length < 2) {
     return NextResponse.json({ guests: [], reservations: [], rooms: [] });
   }
 
+  const hotelId = tenant.hotelId;
   const [guests, reservations, rooms] = await Promise.all([
     prisma.guest.findMany({
       where: {
+        hotelId,
         isArchived: false,
         OR: [
           { fullName: { contains: q, mode: "insensitive" } },
@@ -36,6 +41,7 @@ export async function GET(req: Request) {
     }),
     prisma.reservation.findMany({
       where: {
+        hotelId,
         OR: [
           { code: { contains: q, mode: "insensitive" } },
           { guest: { fullName: { contains: q, mode: "insensitive" } } },
@@ -53,6 +59,7 @@ export async function GET(req: Request) {
     }),
     prisma.room.findMany({
       where: {
+        hotelId,
         isActive: true,
         number: { contains: q, mode: "insensitive" },
       },

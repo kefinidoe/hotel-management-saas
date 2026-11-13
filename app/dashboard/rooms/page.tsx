@@ -6,15 +6,18 @@ import { hasRole, ROLE_GROUPS } from "@/lib/permissions";
 export const dynamic = 'force-dynamic';
 
 export default async function RoomsPage() {
-  const session = await requirePageRole(ROLE_GROUPS.ALL_STAFF);
+  const tenant = await requirePageRole(ROLE_GROUPS.ALL_STAFF);
   const [rooms, roomTypes] = await Promise.all([
     prisma.room.findMany({
       relationLoadStrategy: "join",
-      where: { isActive: true },
+      where: { hotelId: tenant.hotelId, isActive: true },
       include: { roomType: true },
       orderBy: { number: "asc" },
     }),
-    prisma.roomType.findMany({ orderBy: { name: "asc" } }),
+    prisma.roomType.findMany({
+      where: { hotelId: tenant.hotelId },
+      orderBy: { name: "asc" },
+    }),
   ]);
 
   const initialRooms = rooms.map((r) => ({
@@ -39,7 +42,7 @@ export default async function RoomsPage() {
     <RoomsClient
       initialRooms={initialRooms}
       initialRoomTypes={initialRoomTypes}
-      canManage={hasRole(session.role, ROLE_GROUPS.MANAGEMENT)}
+      canManage={hasRole(tenant.role, ROLE_GROUPS.MANAGEMENT)}
     />
   );
 }

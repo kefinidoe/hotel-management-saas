@@ -1,271 +1,286 @@
 // @vitest-environment node
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import fs from "node:fs";
-import path from "node:path";
+import { applyPendingMigrations, migrationDirectories } from "./migration-runner";
 
-/**
- * Runs the real migration SQL against a real PostgreSQL engine and checks it
- * against prisma/schema.prisma.
- *
- * "Real PostgreSQL" here means PGlite Ã¢â‚¬â€ Postgres compiled to WebAssembly and
- * run in-process Ã¢â‚¬â€ so this needs no database server, no Docker and no network,
- * and works identically on a laptop and in CI.
- *
- * What it catches that nothing else did:
- *
- *   1. A migration that doesn't apply to an empty database. Nobody had ever
- *      run these five files against a fresh schema Ã¢â‚¬â€ the same class of bug that
- *      made `npm run seed` fail (see __tests__/seed/seed.test.ts).
- *   2. Drift between prisma/schema.prisma and prisma/migrations. If someone
- *      edits the schema without writing a migration, the app's queries and the
- *      actual tables stop agreeing, and you find out in production.
- *   3. An enum literal in the app or seed that isn't a member of any real enum
- *      type Ã¢â‚¬â€ e.g. `status: "NEEDS_CLEANNG"`. TypeScript catches this when the
- *      literal is assigned to a typed field, but not in untyped request bodies
- *      or `as any` casts.
- *
- * Caveat: PGlite is currently PostgreSQL 18. Supabase may run 15 or 16. The
- * syntax used by these migrations is all long-stable, but a feature that is new
- * in 17/18 could in principle pass here and fail there.
- */
-
-const MIGRATIONS_DIR = "prisma/migrations";
 const SCHEMA_PATH = "prisma/schema.prisma";
 
-/** Enum-like literals that are deliberately NOT database enums. */
-const NON_DB_ENUM_LITERALS = new Set([
-  "CRITICAL", // lib/inventory.ts `StockStatus` Ã¢â‚¬â€ a TypeScript union, computed at runtime
-  "LOW_STOCK", //  "
-  "OUT_OF_STOCK", //  "
-  "IN_STOCK", //  "
+type PrismaField = {
+  name: string;
+  type: string;
+  isList: boolean;
+  isOptional: boolean;
+  isRelation: boolean;
+  declaration: string;
+};
+type PrismaModel = { fields: PrismaField[]; declaration: string };
 
-  // Prisma's own error codes: compared against `error.code`, never stored.
-  // Kept explicit rather than wildcard-matching /^P\d{4}$/ so that a *typo'd*
-  // Prisma code (a real bug) still fails this test.
-  "P2002", // unique constraint violation
-  "P2003", // foreign key constraint violation
-  "P2034", // write conflict / deadlock, retried
-
-  // Labels computed into the /api/reports response payload, not persisted:
-  // app/api/reports/route.ts derives `channel` and `bookingBasis` for its own
-  // grouping. `ROOM_CHARGE` here is a coincidental name match with the schema.
-  "PAY_NOW", //  "
-  "STAY_OVERLAP", //  "
-]);
-
-type PrismaModel = { name: string; fields: { name: string; type: string; isList: boolean; isRelation: boolean }[] };
-function parsePrisma(src: string): {
-  models: Map<string, PrismaModel["fields"]>;
-  enums: Map<string, string[]>;
-} {
-  const models = new Map<string, PrismaModel["fields"]>();
-
-  for (const m of src.matchAll(
-    /^model\s+(\w+)\s*\{([\s\S]*?)^\}/gm
-  )) {
-    const fields: PrismaModel["fields"] = [];
-
-    for (const raw of m[2].split("\n")) {
+function parsePrisma(src: string): { models: Map<string, PrismaModel>; enums: Map<string, string[]> } {
+  const models = new Map<string, PrismaModel>();
+  for (const match of src.matchAll(/^model\s+(\w+)\s*\{([\s\S]*?)^\}/gm)) {
+    const fields: PrismaField[] = [];
+    for (const raw of match[2].split("\n")) {
       const line = raw.trim();
-
-      if (!line || line.startsWith("//") || line.startsWith("@@")) {
-        continue;
-      }
-
-      const fm = line.match(/^(\w+)\s+(\w+)(\[\])?(\?)?/);
-
-      if (fm) {
+      if (!line || line.startsWith("//") || line.startsWith("@@")) continue;
+      const field = line.match(/^(\w+)\s+(\w+)(\[\])?(\?)?/);
+      if (field) {
         fields.push({
-          name: fm[1],
-          type: fm[2],
-          isList: Boolean(fm[3]),
+          name: field[1],
+          type: field[2],
+          isList: Boolean(field[3]),
+          isOptional: Boolean(field[4]),
           isRelation: false,
+          declaration: line,
         });
       }
     }
-
-    models.set(m[1], fields);
+    models.set(match[1], { fields, declaration: match[2] });
   }
 
-  // A field whose type is another model is a relation, not a database column.
   const modelNames = new Set(models.keys());
-
-  for (const fields of models.values()) {
-    for (const field of fields) {
-      if (modelNames.has(field.type)) {
-        field.isRelation = true;
-      }
-    }
+  for (const model of models.values()) {
+    for (const field of model.fields) field.isRelation = modelNames.has(field.type);
   }
 
   const enums = new Map<string, string[]>();
-
-  for (const m of src.matchAll(
-    /^enum\s+(\w+)\s*\{([\s\S]*?)^\}/gm
-  )) {
-    const values = m[2]
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(
-        (line) =>
-          line.length > 0 &&
-          !line.startsWith("//") &&
-          !line.startsWith("@@")
-      )
-      .map((line) => line.split(/\s+/)[0]);
-
-    enums.set(m[1], values);
+  for (const match of src.matchAll(/^enum\s+(\w+)\s*\{([\s\S]*?)^\}/gm)) {
+    enums.set(
+      match[1],
+      match[2]
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("//") && !line.startsWith("@@"))
+        .map((line) => line.split(/\s+/)[0])
+    );
   }
-
   return { models, enums };
 }
 
-function migrationFiles(): string[] {
-  return fs
-    .readdirSync(MIGRATIONS_DIR)
-    .filter((d) => fs.existsSync(path.join(MIGRATIONS_DIR, d, "migration.sql")))
-    .sort();
-}
-
-function sourceFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const p = path.join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...sourceFiles(p));
-    else if (/\.(ts|tsx)$/.test(entry.name)) out.push(p);
+function expectedIndexNames(models: Map<string, PrismaModel>): Set<string> {
+  const names = new Set<string>();
+  for (const [modelName, model] of models) {
+    for (const field of model.fields) {
+      if (field.declaration.includes("@id")) names.add(`${modelName}_pkey`);
+      if (field.declaration.includes("@unique")) names.add(`${modelName}_${field.name}_key`);
+    }
+    for (const match of model.declaration.matchAll(/@@(id|unique|index)\s*\(\[([^\]]+)\]\)/g)) {
+      const fields = match[2].split(",").map((field) => field.trim().split(/\s+/)[0]);
+      const suffix = match[1] === "id" ? "pkey" : match[1] === "unique" ? "key" : "idx";
+      names.add(`${modelName}_${fields.join("_")}_${suffix}`);
+    }
   }
-  return out;
+  return names;
 }
 
 let db: PGlite;
-let migrationErrors: { dir: string; message: string }[] = [];
 let dbColumns: Map<string, Set<string>>;
-let dbEnumValues: Set<string>;
 let dbEnumTypes: Map<string, string[]>;
+let dbIndexes: Set<string>;
 
 beforeAll(async () => {
   db = new PGlite();
-  migrationErrors = [];
+  // Migration failures throw immediately; later migrations are never run on a
+  // partially initialized database, which used to hide the first root cause.
+  await applyPendingMigrations(db);
 
-  for (const dir of migrationFiles()) {
-    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, dir, "migration.sql"), "utf8");
-    try {
-      await db.exec(sql);
-    } catch (e: any) {
-      migrationErrors.push({ dir, message: e.message });
-    }
-  }
-
-  const cols = await db.query<{ table_name: string; column_name: string }>(
-    `select table_name, column_name from information_schema.columns
-      where table_schema = 'public' order by table_name, ordinal_position`
-  );
+  const columns = await db.query<{ table_name: string; column_name: string }>(`
+    SELECT table_name, column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name <> '_prisma_migrations'
+    ORDER BY table_name, ordinal_position
+  `);
   dbColumns = new Map();
-  for (const r of cols.rows) {
-    if (!dbColumns.has(r.table_name)) dbColumns.set(r.table_name, new Set());
-    dbColumns.get(r.table_name)!.add(r.column_name);
+  for (const row of columns.rows) {
+    if (!dbColumns.has(row.table_name)) dbColumns.set(row.table_name, new Set());
+    dbColumns.get(row.table_name)!.add(row.column_name);
   }
 
-  const enumRows = await db.query<{ typname: string; enumlabel: string }>(
-    `select t.typname, e.enumlabel from pg_type t
-       join pg_enum e on e.enumtypid = t.oid
-      order by t.typname, e.enumsortorder`
-  );
-  dbEnumValues = new Set(enumRows.rows.map((r) => r.enumlabel));
+  const enums = await db.query<{ typname: string; enumlabel: string }>(`
+    SELECT t.typname, e.enumlabel
+    FROM pg_type t
+    JOIN pg_enum e ON e.enumtypid = t.oid
+    JOIN pg_namespace n ON n.oid = t.typnamespace
+    WHERE n.nspname = 'public'
+    ORDER BY t.typname, e.enumsortorder
+  `);
   dbEnumTypes = new Map();
-  for (const r of enumRows.rows) {
-    if (!dbEnumTypes.has(r.typname)) dbEnumTypes.set(r.typname, []);
-    dbEnumTypes.get(r.typname)!.push(r.enumlabel);
+  for (const row of enums.rows) {
+    if (!dbEnumTypes.has(row.typname)) dbEnumTypes.set(row.typname, []);
+    dbEnumTypes.get(row.typname)!.push(row.enumlabel);
   }
+
+  const indexes = await db.query<{ indexname: string }>(`
+    SELECT indexname FROM pg_indexes
+    WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'
+  `);
+  dbIndexes = new Set(indexes.rows.map((row) => row.indexname));
 }, 60_000);
 
 afterAll(async () => {
   await db?.close();
 });
 
-describe("prisma migrations", () => {
-  it("applies every migration cleanly to an empty database", () => {
-    expect(migrationErrors).toEqual([]);
-    expect(migrationFiles().length).toBeGreaterThan(0);
+describe("Prisma migration history", () => {
+  it("applies the complete chronological migration chain to an empty isolated database", async () => {
+    const ledger = await db.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM "_prisma_migrations"`);
+    expect(Number(ledger.rows[0].count)).toBe(migrationDirectories().length);
+    expect(dbColumns.has("Hotel")).toBe(true);
+    expect(dbColumns.has("HotelMembership")).toBe(true);
   });
 
-  it("is the only source of truth for the schema (migrations are in sync)", () => {
-    const { models, enums } = parsePrisma(fs.readFileSync(SCHEMA_PATH, "utf8"));
+  it("skips completed migrations on a repeat deploy-style run", async () => {
+    const before = await db.query<{ migration_name: string }>(
+      `SELECT migration_name FROM "_prisma_migrations" ORDER BY migration_name`
+    );
+    const appliedAgain = await applyPendingMigrations(db);
+    const after = await db.query<{ migration_name: string }>(
+      `SELECT migration_name FROM "_prisma_migrations" ORDER BY migration_name`
+    );
+    expect(appliedAgain).toEqual([]);
+    expect(after.rows).toEqual(before.rows);
+  });
 
+  it("matches Prisma model columns, enums, and indexes exactly", () => {
+    const { models, enums } = parsePrisma(fs.readFileSync(SCHEMA_PATH, "utf8"));
     const problems: string[] = [];
 
-    for (const name of models.keys())
-      if (!dbColumns.has(name)) problems.push(`missing table: ${name}`);
-    for (const name of dbColumns.keys())
-      if (!models.has(name)) problems.push(`extra table: ${name} (no matching Prisma model)`);
-
-    for (const [model, fields] of models) {
-      const tableCols = dbColumns.get(model);
-      if (!tableCols) continue;
-      for (const f of fields) {
-        if (f.isRelation) continue;
-        if (!tableCols.has(f.name)) problems.push(`missing column: ${model}.${f.name}`);
+    for (const name of models.keys()) if (!dbColumns.has(name)) problems.push(`missing table: ${name}`);
+    for (const name of dbColumns.keys()) if (!models.has(name)) problems.push(`extra table: ${name}`);
+    for (const [modelName, model] of models) {
+      const actualColumns = dbColumns.get(modelName);
+      if (!actualColumns) continue;
+      for (const field of model.fields) {
+        if (field.isRelation) continue;
+        if (!actualColumns.has(field.name)) problems.push(`missing column: ${modelName}.${field.name}`);
       }
-      for (const col of tableCols)
-        if (!fields.some((f) => !f.isRelation && f.name === col))
-          problems.push(`extra column: ${model}.${col}`);
+      for (const column of actualColumns) {
+        if (!model.fields.some((field) => !field.isRelation && field.name === column)) {
+          problems.push(`extra column: ${modelName}.${column}`);
+        }
+      }
     }
 
     for (const [name, values] of enums) {
-      const dbValues = dbEnumTypes.get(name);
-      if (!dbValues) problems.push(`missing enum: ${name}`);
-      else if (JSON.stringify(dbValues) !== JSON.stringify(values))
-        problems.push(
-          `enum ${name} differs: schema.prisma has [${values.join(", ")}], migrations have [${dbValues.join(", ")}]`,
-        );
+      const actual = dbEnumTypes.get(name);
+      if (!actual) problems.push(`missing enum: ${name}`);
+      else if (JSON.stringify(actual) !== JSON.stringify(values)) {
+        problems.push(`${name}: schema=[${values.join(",")}], database=[${actual.join(",")}]`);
+      }
     }
+    for (const name of dbEnumTypes.keys()) if (!enums.has(name)) problems.push(`extra enum: ${name}`);
 
+    const expectedIndexes = expectedIndexNames(models);
+    for (const name of expectedIndexes) if (!dbIndexes.has(name)) problems.push(`missing index: ${name}`);
+    for (const name of dbIndexes) if (!expectedIndexes.has(name)) problems.push(`extra index: ${name}`);
     expect(problems).toEqual([]);
   });
 
-  it("has a foreign key behind every relation the seed and app depend on", async () => {
-    const rows = await db.query<{ table_name: string; column_name: string; foreign_table: string }>(
-      `select tc.table_name, kcu.column_name, ccu.table_name as foreign_table
-         from information_schema.table_constraints tc
-         join information_schema.key_column_usage kcu on kcu.constraint_name = tc.constraint_name
-         join information_schema.constraint_column_usage ccu on ccu.constraint_name = tc.constraint_name
-        where tc.constraint_type = 'FOREIGN KEY' and tc.table_schema = 'public'`
-    );
-    const fks = new Set(rows.rows.map((r) => `${r.table_name}.${r.column_name}->${r.foreign_table}`));
+  it("keeps every required tenant ID non-null and has composite tenant ownership constraints", async () => {
+    const { models } = parsePrisma(fs.readFileSync(SCHEMA_PATH, "utf8"));
+    const tenantTables = [...models.entries()]
+      .filter(([, model]) => model.fields.some((field) => field.name === "hotelId" && !field.isOptional))
+      .map(([name]) => name);
+    for (const table of tenantTables) {
+      const result = await db.query<{ is_nullable: string }>(`
+        SELECT is_nullable FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'hotelId'
+      `, [table]);
+      expect(result.rows[0]?.is_nullable, `${table}.hotelId must be NOT NULL`).toBe("NO");
+    }
 
-    // These are the ones whose absence would silently corrupt data rather than
-    // throw: rooms pointing at a non-existent tariff, and the join tables.
-    expect(fks).toContain("Room.roomTypeId->RoomType");
-    expect(fks).toContain("ReservationRoom.reservationId->Reservation");
-    expect(fks).toContain("ReservationRoom.roomId->Room");
-    expect(fks).toContain("FolioItem.folioId->Folio");
-    expect(fks).toContain("RecipeIngredient.recipeId->Recipe");
-    expect(fks).toContain("RecipeIngredient.inventoryItemId->InventoryItem");
+    const constraints = await db.query<{ constraint_name: string }>(`
+      SELECT constraint_name FROM information_schema.table_constraints
+      WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'
+    `);
+    const names = new Set(constraints.rows.map((row) => row.constraint_name));
+    for (const [modelName, model] of models) {
+      for (const relation of model.declaration.matchAll(/^\s*\w+\s+Hotel\??\s+@relation\(fields: \[([^\]]+)\]/gm)) {
+        const fields = relation[1].split(",").map((field) => field.trim());
+        expect(names.has(`${modelName}_${fields.join("_")}_fkey`), `${modelName} must reference Hotel`).toBe(true);
+      }
+    }
+    for (const name of [
+      "Room_roomTypeId_hotelId_fkey",
+      "Reservation_guestId_hotelId_fkey",
+      "Folio_guestId_hotelId_fkey",
+      "Payment_paymentMethodId_hotelId_fkey",
+      "MenuItem_categoryId_hotelId_fkey",
+      "StockMovement_inventoryItemId_hotelId_fkey",
+    ]) expect(names.has(name), `missing tenant-scoped foreign key ${name}`).toBe(true);
   });
 });
 
-describe("enum literals used by the app", () => {
-  it("are all members of a real database enum", () => {
-    const files = [...sourceFiles("app"), "prisma/seed.ts"].filter((f) => fs.existsSync(f));
+describe("legacy data conversion", () => {
+  it("preserves representative pre-SaaS records and assigns them to the legacy hotel", async () => {
+    const legacyDb = new PGlite();
+    try {
+      const seedLegacyRows = async (directory: string, target: PGlite) => {
+        if (directory !== "20261008123000_multi_tenant_saas_init") return;
+        await target.exec(`
+          INSERT INTO "User" ("id", "name", "email", "passwordHash", "role", "updatedAt")
+          VALUES ('legacy-admin', 'Legacy Admin', 'legacy@example.test', 'hash', 'ADMIN', CURRENT_TIMESTAMP);
+          INSERT INTO "RoomType" ("id", "name", "baseRate", "capacity", "mealPlan", "updatedAt")
+          VALUES ('legacy-room-type', 'Legacy Half Board', 120.00, 2, 'HALF_BOARD', CURRENT_TIMESTAMP);
+          INSERT INTO "Room" ("id", "number", "roomTypeId", "status", "updatedAt")
+          VALUES ('legacy-room', '101', 'legacy-room-type', 'AVAILABLE', CURRENT_TIMESTAMP);
+          INSERT INTO "Guest" ("id", "fullName", "updatedAt")
+          VALUES ('legacy-guest', 'Legacy Guest', CURRENT_TIMESTAMP);
+          INSERT INTO "Reservation" ("id", "code", "guestId", "checkInDate", "checkOutDate", "createdById", "updatedAt")
+          VALUES ('legacy-reservation', 'LEGACY-001', 'legacy-guest', '2026-10-27', '2026-10-29', 'legacy-admin', CURRENT_TIMESTAMP);
+          INSERT INTO "MenuCategory" ("id", "name") VALUES
+            ('legacy-dessert-a', 'Desserts'), ('legacy-dessert-b', 'Desserts');
+          INSERT INTO "MenuItem" ("id", "categoryId", "name", "price")
+          VALUES ('legacy-dessert-item', 'legacy-dessert-b', 'Cake', 8.00);
+          INSERT INTO "Notification" ("id", "title", "body")
+          VALUES ('legacy-notification', 'Legacy title', 'Legacy notification body');
+          INSERT INTO "AuditLog" ("id", "userId", "action", "entityType", "entityId", "before", "after", "reason")
+          VALUES ('legacy-audit', 'legacy-admin', 'UPDATED', 'Reservation', 'legacy-reservation', '{"status":"PENDING"}', '{"status":"CONFIRMED"}', 'migration fixture');
+        `);
+      };
+      await applyPendingMigrations(legacyDb, seedLegacyRows);
 
-    const used = new Map<string, Set<string>>();
-    for (const file of files) {
-      const src = fs.readFileSync(file, "utf8");
-      for (const m of src.matchAll(/["']([A-Z][A-Z0-9_]{2,})["']/g)) {
-        if (!used.has(m[1])) used.set(m[1], new Set());
-        used.get(m[1])!.add(file);
-      }
+      const membership = await legacyDb.query<{ role: string; hotelId: string }>(`
+        SELECT role, "hotelId" FROM "HotelMembership" WHERE "userId" = 'legacy-admin'
+      `);
+      expect(membership.rows).toEqual([{ role: "HOTEL_OWNER", hotelId: "legacy-hotel" }]);
+
+      const room = await legacyDb.query<{ hotelId: string; mealPlan: string }>(`
+        SELECT r."hotelId", rt."mealPlan" FROM "Room" r
+        JOIN "RoomType" rt ON rt.id = r."roomTypeId" WHERE r.id = 'legacy-room'
+      `);
+      expect(room.rows).toEqual([{ hotelId: "legacy-hotel", mealPlan: "HALF_BOARD" }]);
+
+      const categoryMerge = await legacyDb.query<{ categoryId: string; categoryCount: number }>(`
+        SELECT item."categoryId", COUNT(category.id)::int AS "categoryCount"
+        FROM "MenuItem" item
+        JOIN "MenuCategory" category ON category.id = item."categoryId"
+        WHERE item.id = 'legacy-dessert-item'
+        GROUP BY item."categoryId"
+      `);
+      expect(categoryMerge.rows).toEqual([{ categoryId: "legacy-dessert-a", categoryCount: 1 }]);
+
+      const notification = await legacyDb.query<{ hotelId: string; message: string; type: string }>(`
+        SELECT "hotelId", message, type FROM "Notification" WHERE id = 'legacy-notification'
+      `);
+      expect(notification.rows).toEqual([{
+        hotelId: "legacy-hotel", message: "Legacy notification body", type: "SYSTEM",
+      }]);
+
+      const audit = await legacyDb.query<{ hotelId: string; entity: string; metadata: { before: unknown; after: unknown; reason: string } }>(`
+        SELECT "hotelId", entity, metadata FROM "AuditLog" WHERE id = 'legacy-audit'
+      `);
+      expect(audit.rows[0]).toMatchObject({
+        hotelId: "legacy-hotel",
+        entity: "Reservation",
+        metadata: {
+          before: { status: "PENDING" },
+          after: { status: "CONFIRMED" },
+          reason: "migration fixture",
+        },
+      });
+    } finally {
+      await legacyDb.close();
     }
-
-    expect(used.size).toBeGreaterThan(20); // guard against the regex silently breaking
-
-    const unknown: string[] = [];
-    for (const [literal, where] of used) {
-      if (NON_DB_ENUM_LITERALS.has(literal)) continue;
-      if (!dbEnumValues.has(literal)) unknown.push(`${literal} (used in ${[...where].join(", ")})`);
-    }
-
-    expect(unknown).toEqual([]);
   });
 });

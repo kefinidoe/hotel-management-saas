@@ -99,6 +99,7 @@ vi.doMock("@/lib/authz", () => ({
     }
     return mockCurrentTenant;
   },
+  requireModule: async () => null,
   requireRole: (role: any, allowed: readonly string[]) => {
     if (!role || !allowed.includes(role)) {
       return CustomNextResponse.json({ error: "You don't have permission to do that." }, { status: 403 });

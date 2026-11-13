@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { getRestaurantPaymentMethods } from "@/lib/restaurant-dashboard";
 
 export async function GET() {
@@ -8,6 +8,9 @@ export async function GET() {
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.PAYMENT_OPERATIONS);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "RESTAURANT_POS");
+  if (blocked) return blocked;
 
   return NextResponse.json(await getRestaurantPaymentMethods(tenant.hotelId));
 }

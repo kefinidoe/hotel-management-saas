@@ -84,6 +84,7 @@ vi.doMock("@/lib/authz", () => ({
     }
     return mockTenantContext;
   },
+  requireModule: async () => null,
   requireRole: (role: any, allowed: readonly string[]) => {
     if (!role || !allowed.includes(role)) {
       return CustomNextResponse.json({ error: "You don't have permission to do that." }, { status: 403 });
@@ -109,8 +110,10 @@ interface DBState {
 }
 
 let db: DBState;
+let subscriptionStorageAvailable = true;
 
 function resetDB(): DBState {
+  subscriptionStorageAvailable = true;
   const users = new Map<string, any>();
   const memberships = new Map<string, any>();
 
@@ -210,6 +213,29 @@ vi.doMock("@/lib/prisma", () => ({
         return updated;
       },
     },
+    subscription: {
+      findUnique: async ({ where }: any) => {
+        if (!subscriptionStorageAvailable) throw new Error("Simulated subscription storage outage");
+        if (where.hotelId !== "hotel-a") return null;
+        const trialStartsAt = new Date("2026-01-01T00:00:00.000Z");
+        const trialEndsAt = new Date("2035-01-01T00:00:00.000Z");
+        return {
+          id: "subscription-hotel-a",
+          hotelId: "hotel-a",
+          planId: "BAND_1_10",
+          status: SubscriptionStatus.TRIALING,
+          trialStartsAt,
+          trialEndsAt,
+          currentPeriodStartsAt: trialStartsAt,
+          currentPeriodEndsAt: trialEndsAt,
+          cancelAtPeriodEnd: false,
+          suspensionReason: null,
+          billingInterval: BillingInterval.MONTHLY,
+          amount: 3500,
+          currency: "KES",
+        };
+      },
+    },
     hotelMembership: {
       findMany: async ({ where }: any) => {
         const results: any[] = [];
@@ -298,27 +324,50 @@ vi.doMock("@/lib/prisma", () => ({
       },
     },
     $transaction: async (arg: any) => {
-      if (Array.isArray(arg)) {
-        return await Promise.all(arg);
-      }
-      return await arg({
+      if (Array.isArray(arg)) return await Promise.all(arg);
+
+      const tx = {
+        // The test double cannot exercise PostgreSQL advisory locks, but it does
+        // execute the real quota check and its writes through this transaction client.
+        $queryRaw: async () => [],
         user: {
           create: async ({ data }: any) => {
-            const id = `user-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-            const created = { id, createdAt: new Date(), ...data };
+            const id = data.id || `user-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+            const created = { id, createdAt: new Date(), updatedAt: new Date(), ...data };
             db.users.set(id, created);
             return created;
           },
-        },
-        hotelMembership: {
-          create: async ({ data }: any) => {
-            const id = `mem-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-            const created = { id, createdAt: new Date(), ...data };
-            db.memberships.set(id, created);
-            return created;
+          update: async ({ where, data }: any) => {
+            const existing = db.users.get(where.id);
+            if (!existing) throw new Error("User not found");
+            const changes = Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined));
+            const updated = { ...existing, ...changes };
+            db.users.set(where.id, updated);
+            return updated;
           },
         },
-      });
+        hotelMembership: {
+          count: async ({ where }: any) => Array.from(db.memberships.values()).filter((membership) =>
+            (!where?.hotelId || membership.hotelId === where.hotelId) &&
+            (!where?.status || membership.status === where.status)
+          ).length,
+          create: async ({ data }: any) => {
+            const id = data.id || `mem-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+            const created = { id, createdAt: new Date(), updatedAt: new Date(), ...data };
+            db.memberships.set(id, created);
+            return { ...created, user: db.users.get(created.userId) };
+          },
+          update: async ({ where, data }: any) => {
+            const existing = db.memberships.get(where.id);
+            if (!existing) throw new Error("Membership not found");
+            const changes = Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined));
+            const updated = { ...existing, ...changes, updatedAt: new Date() };
+            db.memberships.set(where.id, updated);
+            return { ...updated, user: db.users.get(updated.userId) };
+          },
+        },
+      };
+      return await arg(tx);
     },
   },
 }));
@@ -387,6 +436,28 @@ describe("Phase 5: Multi-Tenant Staff Management", () => {
       );
       expect(membership).toBeDefined();
       expect(membership.role).toBe("WAITER");
+    });
+
+    it("fails closed when subscription storage is unavailable", async () => {
+      subscriptionStorageAvailable = false;
+      const initialUserCount = db.users.size;
+      const initialMembershipCount = db.memberships.size;
+      const req = new Request("http://localhost:3000/api/staff", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "Unverified Staff",
+          email: "unverified@hotela.com",
+          password: "StaffPassword123!",
+          role: "WAITER",
+        }),
+      });
+
+      const res = await postStaffRoute(req);
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({ error: "SUBSCRIPTION_STATUS_UNAVAILABLE" });
+      expect(db.users.size).toBe(initialUserCount);
+      expect(db.memberships.size).toBe(initialMembershipCount);
     });
 
     it("prevents non-owners (e.g. HOTEL_ADMIN) from assigning HOTEL_OWNER role", async () => {
@@ -460,6 +531,19 @@ describe("Phase 5: Multi-Tenant Staff Management", () => {
 
       const saved = db.memberships.get("mem-a-recep");
       expect(saved.role).toBe("MANAGER");
+    });
+
+    it("rejects roles outside the permitted hotel roles", async () => {
+      const req = new Request("http://localhost:3000/api/staff/mem-a-recep", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role: "PLATFORM_ADMIN" }),
+      });
+
+      const res = await patchStaffRoute(req, { params: Promise.resolve({ id: "mem-a-recep" }) });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toContain("Invalid role. Permitted hotel roles:");
+      expect(db.memberships.get("mem-a-recep").role).toBe("RECEPTIONIST");
     });
 
     it("prevents self-demotion or self-deactivation", async () => {

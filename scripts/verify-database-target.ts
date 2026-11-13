@@ -7,7 +7,9 @@
  * Usage:
  *   npx tsx scripts/verify-database-target.ts
  */
+import { loadEnvConfig } from "@next/env";
 
+loadEnvConfig(process.cwd());
 import { assertDatabaseSafety } from "../lib/db-safety-guard";
 
 function runVerification() {

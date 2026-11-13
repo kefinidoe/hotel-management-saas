@@ -1,8 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
-import fs from "node:fs";
-import path from "node:path";
+import { applyPendingMigrations } from "./migration-runner";
 
 describe("Phase 3 Cross-Tenant Referential Integrity Test Suite", () => {
   let db: PGlite;
@@ -42,12 +41,8 @@ describe("Phase 3 Cross-Tenant Referential Integrity Test Suite", () => {
 
   beforeAll(async () => {
     db = new PGlite();
-    const migrationPath = path.join(
-      process.cwd(),
-      "prisma/migrations/20261008123000_multi_tenant_saas_init/migration.sql"
-    );
-    const sql = fs.readFileSync(migrationPath, "utf8");
-    await db.exec(sql);
+    // Establish all legacy objects and enum history before tenant-scoped schema checks.
+    await applyPendingMigrations(db);
 
     // 1. Seed Hotel Alpha & Hotel Beta
     await db.query(

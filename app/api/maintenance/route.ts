@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 
 export async function GET() {
   const tenant = await getTenantFromRoute();
@@ -9,14 +9,8 @@ export async function GET() {
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MAINTENANCE);
   if (forbidden) return forbidden;
 
-  const { checkModuleEntitlement } = await import("@/lib/entitlements");
-  const moduleCheck = await checkModuleEntitlement(tenant.hotelId, "MAINTENANCE");
-  if (!moduleCheck.allowed) {
-    return NextResponse.json(
-      { error: moduleCheck.code || "MODULE_NOT_ENTITLED", message: moduleCheck.reason },
-      { status: 403 }
-    );
-  }
+  const blocked = await requireModule(tenant.hotelId, "MAINTENANCE");
+  if (blocked) return blocked;
 
   const tickets = await prisma.maintenanceTicket.findMany({
     where: { hotelId: tenant.hotelId },
@@ -48,14 +42,8 @@ export async function POST(req: Request) {
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MAINTENANCE);
   if (forbidden) return forbidden;
 
-  const { checkModuleEntitlement } = await import("@/lib/entitlements");
-  const moduleCheck = await checkModuleEntitlement(tenant.hotelId, "MAINTENANCE");
-  if (!moduleCheck.allowed) {
-    return NextResponse.json(
-      { error: moduleCheck.code || "MODULE_NOT_ENTITLED", message: moduleCheck.reason },
-      { status: 403 }
-    );
-  }
+  const blocked = await requireModule(tenant.hotelId, "MAINTENANCE");
+  if (blocked) return blocked;
 
   const body = await req.json();
   if (!body.title) {

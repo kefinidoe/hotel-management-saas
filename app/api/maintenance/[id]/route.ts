@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 
 export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -10,14 +10,8 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MAINTENANCE);
   if (forbidden) return forbidden;
 
-  const { checkModuleEntitlement } = await import("@/lib/entitlements");
-  const moduleCheck = await checkModuleEntitlement(tenant.hotelId, "MAINTENANCE");
-  if (!moduleCheck.allowed) {
-    return NextResponse.json(
-      { error: moduleCheck.code || "MODULE_NOT_ENTITLED", message: moduleCheck.reason },
-      { status: 403 }
-    );
-  }
+  const blocked = await requireModule(tenant.hotelId, "MAINTENANCE");
+  if (blocked) return blocked;
 
   const existing = await prisma.maintenanceTicket.findFirst({
     where: { id, hotelId: tenant.hotelId },

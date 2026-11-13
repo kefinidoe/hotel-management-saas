@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { HotelRole, MembershipStatus } from "@prisma/client";
 import { passwordProblem } from "@/lib/password";
 
@@ -33,6 +33,9 @@ export async function PATCH(
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.STAFF_ADMIN);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   const targetMembership = await findHotelMembership(tenant.hotelId, id);
   if (!targetMembership) {
@@ -154,49 +157,45 @@ export async function PATCH(
         : MembershipStatus.SUSPENDED
       : undefined;
 
-  // Quota enforcement: Reactivating an inactive/suspended staff member increases active staff count
-  if (
-    targetMembership.status !== MembershipStatus.ACTIVE &&
-    effectiveStatus === MembershipStatus.ACTIVE
-  ) {
-    const { checkUsageLimit } = await import("@/lib/entitlements");
-    const staffLimit = await checkUsageLimit(tenant.hotelId, "maxStaff", 1);
-    if (!staffLimit.allowed) {
-      return NextResponse.json(
-        {
-          error: staffLimit.code || "PLAN_LIMIT_EXCEEDED",
-          message: staffLimit.reason,
-        },
-        { status: 403 }
-      );
-    }
-  }
-
-  const [updatedMembership] = await prisma.$transaction([
-    prisma.hotelMembership.update({
+  const updateStaff = async (tx: any) => {
+    const updated = await tx.hotelMembership.update({
       where: { id: targetMembership.id },
-      data: {
-        role: requestedRole ?? undefined,
-        status: effectiveStatus,
-      },
-      include: {
-        user: {
-          select: { id: true, name: true, email: true, department: true },
+      data: { role: requestedRole ?? undefined, status: effectiveStatus },
+      include: { user: { select: { id: true, name: true, email: true, department: true } } },
+    });
+    if (passwordHash !== undefined || requestedDepartment !== undefined) {
+      await tx.user.update({
+        where: { id: targetMembership.userId },
+        data: {
+          passwordHash,
+          department: requestedDepartment !== undefined ? requestedDepartment.trim() || null : undefined,
         },
-      },
-    }),
-    ...(passwordHash !== undefined || requestedDepartment !== undefined
-      ? [
-          prisma.user.update({
-            where: { id: targetMembership.userId },
-            data: {
-              passwordHash,
-              department: requestedDepartment !== undefined ? requestedDepartment.trim() || null : undefined,
-            },
-          }),
-        ]
-      : []),
-  ]);
+      });
+    }
+    return updated;
+  };
+
+  let updatedMembership: any;
+  if (targetMembership.status !== MembershipStatus.ACTIVE && effectiveStatus === MembershipStatus.ACTIVE) {
+    try {
+      const { withUsageLimitLock } = await import("@/lib/entitlements");
+      const quotaResult = await withUsageLimitLock(tenant.hotelId, "maxStaff", 1, updateStaff);
+      if (!quotaResult.allowed) {
+        return NextResponse.json(
+          { error: quotaResult.limit.code || "PLAN_LIMIT_EXCEEDED", message: quotaResult.limit.reason },
+          { status: quotaResult.limit.code === "SUBSCRIPTION_STATUS_UNAVAILABLE" || quotaResult.limit.code === "USAGE_LIMIT_UNAVAILABLE" ? 503 : 403 }
+        );
+      }
+      updatedMembership = quotaResult.value;
+    } catch (error: any) {
+      if (error?.code === "SUBSCRIPTION_STATUS_UNAVAILABLE" || error?.code === "USAGE_LIMIT_UNAVAILABLE") {
+        return NextResponse.json({ error: error.code, message: error.message }, { status: 503 });
+      }
+      throw error;
+    }
+  } else {
+    updatedMembership = await prisma.$transaction((tx) => updateStaff(tx));
+  }
 
   return NextResponse.json({
     id: updatedMembership.id,
@@ -220,6 +219,9 @@ export async function DELETE(
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.STAFF_ADMIN);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   const targetMembership = await findHotelMembership(tenant.hotelId, id);
   if (!targetMembership) {

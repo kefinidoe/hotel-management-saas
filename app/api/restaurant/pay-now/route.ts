@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 import {
   cartTotal,
@@ -58,17 +58,8 @@ export async function POST(req: Request) {
   const hotelId = tenant.hotelId;
 
   // Enforce SaaS Subscription Plan Module Entitlement
-  const { checkModuleEntitlement } = await import("@/lib/entitlements");
-  const moduleCheck = await checkModuleEntitlement(hotelId, "RESTAURANT_POS");
-  if (!moduleCheck.allowed) {
-    return NextResponse.json(
-      {
-        error: moduleCheck.code || "MODULE_NOT_ENTITLED",
-        message: moduleCheck.reason,
-      },
-      { status: 403 }
-    );
-  }
+  const blocked = await requireModule(tenant.hotelId, "RESTAURANT_POS");
+  if (blocked) return blocked;
 
   let body: any;
   try {

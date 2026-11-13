@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { accommodationRequired, roundMoney, stayNights } from "@/lib/billing";
 import { getStockStatus } from "@/lib/inventory";
 import {
@@ -31,14 +31,8 @@ export async function GET(req: Request) {
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.FINANCIAL_REPORTS);
   if (forbidden) return forbidden;
 
-  const { checkModuleEntitlement } = await import("@/lib/entitlements");
-  const moduleCheck = await checkModuleEntitlement(tenant.hotelId, "REPORTS");
-  if (!moduleCheck.allowed) {
-    return NextResponse.json(
-      { error: moduleCheck.code || "MODULE_NOT_ENTITLED", message: moduleCheck.reason },
-      { status: 403 }
-    );
-  }
+  const blocked = await requireModule(tenant.hotelId, "REPORTS");
+  if (blocked) return blocked;
 
   const { searchParams } = new URL(req.url);
   let range: ReturnType<typeof getReportRange>;

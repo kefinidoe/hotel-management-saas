@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { folioTotals, parseMoney, roundMoney } from "@/lib/billing";
 
 class PaymentError extends Error {
@@ -16,6 +16,9 @@ export async function POST(req: Request) {
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.ACCOMMODATION_PAYMENTS);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "FOLIOS");
+  if (blocked) return blocked;
 
   const hotelId = tenant.hotelId;
 

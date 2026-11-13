@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getPlatformAdminFromRoute } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
+import { SubscriptionStatusUnavailableError } from "@/lib/entitlements";
 
 export const dynamic = "force-dynamic";
 
@@ -147,6 +148,16 @@ export async function GET(
       })),
     });
   } catch (error) {
+    if (error instanceof SubscriptionStatusUnavailableError) {
+      return NextResponse.json(
+        {
+          error: error.code,
+          message: "Subscription status is temporarily unavailable.",
+        },
+        { status: error.statusCode }
+      );
+    }
+
     console.error("Failed to inspect hotel details:", error);
     return NextResponse.json(
       { error: "SERVER_ERROR", message: "Failed to retrieve hotel details." },

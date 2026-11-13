@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { getRestaurantOpenFolios } from "@/lib/restaurant-dashboard";
 
 export async function GET() {
@@ -9,17 +9,8 @@ export async function GET() {
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.RESTAURANT_POS);
   if (forbidden) return forbidden;
 
-  const { checkModuleEntitlement } = await import("@/lib/entitlements");
-  const moduleCheck = await checkModuleEntitlement(tenant.hotelId, "RESTAURANT_POS");
-  if (!moduleCheck.allowed) {
-    return NextResponse.json(
-      {
-        error: moduleCheck.code || "MODULE_NOT_ENTITLED",
-        message: moduleCheck.reason,
-      },
-      { status: 403 }
-    );
-  }
+  const blocked = await requireModule(tenant.hotelId, "RESTAURANT_POS");
+  if (blocked) return blocked;
 
   return NextResponse.json(await getRestaurantOpenFolios(tenant.hotelId));
 }

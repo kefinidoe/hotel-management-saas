@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 
 export async function GET() {
   const tenant = await getTenantFromRoute();
@@ -8,6 +8,9 @@ export async function GET() {
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.ALL_STAFF);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   const hotelId = tenant.hotelId;
 
@@ -45,6 +48,9 @@ export async function POST(req: Request) {
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
   if (forbidden) return forbidden;
 
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
+
   const hotelId = tenant.hotelId;
 
   let body: any;
@@ -64,19 +70,6 @@ export async function POST(req: Request) {
     );
   }
 
-  // Enforce SaaS Subscription Plan Room Limit
-  const { checkUsageLimit } = await import("@/lib/entitlements");
-  const roomLimit = await checkUsageLimit(hotelId, "maxRooms", 1);
-  if (!roomLimit.allowed) {
-    return NextResponse.json(
-      {
-        error: roomLimit.code || "PLAN_LIMIT_EXCEEDED",
-        message: roomLimit.reason,
-      },
-      { status: 403 }
-    );
-  }
-
   // Tenant Isolation Verification: Validate that the referenced roomTypeId belongs to THIS hotel
   const roomType = await prisma.roomType.findUnique({
     where: { id_hotelId: { id: roomTypeId, hotelId } },
@@ -90,7 +83,8 @@ export async function POST(req: Request) {
   }
 
   try {
-    const room = await prisma.room.create({
+    const { withUsageLimitLock } = await import("@/lib/entitlements");
+    const result = await withUsageLimitLock(hotelId, "maxRooms", 1, (tx) => tx.room.create({
       data: {
         hotelId,
         number: roomNumber,
@@ -111,15 +105,22 @@ export async function POST(req: Request) {
           },
         },
       },
-    });
+    }));
+    if (!result.allowed) {
+      return NextResponse.json(
+        { error: result.limit.code || "PLAN_LIMIT_EXCEEDED", message: result.limit.reason },
+        { status: result.limit.code === "SUBSCRIPTION_STATUS_UNAVAILABLE" || result.limit.code === "USAGE_LIMIT_UNAVAILABLE" ? 503 : 403 }
+      );
+    }
+    const room = result.value;
     return NextResponse.json(
-      {
-        ...room,
-        roomType: { ...room.roomType, baseRate: Number(room.roomType.baseRate) },
-      },
+      { ...room, roomType: { ...room.roomType, baseRate: Number(room.roomType.baseRate) } },
       { status: 201 }
     );
   } catch (error: any) {
+    if (error?.code === "SUBSCRIPTION_STATUS_UNAVAILABLE" || error?.code === "USAGE_LIMIT_UNAVAILABLE") {
+      return NextResponse.json({ error: error.code, message: error.message }, { status: 503 });
+    }
     if (error?.code === "P2002") {
       return NextResponse.json(
         { error: "A room with that number already exists in this hotel." },

@@ -1,28 +1,23 @@
 // @vitest-environment node
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
-import fs from "node:fs";
-import path from "node:path";
+import { applyPendingMigrations } from "./migration-runner";
 
 describe("Phase 3 Multi-Tenant Schema & Isolation Verification", () => {
   let db: PGlite;
 
   beforeAll(async () => {
     db = new PGlite();
-    const migrationPath = path.join(
-      process.cwd(),
-      "prisma/migrations/20261008123000_multi_tenant_saas_init/migration.sql"
-    );
-    const sql = fs.readFileSync(migrationPath, "utf8");
-    // Execute the complete pristine multi-tenant migration SQL on the clean database
-    await db.exec(sql);
+    // Tenant-isolation assertions use the actual chronological schema, not an
+    // isolated execution of the SaaS migration against an empty database.
+    await applyPendingMigrations(db);
   });
 
   afterAll(async () => {
     await db?.close();
   });
 
-  it("applies the multi-tenant migration cleanly to an empty database without errors", async () => {
+  it("builds the complete migration history before exercising the multi-tenant schema", async () => {
     const res = await db.query<{ table_name: string }>(
       `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name`
     );
@@ -156,6 +151,28 @@ describe("Phase 3 Multi-Tenant Schema & Isolation Verification", () => {
          VALUES ('inv-alpha-2', 'hotel-alpha-id', 'ING-COFFEE-01', 'Espresso Blend', 'Beverages', 'g', NOW())`
       )
     ).rejects.toThrow(/unique constraint|InventoryItem_hotelId_sku_key/i);
+  });
+
+  it("rejects cross-hotel references even when both referenced records exist", async () => {
+    await db.query(`
+      INSERT INTO "User" (id, name, email, "passwordHash", "updatedAt")
+      VALUES ('tenant-constraint-user', 'Tenant Test', 'tenant-test@example.com', 'hash', NOW())
+    `);
+    await db.query(`
+      INSERT INTO "Guest" (id, "hotelId", "fullName", "updatedAt") VALUES
+        ('tenant-guest-alpha', 'hotel-alpha-id', 'Alpha Guest', NOW()),
+        ('tenant-guest-beta', 'hotel-beta-id', 'Beta Guest', NOW())
+    `);
+
+    await expect(db.query(`
+      INSERT INTO "Reservation" (id, "hotelId", code, "guestId", "checkInDate", "checkOutDate", "createdById", "updatedAt")
+      VALUES ('cross-hotel-reservation', 'hotel-alpha-id', 'CROSS-001', 'tenant-guest-beta', NOW(), NOW() + INTERVAL '1 day', 'tenant-constraint-user', NOW())
+    `)).rejects.toThrow(/Reservation_guestId_hotelId_fkey|foreign key/i);
+
+    await expect(db.query(`
+      INSERT INTO "StockMovement" (id, "hotelId", "inventoryItemId", type, quantity, "beforeQty", "afterQty")
+      VALUES ('cross-hotel-movement', 'hotel-alpha-id', 'inv-beta-1', 'ADJUSTMENT', 1, 0, 1)
+    `)).rejects.toThrow(/StockMovement_inventoryItemId_hotelId_fkey|foreign key/i);
   });
 
   it("verifies global User uniqueness on email while role is scoped to HotelMembership", async () => {
