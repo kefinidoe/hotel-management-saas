@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Plus, X } from "lucide-react";
+import { useDurableMutation } from "@/components/recovery/DurableMutationProvider";
 import type { InventoryItemRow } from "./InventoryClient";
 import { formatDisplayDate } from "@/lib/dates";
 
@@ -114,6 +115,7 @@ function RecordPurchaseModal({
   const [unitCost, setUnitCost] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const { submit: submitDurable } = useDurableMutation();
 
   const item = inventoryItems.find((i) => i.id === inventoryItemId);
   const totalCost = (Number(quantity) || 0) * (Number(unitCost) || 0);
@@ -122,17 +124,14 @@ function RecordPurchaseModal({
     e.preventDefault();
     setLoading(true);
     setError(null);
-    const res = await fetch("/api/purchases", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    try {
+    const res = await submitDurable("PURCHASE", "/api/purchases", "POST", {
         inventoryItemId,
         supplier,
         invoiceNumber: invoiceNumber || undefined,
         quantity: Number(quantity),
         unitCost: Number(unitCost),
-      }),
-    });
+      });
     setLoading(false);
     const data = await res.json();
     if (!res.ok) {
@@ -140,6 +139,10 @@ function RecordPurchaseModal({
       return;
     }
     onSaved();
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Network error. Retry the saved request to check its outcome.");
+      setLoading(false);
+    }
   }
 
   return (

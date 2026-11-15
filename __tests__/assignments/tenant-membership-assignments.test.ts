@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   wastageFindMany: vi.fn(),
   inventoryItemFindUnique: vi.fn(),
   inventoryItemUpdate: vi.fn(),
+  inventoryItemUpdateMany: vi.fn(),
   stockMovementCreate: vi.fn(),
   transaction: vi.fn(),
   tenant: { hotelId: "hotel-a", userId: "owner-a", role: "HOTEL_ADMIN" },
@@ -20,7 +21,7 @@ const mocks = vi.hoisted(() => ({
     static json(body: unknown, init?: ResponseInit) {
       return new Response(JSON.stringify(body), {
         ...init,
-        headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "test-key", ...(init?.headers || {}) },
       });
     }
   },
@@ -54,7 +55,7 @@ import { GET as listWastage, POST as recordWastage } from "@/app/api/wastage/rou
 const routeParams = (id: string) => ({ params: Promise.resolve({ id }) });
 const jsonRequest = (url: string, body: unknown) => new Request(url, {
   method: "PUT",
-  headers: { "Content-Type": "application/json" },
+  headers: { "Content-Type": "application/json", "Idempotency-Key": "test-key" },
   body: JSON.stringify(body),
 });
 
@@ -78,11 +79,17 @@ beforeEach(() => {
   mocks.wastageCreate.mockResolvedValue({ id: "waste-a" });
   mocks.wastageFindMany.mockResolvedValue([{ id: "waste-a", inventoryItem: { name: "Rice", unit: "kg", costPerUnit: 100 }, quantity: 1, reason: "SPOILAGE", department: null, accountableName: null, accountableUserId: "staff-b", recordedById: "staff-b", createdAt: new Date() }]);
   mocks.inventoryItemUpdate.mockResolvedValue({});
+  mocks.inventoryItemUpdateMany.mockResolvedValue({ count: 1 });
   mocks.stockMovementCreate.mockResolvedValue({});
   mocks.transaction.mockImplementation(async (operation: any) => {
     if (Array.isArray(operation)) return Promise.all(operation);
     return operation({
+      $queryRaw: async () => [],
+      inventoryRequest: { findUnique: async () => null, create: async () => ({}) },
       hotelMembership: { findFirst: mocks.hotelMembershipFindFirst },
+      inventoryItem: { updateMany: mocks.inventoryItemUpdateMany, findUnique: mocks.inventoryItemFindUnique, findUniqueOrThrow: async () => ({ id: "item-a", currentStock: new (await import("@prisma/client")).Prisma.Decimal(4) }) },
+      wastage: { create: mocks.wastageCreate },
+      stockMovement: { create: mocks.stockMovementCreate },
       housekeepingTask: { updateMany: mocks.housekeepingUpdateMany, findFirst: mocks.housekeepingFindFirst },
       maintenanceTicket: { updateMany: mocks.maintenanceUpdateMany, findFirst: mocks.maintenanceFindFirst },
     });
@@ -174,7 +181,7 @@ describe("hotel-local staff assignment validation", () => {
   it("rejects cross-hotel wastage accountability before creating or changing stock", async () => {
     const response = await recordWastage(new Request("https://hotel.test/api/wastage", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Idempotency-Key": "test-key" },
       body: JSON.stringify({
         inventoryItemId: "item-a",
         quantity: 1,
@@ -193,7 +200,7 @@ describe("hotel-local staff assignment validation", () => {
   it("uses the department on the active membership for wastage accountability", async () => {
     const response = await recordWastage(new Request("https://hotel.test/api/wastage", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Idempotency-Key": "test-key" },
       body: JSON.stringify({
         inventoryItemId: "item-a",
         quantity: 1,

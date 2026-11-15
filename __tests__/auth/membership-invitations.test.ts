@@ -21,6 +21,9 @@ class CustomNextResponse extends Response {
 
 vi.doMock("server-only", () => ({}));
 vi.doMock("next/server", () => ({ NextResponse: CustomNextResponse }));
+// This is a mocked invitation-lifecycle suite, not a limiter-store test.
+const mockLimitAuthRequest = vi.fn();
+vi.doMock("@/lib/auth-rate-limit", () => ({ limitAuthRequest: mockLimitAuthRequest }));
 
 let currentUserId: string | null = null;
 vi.doMock("next-auth", () => ({
@@ -112,9 +115,9 @@ function buildPrisma() {
       },
       findFirst: async ({ where }: any) => {
         const row = [...memberships.values()].find(
-          (m) => m.id === where.id && (where.userId === undefined || m.userId === where.userId)
+          (m) => (where.OR ? (where.OR.some((clause: any) => clause.id === m.id || clause.userId === m.userId)) : m.id === where.id) && (!where.hotelId || m.hotelId === where.hotelId) && (where.userId === undefined || m.userId === where.userId)
         );
-        return row ? { ...row } : null;
+        return row ? withHotel(row) : null;
       },
       findMany: async ({ where }: any = {}) =>
         [...memberships.values()]
@@ -140,6 +143,19 @@ function buildPrisma() {
         const row = memberships.get(where.id)!;
         Object.assign(row, data, { updatedAt: new Date() });
         return withHotel(row);
+      },
+      findUniqueOrThrow: async ({ where }: any) => withHotel(memberships.get(where.id)!),
+      updateMany: async ({ where, data }: any) => {
+        const row = memberships.get(where.id);
+        if (!row || row.userId !== where.userId || row.hotelId !== where.hotelId || row.status !== where.status) return { count: 0 };
+        Object.assign(row, data);
+        return { count: 1 };
+      },
+      deleteMany: async ({ where }: any) => {
+        const row = memberships.get(where.id);
+        if (!row || row.userId !== where.userId || row.hotelId !== where.hotelId || row.status !== where.status) return { count: 0 };
+        memberships.delete(where.id);
+        return { count: 1 };
       },
       delete: async ({ where }: any) => {
         const row = memberships.get(where.id)!;
@@ -176,7 +192,11 @@ function buildPrisma() {
       },
     },
     room: { count: async () => 4 },
-    $transaction: async (fn: any) => fn(client),
+    $transaction: async (fn: any) => {
+      const savedMemberships = structuredClone(memberships);
+      const savedAudit = structuredClone(audit);
+      try { return await fn(client); } catch (error) { memberships = savedMemberships; audit = savedAudit; throw error; }
+    },
     $queryRaw: async () => [{ locked: "" }],
   };
   return client;
@@ -185,6 +205,7 @@ function buildPrisma() {
 vi.doMock("@/lib/prisma", () => ({ get prisma() { return prismaMock; } }));
 
 const staffRoute = await import("@/app/api/staff/route");
+const staffMemberRoute = await import("@/app/api/staff/[id]/route");
 const invitationRoute = await import("@/app/api/auth/invitations/[id]/route");
 const { listPendingInvitations, latestEventsByMembership, isPendingInvitation } = await import("@/lib/invitations");
 
@@ -195,6 +216,13 @@ const inviteBody = {
   role: "RECEPTIONIST",
 };
 
+function invitationRequest(url: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers);
+  headers.set("sec-fetch-site", "same-origin");
+  if (!init.body) { headers.set("Content-Type", "application/json"); init = { ...init, body: JSON.stringify({ action: "accept" }) }; }
+  return new Request(url, { ...init, headers });
+}
+
 function post(path: string) {
   return new Request(`http://localhost:3000${path}`, {
     method: "POST",
@@ -204,6 +232,7 @@ function post(path: string) {
 }
 
 beforeEach(() => {
+  mockLimitAuthRequest.mockReset().mockResolvedValue(null);
   // The route refuses to run at all when the database is not configured.
   vi.stubEnv("DATABASE_URL", "postgresql://test-role@db.example.test:5432/hms_recovery");
   reset();
@@ -217,9 +246,79 @@ afterEach(() => {
 });
 
 describe("invitation lifecycle", () => {
+  it("requires an explicit decision", async () => {
+    const created = await staffRoute.POST(post("/api/staff"));
+    const { id } = await created.json();
+    const res = await invitationRoute.POST(new Request("http://localhost/x", { method: "POST", headers: { "sec-fetch-site": "same-origin", "content-type": "application/json" }, body: "{}" }), { params: Promise.resolve({ id }) });
+    expect(res.status).toBe(400);
+    expect(memberships.get(id)!.status).toBe("SUSPENDED");
+  });
+  it("rejects cross-site invitation acceptance", async () => {
+    const res = await invitationRoute.POST(new Request("http://localhost/x", { method: "POST", headers: { "sec-fetch-site": "cross-site" } }), { params: Promise.resolve({ id: "anything" }) });
+    expect(res.status).toBe(403);
+  });
+  it("blocks an administrator from activating a pending or expired invitation", async () => {
+    const created = await staffRoute.POST(post("/api/staff"));
+    const { id } = await created.json();
+    audit.find((row) => row.entityId === id && row.action === "STAFF_INVITATION_CREATED")!.createdAt = new Date(Date.now() - 8 * 86400000);
+    const response = await staffMemberRoute.PATCH(new Request("http://localhost/api/staff/" + id, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "ACTIVE" }),
+    }), { params: Promise.resolve({ id }) });
+    expect(response.status).toBe(403);
+    expect(memberships.get(id)!.status).toBe("SUSPENDED");
+  });
+
+  it("revokes a pending invitation so it cannot be accepted later", async () => {
+    const created = await staffRoute.POST(post("/api/staff"));
+    const { id } = await created.json();
+    const revoked = await staffMemberRoute.DELETE(new Request("http://localhost/api/staff/" + id, { method: "DELETE" }), { params: Promise.resolve({ id }) });
+    expect(revoked.status).toBe(200);
+    expect(memberships.get(id)?.status).toBe("SUSPENDED");
+    expect(audit.some((row) => row.entityId === id && row.action === "STAFF_INVITATION_REVOKED")).toBe(true);
+    const accepted = await invitationRoute.POST(invitationRequest("http://localhost/x", { method: "POST" }), { params: Promise.resolve({ id }) });
+    expect(accepted.status).toBe(404);
+  });
+
+  it("rolls back invitation creation when its audit record fails", async () => {
+    prismaMock.auditLog.create = async () => { throw new Error("audit unavailable"); };
+    const created = await staffRoute.POST(post("/api/staff"));
+    expect(created.status).toBe(500);
+    expect([...memberships.values()].some((m) => m.userId === "user-invitee" && m.hotelId === "hotel-a")).toBe(false);
+  });
+
+  it("requires renewed consent for ambiguous legacy suspensions", async () => {
+    memberships.set("legacy", { id: "legacy", hotelId: "hotel-a", userId: "user-invitee", role: "WAITER", department: null, status: "SUSPENDED", createdAt: new Date("2020-01-01"), updatedAt: new Date("2020-01-01") });
+    const patch = (body: unknown) => staffMemberRoute.PATCH(new Request("http://localhost/api/staff/legacy", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), { params: Promise.resolve({ id: "legacy" }) });
+    expect((await patch({ status: "ACTIVE" })).status).toBe(403);
+    expect((await patch({ reinvite: true })).status).toBe(200);
+    expect(memberships.get("legacy")!.status).toBe("SUSPENDED");
+    expect((await listPendingInvitations("user-invitee")).some((entry: any) => entry.id === "legacy")).toBe(true);
+    const accepted = await invitationRoute.POST(invitationRequest("http://localhost/x", { method: "POST" }), { params: Promise.resolve({ id: "legacy" }) });
+    expect(accepted.status).toBe(200);
+    expect(memberships.get("legacy")!.status).toBe("ACTIVE");
+  });
+
+  it("rejects expired invitations", async () => {
+    const created = await staffRoute.POST(post("/api/staff"));
+    const { id } = await created.json();
+    audit.find((row) => row.entityId === id && row.action === "STAFF_INVITATION_CREATED")!.createdAt = new Date(Date.now() - 8 * 86400000);
+    const result = await invitationRoute.POST(invitationRequest("http://localhost/x", { method: "POST" }), { params: Promise.resolve({ id }) });
+    expect(result.status).toBe(404);
+    expect(memberships.get(id)!.status).toBe("SUSPENDED");
+  });
+
+  it("rolls back acceptance if the mandatory audit write fails", async () => {
+    const created = await staffRoute.POST(post("/api/staff"));
+    const { id } = await created.json();
+    prismaMock.auditLog.create = async () => { throw new Error("audit unavailable"); };
+    const result = await invitationRoute.POST(invitationRequest("http://localhost/x", { method: "POST" }), { params: Promise.resolve({ id }) });
+    expect(result.status).toBe(500);
+    expect(memberships.get(id)!.status).toBe("SUSPENDED");
+  });
+
   it("refuses to run in an offline preview", async () => {
     vi.stubEnv("DATABASE_URL", "");
-    const res = await invitationRoute.POST(new Request("http://localhost:3000/x", { method: "POST" }), {
+    const res = await invitationRoute.POST(invitationRequest("http://localhost:3000/x", { method: "POST" }), {
       params: Promise.resolve({ id: "mem-invitee-b" }),
     });
     expect(res.status).toBe(503);
@@ -267,7 +366,7 @@ describe("invitation lifecycle", () => {
     const { id } = await res.json();
 
     currentUserId = "user-owner";
-    const attempt = await invitationRoute.POST(new Request("http://localhost:3000/x", { method: "POST" }), {
+    const attempt = await invitationRoute.POST(invitationRequest("http://localhost:3000/x", { method: "POST" }), {
       params: Promise.resolve({ id }),
     });
     expect(attempt.status).toBe(404);
@@ -279,7 +378,7 @@ describe("invitation lifecycle", () => {
     const { id } = await res.json();
 
     const accept = await invitationRoute.POST(
-      new Request("http://localhost:3000/x", {
+      invitationRequest("http://localhost:3000/x", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "accept" }),
@@ -300,19 +399,19 @@ describe("invitation lifecycle", () => {
     const res = await staffRoute.POST(post("/api/staff"));
     const { id } = await res.json();
     const accept = () =>
-      invitationRoute.POST(new Request("http://localhost:3000/x", { method: "POST" }), {
+      invitationRoute.POST(invitationRequest("http://localhost:3000/x", { method: "POST" }), {
         params: Promise.resolve({ id }),
       });
     expect((await accept()).status).toBe(200);
     expect((await accept()).status).toBe(404);
   });
 
-  it("declining removes the invitation and leaves the account intact", async () => {
+  it("declining retains the suspended membership and leaves the account intact", async () => {
     const res = await staffRoute.POST(post("/api/staff"));
     const { id } = await res.json();
 
     const decline = await invitationRoute.POST(
-      new Request("http://localhost:3000/x", {
+      invitationRequest("http://localhost:3000/x", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "decline" }),
@@ -320,7 +419,7 @@ describe("invitation lifecycle", () => {
       { params: Promise.resolve({ id }) }
     );
     expect(decline.status).toBe(200);
-    expect(memberships.has(id)).toBe(false);
+    expect(memberships.get(id)?.status).toBe("SUSPENDED");
     expect(users.get("user-invitee")!.isActive).toBe(true);
     expect(audit.some((row) => row.action === "STAFF_INVITATION_DECLINED")).toBe(true);
   });
@@ -345,7 +444,7 @@ describe("invitation lifecycle", () => {
     const res = await staffRoute.POST(post("/api/staff"));
     const { id } = await res.json();
 
-    const accept = await invitationRoute.POST(new Request("http://localhost:3000/x", { method: "POST" }), {
+    const accept = await invitationRoute.POST(invitationRequest("http://localhost:3000/x", { method: "POST" }), {
       params: Promise.resolve({ id }),
     });
     expect(accept.status).toBe(403);
@@ -377,7 +476,7 @@ describe("invitation lifecycle", () => {
     });
 
     expect(await listPendingInvitations("user-invitee")).toHaveLength(0);
-    const accept = await invitationRoute.POST(new Request("http://localhost:3000/x", { method: "POST" }), {
+    const accept = await invitationRoute.POST(invitationRequest("http://localhost:3000/x", { method: "POST" }), {
       params: Promise.resolve({ id: "mem-revoked" }),
     });
     expect(accept.status).toBe(404);

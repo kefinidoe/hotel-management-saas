@@ -2,8 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import HotelFlowBrand from "@/components/HotelFlowBrand";
-import { PRODUCT_NAME } from "@/lib/brand";
+import PropertyLogo from "@/components/PropertyLogo";
 import { usePathname } from "next/navigation";
 import type { HotelRole } from "@prisma/client";
 import {
@@ -20,6 +19,7 @@ import {
   BarChart3,
   UserCog,
   Settings,
+  Tags,
   CreditCard,
   ChevronsLeft,
   ChevronsRight,
@@ -74,6 +74,9 @@ const NAV: NavGroup[] = [
     items: [
       { label: "Staff", href: "/dashboard/staff", icon: UserCog, roles: ROLE_GROUPS.STAFF_VIEW },
       { label: "Subscription", href: "/dashboard/subscription", icon: CreditCard, roles: ROLE_GROUPS.STAFF_ADMIN },
+      { label: "Pricing & Rates", href: "/dashboard/settings/pricing", icon: Tags, roles: ROLE_GROUPS.MANAGEMENT },
+      { label: "Meal Pricing", href: "/dashboard/settings/meals", icon: Tags, roles: ROLE_GROUPS.MANAGEMENT },
+      { label: "Property Branding", href: "/dashboard/settings/branding", icon: Settings, roles: ROLE_GROUPS.MANAGEMENT },
       { label: "Settings", href: "/dashboard/settings", icon: Settings, roles: ROLE_GROUPS.STAFF_ADMIN },
       { label: "Audit Trail", href: "/dashboard/audit", icon: ScrollText, roles: ROLE_GROUPS.STAFF_ADMIN },
     ],
@@ -82,9 +85,13 @@ const NAV: NavGroup[] = [
 
 export default function Sidebar({
   userRole,
+  hotelName,
+  logoUrl,
   isPlatformAdmin = false,
 }: {
   userRole: HotelRole;
+  hotelName: string;
+  logoUrl?: string | null;
   isPlatformAdmin?: boolean;
 }) {
   const pathname = usePathname();
@@ -114,14 +121,12 @@ export default function Sidebar({
             "flex w-full items-center justify-center",
             collapsed ? "px-1" : "px-2"
           )}
-          aria-label={`${PRODUCT_NAME} dashboard`}
+          aria-label={`${hotelName} dashboard`}
         >
-          <HotelFlowBrand
-            iconOnly={collapsed}
-            className={collapsed ? "justify-center" : "justify-start"}
-            iconClassName={clsx(collapsed ? "h-11 w-11" : "h-10 w-10", "rounded-lg")}
-            light
-          />
+          <span className={clsx("flex w-full items-center gap-3", collapsed ? "justify-center" : "justify-start")}>
+            <PropertyLogo logoUrl={logoUrl} className={collapsed ? "h-11 w-11" : "h-10 w-10"} />
+            {!collapsed && <span className="truncate text-lg font-bold text-sidebar-text" title={hotelName}>{hotelName}</span>}
+          </span>
         </Link>
       </div>
 

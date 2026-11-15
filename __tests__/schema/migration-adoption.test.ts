@@ -1,10 +1,12 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   CHECKPOINTS,
   PRISMA_LEDGER_DDL,
+  assertLfMigrationFiles,
   SCHEMA_FEATURES,
   buildAdoptionPlan,
   buildFeatureQuery,
@@ -59,10 +61,11 @@ describe("migration release manifest", () => {
     expect(manifest).not.toBeNull();
     const names = manifest.migrations.map((entry: { name: string }) => entry.name);
     expect(names).toEqual(migrations.map((migration) => migration.name));
-    expect(names).toHaveLength(19);
+    expect(names).toHaveLength(28);
     expect(names[0]).toBe("20260915161717_init");
-    expect(names[names.length - 1]).toBe("20261029130000_add_tenant_composite_join_fks");
+    expect(names[names.length - 1]).toBe("20261111120000_hotel_branding_logo_url");
     expect(names).toContain("20261029120000_add_pos_charge_to_room_idempotency");
+    expect(names).toContain("20261029130000_add_tenant_composite_join_fks");
   });
 
   it("matches the files on disk", () => {
@@ -143,7 +146,7 @@ describe("schema checkpoints", () => {
 
   it("builds one SQL statement that returns every feature", () => {
     const sql = buildFeatureQuery();
-    expect(sql.trim().startsWith("SELECT json_build_object(")).toBe(true);
+    expect(sql.trim().startsWith("SELECT (json_build_object(")).toBe(true);
     for (const [name, predicate] of Object.entries(SCHEMA_FEATURES)) {
       expect(sql).toContain(`'${name}'`);
       expect(sql).toContain(predicate as string);
@@ -198,21 +201,71 @@ describe("adoption planning", () => {
     }
   });
 
-  it("baselines 17 migrations for an unmanaged SaaS database and leaves the two new ones pending", () => {
+  it("baselines 17 migrations for an unmanaged SaaS database and leaves later ones pending", () => {
     const plan = buildAdoptionPlan({ migrations, features: featuresFor("saas_through_17"), ledgerRows: [] });
     expect(plan.checkpoint?.id).toBe("saas_through_17");
     expect(plan.baseline).toEqual(names.slice(0, 17));
     expect(plan.pending).toEqual([
       "20261029120000_add_pos_charge_to_room_idempotency",
       "20261029130000_add_tenant_composite_join_fks",
+      "20261031120000_add_pricing_engine",
+      "20261031160000_price_version_history",
+      "20261101120000_add_reservation_extension_history",
+      "20261104120000_inventory_request_ledger",
+      "20261107120000_auth_rate_limit",
+      "20261108120000_universal_meal_pricing",
+      "20261109120000_modular_pricing_opt_in",
+      "20261110120000_modular_pricing_snapshot",
+      "20261111120000_hotel_branding_logo_url",
     ]);
     expect(plan.problems).toEqual([]);
   });
 
-  it("deploys nothing when a current database is adopted", () => {
+  it("baselines 19 migrations for a database that predates the pricing engine", () => {
+    const plan = buildAdoptionPlan({ migrations, features: featuresFor("saas_through_19"), ledgerRows: [] });
+    expect(plan.checkpoint?.id).toBe("saas_through_19");
+    expect(plan.baseline).toEqual(names.slice(0, 19));
+    expect(plan.pending).toEqual([
+      "20261031120000_add_pricing_engine",
+      "20261031160000_price_version_history",
+      "20261101120000_add_reservation_extension_history",
+      "20261104120000_inventory_request_ledger",
+      "20261107120000_auth_rate_limit",
+      "20261108120000_universal_meal_pricing",
+      "20261109120000_modular_pricing_opt_in",
+      "20261110120000_modular_pricing_snapshot",
+      "20261111120000_hotel_branding_logo_url",
+    ]);
+    expect(plan.problems).toEqual([]);
+  });
+
+  it("baselines 20 migrations for a database whose pricing engine has no version history", () => {
+    const plan = buildAdoptionPlan({ migrations, features: featuresFor("saas_through_20"), ledgerRows: [] });
+    expect(plan.checkpoint?.id).toBe("saas_through_20");
+    expect(plan.baseline).toEqual(names.slice(0, 20));
+    expect(plan.pending).toEqual([
+      "20261031160000_price_version_history",
+      "20261101120000_add_reservation_extension_history",
+      "20261104120000_inventory_request_ledger",
+      "20261107120000_auth_rate_limit",
+      "20261108120000_universal_meal_pricing",
+      "20261109120000_modular_pricing_opt_in",
+      "20261110120000_modular_pricing_snapshot",
+      "20261111120000_hotel_branding_logo_url",
+    ]);
+    expect(plan.problems).toEqual([]);
+  });
+
+  it("keeps inventory migration pending for a pre-ledger database", () => {
+    const plan = buildAdoptionPlan({ migrations, features: featuresFor("saas_through_22"), ledgerRows: [] });
+    expect(plan.pending).toEqual(["20261104120000_inventory_request_ledger", "20261107120000_auth_rate_limit", "20261108120000_universal_meal_pricing", "20261109120000_modular_pricing_opt_in", "20261110120000_modular_pricing_snapshot", "20261111120000_hotel_branding_logo_url"]);
+    expect(plan.problems).toEqual([]);
+  });
+
+  it("leaves the rate-limit migration pending after adopting the prior current schema", () => {
     const plan = buildAdoptionPlan({ migrations, features: featuresFor("saas_current"), ledgerRows: [] });
-    expect(plan.baseline).toEqual(names);
-    expect(plan.pending).toEqual([]);
+    expect(plan.baseline).toEqual(names.slice(0, 23));
+    expect(plan.pending).toEqual(["20261107120000_auth_rate_limit", "20261108120000_universal_meal_pricing", "20261109120000_modular_pricing_opt_in", "20261110120000_modular_pricing_snapshot", "20261111120000_hotel_branding_logo_url"]);
     expect(plan.problems).toEqual([]);
   });
 
@@ -310,5 +363,77 @@ describe("migration sources", () => {
     );
     expect(sql).toContain('CREATE UNIQUE INDEX IF NOT EXISTS "Order_hotelId_idempotencyOperation_idempotencyKey_key"');
     expect(sql).toContain('CONSTRAINT "Order_idempotency_triple_check"');
+  });
+});
+
+describe("line-ending independence (Windows/Linux checkouts)", () => {
+  /**
+   * Git stores migration SQL as LF and `.gitattributes` keeps it that way, but a
+   * Windows working copy cloned under `core.autocrlf=true` can still hold CRLF.
+   * Prisma checksums raw bytes, so that checkout must not corrupt the reviewed
+   * digests — and it must never be used to write ledger rows either.
+   */
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "migration-eol-"));
+  const lfSql = 'CREATE TABLE "Widget" (\n  "id" TEXT PRIMARY KEY\n);\n';
+  const crlfSql = lfSql.replace(/\n/g, "\r\n");
+
+  const lfDir = path.join(root, "20260101000000_lf");
+  const crlfDir = path.join(root, "20260102000000_crlf");
+  fs.mkdirSync(lfDir, { recursive: true });
+  fs.mkdirSync(crlfDir, { recursive: true });
+  fs.writeFileSync(path.join(lfDir, "migration.sql"), lfSql);
+  fs.writeFileSync(path.join(crlfDir, "migration.sql"), crlfSql);
+
+  it("reports the same reviewed digest for LF and CRLF copies of the same file", () => {
+    const entries = readMigrations(root);
+    expect(entries.map((entry: { name: string }) => entry.name)).toEqual([
+      "20260101000000_lf",
+      "20260102000000_crlf",
+    ]);
+
+    const [lf, crlf] = entries;
+    expect(lf.hasCrlfEol).toBe(false);
+    expect(crlf.hasCrlfEol).toBe(true);
+    expect(lf.checksum).toBe(sha256Hex(Buffer.from(lfSql)));
+    expect(crlf.checksum).toBe(lf.checksum);
+    // The raw bytes still have their own digest: this is what Prisma would record
+    // if it deployed from the CRLF checkout.
+    expect(crlf.onDiskChecksum).toBe(sha256Hex(Buffer.from(crlfSql)));
+    expect(crlf.onDiskChecksum).not.toBe(crlf.checksum);
+  });
+
+  it("passes the manifest check for a CRLF checkout but warns instead of staying silent", () => {
+    const entries = readMigrations(root);
+    const manifest = buildReleaseManifest(entries, { prismaVersion: "5.17.0" });
+    expect(manifest.migrations.map((entry: { sha256: string }) => entry.sha256)).toEqual([
+      sha256Hex(Buffer.from(lfSql)),
+      sha256Hex(Buffer.from(lfSql)),
+    ]);
+
+    const result = verifyReleaseManifest(entries, manifest);
+    expect(result.problems).toEqual([]);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain("20260102000000_crlf");
+    expect(result.warnings[0]).toContain("CRLF");
+  });
+
+  it("still flags real edits and additions, CRLF or not", () => {
+    const entries = readMigrations(root).map((entry) => ({ ...entry, checksum: "0".repeat(64) }));
+    const manifest = buildReleaseManifest(readMigrations(root));
+    expect(verifyReleaseManifest(entries, manifest).problems).toHaveLength(2);
+  });
+
+  it("refuses to check a CRLF tree into a ledger", () => {
+    expect(() => assertLfMigrationFiles(readMigrations(root))).toThrow(/CRLF line endings/);
+    // The LF-only tree is accepted.
+    const lfOnly = fs.mkdtempSync(path.join(os.tmpdir(), "migration-eol-"));
+    fs.mkdirSync(path.join(lfOnly, "20260101000000_lf"), { recursive: true });
+    fs.writeFileSync(path.join(lfOnly, "20260101000000_lf", "migration.sql"), lfSql);
+    expect(() => assertLfMigrationFiles(readMigrations(lfOnly))).not.toThrow();
+  });
+
+  it("holds for the repository itself, whatever this checkout's line endings are", () => {
+    const result = verifyReleaseManifest(readMigrations(), readReleaseManifest());
+    expect(result.problems).toEqual([]);
   });
 });

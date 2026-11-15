@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest";
+import { pricingModelStubs } from "../fixtures/pricing-prisma-double";
 
 vi.mock("@prisma/client", () => ({
   HotelRole: {
@@ -19,6 +20,7 @@ vi.mock("@prisma/client", () => ({
     PLATFORM_SUPPORT: "PLATFORM_SUPPORT",
     PLATFORM_BILLING: "PLATFORM_BILLING",
   },
+  RoomStatus: { AVAILABLE: "AVAILABLE", RESERVED: "RESERVED", OCCUPIED: "OCCUPIED", DIRTY: "DIRTY", CLEANING: "CLEANING", READY: "READY", MAINTENANCE: "MAINTENANCE", OUT_OF_ORDER: "OUT_OF_ORDER" },
   Prisma: {
     TransactionIsolationLevel: { Serializable: "Serializable" },
     PrismaClientKnownRequestError: class PrismaClientKnownRequestError extends Error {
@@ -288,6 +290,10 @@ vi.doMock("@/lib/auth", () => ({
 
 vi.doMock("@/lib/prisma", () => ({
   prisma: {
+    // Pricing models a real client always exposes. The doubles below that define
+    // their own `hotel` / `roomType` override these entries; the rest stay empty,
+    // which is a hotel with no configured pricing rules (LEGACY_BASE_RATE).
+    ...pricingModelStubs(),
     user: {
       findUnique: async ({ where }: any) => {
         if (where?.id) return db.users.get(where.id) || null;

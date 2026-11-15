@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { addDays, isoDay } from "@/lib/dates";
 import { roundMoney, stayNights } from "@/lib/billing";
@@ -15,6 +15,18 @@ type ExtendableStay = {
   requiredAmount: number;
   paidAmount: number;
   nightlyRateTotal: number;
+};
+
+type ExtensionRecord = {
+  id: string;
+  previousCheckOut: string;
+  newCheckOut: string;
+  additionalNights: number;
+  nightlyRate: string | number;
+  additionalCharge: string | number;
+  currency: string;
+  createdAt: string;
+  approvedBy?: { name: string } | null;
 };
 
 function money(value: number) {
@@ -38,6 +50,26 @@ export default function ExtendStayModal({
   const [newCheckOutDate, setNewCheckOutDate] = useState(isoDay(firstExtensionDate));
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // Previous extensions of this stay, read from the reservation detail endpoint
+  // so the agreement history is visible where the next extension is approved.
+  const [history, setHistory] = useState<ExtensionRecord[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/reservations/${reservation.id}`)
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (cancelled || !data) return;
+        const rows = Array.isArray(data.stayExtensions) ? data.stayExtensions : [];
+        setHistory(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setHistory([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [reservation.id]);
 
   let additionalNights = 0;
   try {
@@ -146,8 +178,30 @@ export default function ExtendStayModal({
 
           <p className="text-xs text-text-muted">
             The extension charge will be added to the guest folio. You can collect the additional
-            payment immediately after saving.
+            payment immediately after saving. The original booking price is not changed; each
+            extension is recorded separately with its dates, nights, rate and who approved it.
           </p>
+
+          {history.length > 0 && (
+            <div className="rounded-control border border-border bg-bg px-3 py-3 text-sm">
+              <p className="font-medium mb-2">Previous extensions</p>
+              <ul className="space-y-1 text-xs text-text-secondary">
+                {history.map((entry) => (
+                  <li key={entry.id} className="flex justify-between gap-3">
+                    <span>
+                      {formatDisplayDate(new Date(entry.previousCheckOut))} to{" "}
+                      {formatDisplayDate(new Date(entry.newCheckOut))} — {entry.additionalNights} night
+                      {entry.additionalNights === 1 ? "" : "s"}
+                    </span>
+                    <span className="whitespace-nowrap">
+                      {money(Number(entry.additionalCharge))}
+                      {entry.approvedBy?.name ? ` · ${entry.approvedBy.name}` : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {error && (
             <p className="text-sm text-danger bg-danger/5 border border-danger/20 rounded-control px-3 py-2">

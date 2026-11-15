@@ -1,5 +1,8 @@
+import { validateIdempotencyKey, validateFinancialMutation, purchaseSchema, checkInventoryContext } from "@/lib/financial-mutation-validation";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
+import { inventoryRequest } from "@/lib/inventory-idempotency";
 import { syncLowStockAlerts } from "@/lib/notifications";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 
@@ -47,65 +50,61 @@ export async function POST(req: Request) {
   const blocked = await requireModule(tenant.hotelId, "INVENTORY");
   if (blocked) return blocked;
 
-  const body = await req.json();
-  const { inventoryItemId, supplier, invoiceNumber, quantity, unitCost, purchaseDate } = body as {
-    inventoryItemId: string;
-    supplier: string;
-    invoiceNumber?: string;
-    quantity: number;
-    unitCost: number;
-    purchaseDate?: string;
-  };
+  const contextMismatch = checkInventoryContext(req, tenant.hotelId, tenant.userId);
+  if (contextMismatch) return contextMismatch;
 
-  if (!inventoryItemId || !supplier || !quantity || quantity <= 0 || unitCost === undefined) {
-    return NextResponse.json(
-      { error: "Item, supplier, quantity, and unit cost are required." },
-      { status: 400 }
-    );
+  const validation = await validateFinancialMutation(req, purchaseSchema, {});
+  if (validation.response) return validation.response;
+  const body = validation.data;
+  const invalidKey = validateIdempotencyKey(req.headers.get("idempotency-key") || req.headers.get("x-idempotency-key"), "inventory");
+  if (invalidKey) return invalidKey;
+
+  const { inventoryItemId, supplier, invoiceNumber, quantity, unitCost, purchaseDate } = body;
+  const amount = Number(quantity);
+  const cost = Number(unitCost);
+  const date = purchaseDate ? new Date(purchaseDate) : new Date();
+  if (typeof inventoryItemId !== "string" || !inventoryItemId.trim() || typeof supplier !== "string" || !supplier.trim() ||
+      !Number.isFinite(amount) || amount <= 0 || !new Prisma.Decimal(amount).mul(100).isInteger() ||
+      unitCost === undefined || unitCost === null || !Number.isFinite(cost) || cost < 0 || !new Prisma.Decimal(cost).mul(10000).isInteger() ||
+      !Number.isFinite(date.getTime()) || (invoiceNumber != null && typeof invoiceNumber !== "string")) {
+    return NextResponse.json({ error: "Provide a valid item, supplier, quantity (two decimals), cost (four decimals), and date." }, { status: 400 });
   }
-
-  const item = await prisma.inventoryItem.findUnique({
-    where: { id_hotelId: { id: inventoryItemId, hotelId: tenant.hotelId } },
-  });
-  if (!item) return NextResponse.json({ error: "Inventory item not found." }, { status: 404 });
-
-  const before = Number(item.currentStock);
-  const after = before + Number(quantity);
-  const totalCost = Number(quantity) * Number(unitCost);
-
-  const [purchase] = await prisma.$transaction([
-    prisma.purchase.create({
+  const qty = new Prisma.Decimal(amount);
+  const price = new Prisma.Decimal(cost);
+  const response = await inventoryRequest(req, tenant.hotelId, tenant.userId, "PURCHASE", body, async (tx) => {
+    const changed = await tx.inventoryItem.updateMany({
+      where: { id: inventoryItemId.trim(), hotelId: tenant.hotelId, currentStock: { gte: 0 } },
+      data: { currentStock: { increment: qty }, stockVersion: { increment: 1 }, costPerUnit: price },
+    });
+    if (changed.count !== 1) {
+      const existing = await tx.inventoryItem.findUnique({ where: { id_hotelId: { id: inventoryItemId.trim(), hotelId: tenant.hotelId } } });
+      return existing
+        ? { status: 409, body: { error: "Existing stock is negative. Reconcile it with a stocktake first." } }
+        : { status: 404, body: { error: "Inventory item not found." } };
+    }
+    const item = await tx.inventoryItem.findUniqueOrThrow({
+      where: { id_hotelId: { id: inventoryItemId.trim(), hotelId: tenant.hotelId } },
+    });
+    const after = item.currentStock;
+    const purchase = await tx.purchase.create({
       data: {
-        hotelId: tenant.hotelId,
-        inventoryItemId: item.id,
-        supplier,
-        invoiceNumber: invoiceNumber || null,
-        quantity,
-        unitCost,
-        totalCost,
-        purchaseDate: purchaseDate ? new Date(purchaseDate) : new Date(),
-        createdById: tenant.userId,
+        hotelId: tenant.hotelId, inventoryItemId: item.id, supplier: supplier.trim(),
+        invoiceNumber: invoiceNumber?.trim() || null, quantity: qty, unitCost: price,
+        totalCost: qty.mul(price).toDecimalPlaces(2), purchaseDate: date, createdById: tenant.userId,
       },
-    }),
-    prisma.inventoryItem.update({
-      where: { id_hotelId: { id: item.id, hotelId: tenant.hotelId } },
-      data: { currentStock: after, costPerUnit: unitCost },
-    }),
-    prisma.stockMovement.create({
+    });
+    await tx.stockMovement.create({
       data: {
-        hotelId: tenant.hotelId,
-        inventoryItemId: item.id,
-        type: "PURCHASE",
-        quantity,
-        beforeQty: before,
-        afterQty: after,
-        reference: invoiceNumber ? `Invoice ${invoiceNumber}` : `Purchase from ${supplier}`,
+        hotelId: tenant.hotelId, inventoryItemId: item.id, type: "PURCHASE", quantity: qty,
+        beforeQty: after.sub(qty), afterQty: after,
+        reference: invoiceNumber ? `Invoice ${invoiceNumber.trim()}` : `Purchase from ${supplier.trim()}`,
         userId: tenant.userId,
       },
-    }),
-  ]);
+    });
+    return { status: 201, body: purchase };
+  });
 
-  await syncLowStockAlerts(tenant.hotelId);
+  if (response.ok) await syncLowStockAlerts(tenant.hotelId);
 
-  return NextResponse.json(purchase, { status: 201 });
+  return response;
 }

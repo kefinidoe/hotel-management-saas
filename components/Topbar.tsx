@@ -8,14 +8,17 @@ import type { HotelRole } from "@prisma/client";
 import SearchBar from "@/components/SearchBar";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
 import NotificationBell from "@/components/NotificationBell";
+import PropertyLogo from "@/components/PropertyLogo";
 import { hasRole, ROLE_GROUPS } from "@/lib/permissions";
 
 export default function Topbar({
   userName,
+  logoUrl,
   userRole,
   isPlatformAdmin = false,
 }: {
   userName: string;
+  logoUrl?: string | null;
   userRole: HotelRole;
   isPlatformAdmin?: boolean;
 }) {
@@ -43,12 +46,7 @@ export default function Topbar({
               {userRole.toLowerCase().replace("_", " ")}
             </p>
           </div>
-          <div
-            className="h-9 w-9 rounded-full bg-primary-500 text-white flex items-center justify-center
-                       text-sm font-semibold shrink-0"
-          >
-            {userName.charAt(0).toUpperCase()}
-          </div>
+          <PropertyLogo logoUrl={logoUrl} className="h-9 w-9 rounded-full" />
           <Link
             href="/select-hotel"
             title="Switch hotel workspace"

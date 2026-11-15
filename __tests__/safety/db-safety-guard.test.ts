@@ -55,16 +55,16 @@ describe("Database Safety Guard — Fail-Closed Behavior", () => {
     expect(() =>
       assertDatabaseSafety({
         saasEnvironment: undefined,
-        saasDatabaseIdentifier: "saas-hotel-db",
-        databaseUrl: "postgresql://postgres.saas-hotel-db:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
+        saasDatabaseIdentifier: "jhablmqphfcjwealyxxr",
+        databaseUrl: "postgresql://postgres.jhablmqphfcjwealyxxr:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
       })
     ).toThrow(DatabaseSafetyError);
 
     expect(() =>
       assertDatabaseSafety({
         saasEnvironment: "",
-        saasDatabaseIdentifier: "saas-hotel-db",
-        databaseUrl: "postgresql://postgres.saas-hotel-db:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
+        saasDatabaseIdentifier: "jhablmqphfcjwealyxxr",
+        databaseUrl: "postgresql://postgres.jhablmqphfcjwealyxxr:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
       })
     ).toThrow(/SAAS_ENVIRONMENT environment variable is MISSING/);
   });
@@ -74,8 +74,8 @@ describe("Database Safety Guard — Fail-Closed Behavior", () => {
       expect(() =>
         assertDatabaseSafety({
           saasEnvironment: invalidEnv,
-          saasDatabaseIdentifier: "saas-hotel-db",
-          databaseUrl: "postgresql://postgres.saas-hotel-db:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
+          saasDatabaseIdentifier: "jhablmqphfcjwealyxxr",
+          databaseUrl: "postgresql://postgres.jhablmqphfcjwealyxxr:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
         })
       ).toThrow(/SAAS_ENVIRONMENT must be strictly 'saas'/);
     }
@@ -86,7 +86,7 @@ describe("Database Safety Guard — Fail-Closed Behavior", () => {
       assertDatabaseSafety({
         saasEnvironment: "saas",
         saasDatabaseIdentifier: undefined,
-        databaseUrl: "postgresql://postgres.saas-hotel-db:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
+        databaseUrl: "postgresql://postgres.jhablmqphfcjwealyxxr:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
       })
     ).toThrow(/SAAS_DATABASE_IDENTIFIER environment variable is MISSING/);
 
@@ -94,7 +94,7 @@ describe("Database Safety Guard — Fail-Closed Behavior", () => {
       assertDatabaseSafety({
         saasEnvironment: "saas",
         saasDatabaseIdentifier: "   ",
-        databaseUrl: "postgresql://postgres.saas-hotel-db:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
+        databaseUrl: "postgresql://postgres.jhablmqphfcjwealyxxr:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
       })
     ).toThrow(/SAAS_DATABASE_IDENTIFIER environment variable is MISSING/);
   });
@@ -103,7 +103,7 @@ describe("Database Safety Guard — Fail-Closed Behavior", () => {
     expect(() =>
       assertDatabaseSafety({
         saasEnvironment: "saas",
-        saasDatabaseIdentifier: "saas-hotel-db",
+        saasDatabaseIdentifier: "jhablmqphfcjwealyxxr",
         databaseUrl: "",
       })
     ).toThrow(/DATABASE_URL is missing or empty/);
@@ -147,30 +147,108 @@ describe("Database Safety Guard — Fail-Closed Behavior", () => {
   });
 });
 
+describe("Database Safety Guard — Explicit Config Is Hermetic", () => {
+  /**
+   * Regression: the guard used to resolve each input as
+   * `config?.x ?? process.env.X`. An explicit `undefined` is not "no opinion", it
+   * is "this input is absent", so falling through to `process.env` let an ambient
+   * variable satisfy a check the caller had deliberately left empty — making the
+   * fail-closed tests above pass or fail depending on the developer's shell.
+   */
+  const populated = {
+    SAAS_ENVIRONMENT: "saas",
+    SAAS_DATABASE_IDENTIFIER: "jhablmqphfcjwealyxxr",
+    DATABASE_URL: "postgresql://postgres.jhablmqphfcjwealyxxr:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
+    DIRECT_URL: "postgresql://postgres:secret@db.jhablmqphfcjwealyxxr.supabase.co:5432/postgres",
+  };
+
+  it("does not borrow a populated process.env for an explicit undefined", () => {
+    withProcessEnvironment(populated, () => {
+      expect(() =>
+        assertDatabaseSafety({
+          saasEnvironment: undefined,
+          saasDatabaseIdentifier: "jhablmqphfcjwealyxxr",
+          databaseUrl: populated.DATABASE_URL,
+        })
+      ).toThrow(/SAAS_ENVIRONMENT environment variable is MISSING/);
+
+      expect(() =>
+        assertDatabaseSafety({
+          saasEnvironment: "saas",
+          saasDatabaseIdentifier: undefined,
+          databaseUrl: populated.DATABASE_URL,
+        })
+      ).toThrow(/SAAS_DATABASE_IDENTIFIER environment variable is MISSING/);
+
+      expect(() =>
+        assertDatabaseSafety({
+          saasEnvironment: "saas",
+          saasDatabaseIdentifier: "jhablmqphfcjwealyxxr",
+          databaseUrl: undefined,
+        })
+      ).toThrow(/DATABASE_URL is missing or empty/);
+    });
+  });
+
+  it("does not borrow process.env for keys the config object omits", () => {
+    withProcessEnvironment(populated, () => {
+      expect(() =>
+        assertDatabaseSafety({
+          saasDatabaseIdentifier: "jhablmqphfcjwealyxxr",
+          databaseUrl: populated.DATABASE_URL,
+        })
+      ).toThrow(/SAAS_ENVIRONMENT environment variable is MISSING/);
+    });
+  });
+
+  it("still reads process.env when called with no config at all", () => {
+    withProcessEnvironment(populated, () => {
+      const result = assertDatabaseSafety();
+      expect(result.identifierMatched).toBe("jhablmqphfcjwealyxxr");
+      expect(result.database).toBe("postgres");
+    });
+  });
+
+  it("rejects a config whose explicit undefined hides a URL that env would have validated", () => {
+    withProcessEnvironment(populated, () => {
+      // DATABASE_URL is deliberately undefined: the DIRECT_URL in env must not be
+      // promoted into its place, and DIRECT_URL itself must not be read either.
+      expect(() =>
+        assertDatabaseSafety({
+          saasEnvironment: "saas",
+          saasDatabaseIdentifier: "jhablmqphfcjwealyxxr",
+          databaseUrl: undefined,
+          directUrl: undefined,
+        })
+      ).toThrow(/DATABASE_URL is missing or empty/);
+    });
+  });
+});
+
 describe("Database Safety Guard — Approved Target Acceptance", () => {
   it("accepts Supabase transaction pooler URL matching approved identifier in user prefix", () => {
     const result = assertDatabaseSafety({
       saasEnvironment: "saas",
-      saasDatabaseIdentifier: "hotel-saas-dev-1234",
-      databaseUrl: "postgresql://postgres.hotel-saas-dev-1234:pw123@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?pgbouncer=true",
+      saasDatabaseIdentifier: "jhablmqphfcjwealyxxr",
+      databaseUrl: "postgresql://postgres.jhablmqphfcjwealyxxr:pw123@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?pgbouncer=true",
     });
 
-    expect(result.identifierMatched).toBe("hotel-saas-dev-1234");
+    expect(result.identifierMatched).toBe("jhablmqphfcjwealyxxr");
     expect(result.host).toBe("aws-0-eu-west-1.pooler.supabase.com");
     expect(result.port).toBe("6543");
     expect(result.database).toBe("postgres");
-    expect(result.userPrefix).toBe("hotel-saas-dev-1234");
+    expect(result.userPrefix).toBe("jhablmqphfcjwealyxxr");
   });
 
   it("accepts Supabase direct URL matching approved identifier in host subdomain", () => {
     const result = assertDatabaseSafety({
       saasEnvironment: "saas",
-      saasDatabaseIdentifier: "hotel-saas-dev-1234",
-      databaseUrl: "postgresql://postgres:pw123@db.hotel-saas-dev-1234.supabase.co:5432/postgres",
+      saasDatabaseIdentifier: "jhablmqphfcjwealyxxr",
+      databaseUrl: "postgresql://postgres:pw123@db.jhablmqphfcjwealyxxr.supabase.co:5432/postgres",
     });
 
-    expect(result.identifierMatched).toBe("hotel-saas-dev-1234");
-    expect(result.host).toBe("db.hotel-saas-dev-1234.supabase.co");
+    expect(result.identifierMatched).toBe("jhablmqphfcjwealyxxr");
+    expect(result.host).toBe("db.jhablmqphfcjwealyxxr.supabase.co");
     expect(result.port).toBe("5432");
     expect(result.database).toBe("postgres");
   });
@@ -191,11 +269,11 @@ describe("Database Safety Guard — Approved Target Acceptance", () => {
   it("accepts both DATABASE_URL and DIRECT_URL when both match approved identifier", () => {
     const result = assertDatabaseSafety({
       saasEnvironment: "saas",
-      saasDatabaseIdentifier: "hotel-saas-dev-1234",
-      databaseUrl: "postgresql://postgres.hotel-saas-dev-1234:pw123@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?pgbouncer=true",
-      directUrl: "postgresql://postgres:pw123@db.hotel-saas-dev-1234.supabase.co:5432/postgres",
+      saasDatabaseIdentifier: "jhablmqphfcjwealyxxr",
+      databaseUrl: "postgresql://postgres.jhablmqphfcjwealyxxr:pw123@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?pgbouncer=true",
+      directUrl: "postgresql://postgres:pw123@db.jhablmqphfcjwealyxxr.supabase.co:5432/postgres",
     });
 
-    expect(result.identifierMatched).toBe("hotel-saas-dev-1234");
+    expect(result.identifierMatched).toBe("jhablmqphfcjwealyxxr");
   });
 });

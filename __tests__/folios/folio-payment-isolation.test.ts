@@ -505,7 +505,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
     it("Hotel A cannot record a payment against Hotel B's folio", async () => {
       const req = new Request("http://localhost:3000/api/payments", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "valid-key-test" },
         body: JSON.stringify({
           folioId: "folio-b-open",
           paymentMethodId: "pm-a-cash",
@@ -523,7 +523,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
     it("Rejects payment referencing a payment method belonging to another hotel", async () => {
       const req = new Request("http://localhost:3000/api/payments", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "valid-key-test" },
         body: JSON.stringify({
           folioId: "folio-a-open",
           paymentMethodId: "pm-b-card", // belongs to hotel-b
@@ -541,7 +541,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
     it("Ignores client-forged cashierId, status, and hotelId in request payload", async () => {
       const req = new Request("http://localhost:3000/api/payments", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "valid-key-test" },
         body: JSON.stringify({
           folioId: "folio-a-open",
           paymentMethodId: "pm-a-cash",
@@ -570,7 +570,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
       for (const badAmount of [-500, 0, "invalid", 10.999]) {
         const req = new Request("http://localhost:3000/api/payments", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "Idempotency-Key": "valid-key-test" },
           body: JSON.stringify({
             folioId: "folio-a-open",
             paymentMethodId: "pm-a-cash",
@@ -587,7 +587,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
     it("Blocks payments exceeding the folio's outstanding balance", async () => {
       const req = new Request("http://localhost:3000/api/payments", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "valid-key-test" },
         body: JSON.stringify({
           folioId: "folio-a-open",
           paymentMethodId: "pm-a-cash",
@@ -605,7 +605,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
     it("Blocks payment recording on a closed folio", async () => {
       const req = new Request("http://localhost:3000/api/payments", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "valid-key-test" },
         body: JSON.stringify({
           folioId: "folio-a-closed",
           paymentMethodId: "pm-a-cash",
@@ -624,7 +624,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
       db.locks = [];
       const req = new Request("http://localhost:3000/api/payments", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "valid-key-test" },
         body: JSON.stringify({
           folioId: "folio-a-open",
           paymentMethodId: "pm-a-cash",
@@ -650,6 +650,12 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
       expect(methods.some((m: any) => m.id === "pm-b-card")).toBe(false);
     });
 
+    it("rejects a payment without an idempotency key", async () => {
+      const req = new Request("http://localhost:3000/api/payments", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ folioId: "folio-a-open", paymentMethodId: "pm-a-cash", amount: 1000 }) });
+      expect((await createPayment(req)).status).toBe(400);
+      expect(db.payments.size).toBe(0);
+    });
+
     it("Rejects invalid idempotency keys outside length bounds (4-128 chars)", async () => {
       // Too short
       const reqShort = new Request("http://localhost:3000/api/payments", {
@@ -664,7 +670,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
       const resShort = await createPayment(reqShort);
       expect(resShort.status).toBe(400);
       const dataShort = await resShort.json();
-      expect(dataShort.error).toContain("Idempotency key must be between 4 and 128 characters");
+      expect(dataShort.error).toContain("An idempotency key between 4 and 128 characters is required");
 
       // Too long
       const reqLong = new Request("http://localhost:3000/api/payments", {
@@ -680,7 +686,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
       const resLong = await createPayment(reqLong);
       expect(resLong.status).toBe(400);
       const dataLong = await resLong.json();
-      expect(dataLong.error).toContain("Idempotency key must be between 4 and 128 characters");
+      expect(dataLong.error).toContain("An idempotency key between 4 and 128 characters is required");
     });
 
     it("Accepts and records a payment with valid idempotency key via header", async () => {

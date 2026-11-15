@@ -1,0 +1,53 @@
+name: Pinned Prisma engine recovery
+
+on:
+  push:
+    branches: [arena/a0ac74b2-hotel-management-saas]
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    if: "${{ github.event_name == 'push' && github.ref == 'refs/heads/arena/a0ac74b2-hotel-management-saas' && github.event.head_commit.message == 'chore(ci): recover pinned prisma engines' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the pinned engine definitions
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Download and verify only the two official engine archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/prisma-engine-recovery"
+          mkdir -p "$OUT"
+          BASE="https://binaries.prisma.sh/all_commits/393aa359c9ad4a4bb28630fb5613f9c281cde053/debian-openssl-3.0.x"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "$BASE/schema-engine.gz" --output "$OUT/schema-engine.gz"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "$BASE/libquery_engine.so.node.gz" --output "$OUT/libquery_engine.so.node.gz"
+          OUT="$OUT" node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          import { createHash } from 'node:crypto';
+          import { gunzipSync } from 'node:zlib';
+          import { join } from 'node:path';
+          import { PINNED_ARTIFACTS, PINNED_ENGINE_COMMIT, PINNED_PLATFORM, PINNED_PRISMA_VERSION } from './scripts/prisma-engine-pins.mjs';
+          if (PINNED_PRISMA_VERSION !== '5.17.0' || PINNED_ENGINE_COMMIT !== '393aa359c9ad4a4bb28630fb5613f9c281cde053' || PINNED_PLATFORM !== 'debian-openssl-3.0.x') throw new Error('Unexpected engine pin');
+          const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+          for (const artifact of [PINNED_ARTIFACTS.schemaEngine, PINNED_ARTIFACTS.queryEngineLibrary]) {
+            const archive = readFileSync(join(process.env.OUT, artifact.archive));
+            if (sha256(archive) !== artifact.archiveSha256) throw new Error(`${artifact.archive} archive hash mismatch`);
+            const binary = gunzipSync(archive);
+            if (sha256(binary) !== artifact.sha256) throw new Error(`${artifact.artifact} binary hash mismatch`);
+            console.log(`${artifact.archive}: archive and binary hashes match the repository pins`);
+          }
+          NODE
+      - name: Upload only the verified archives
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: prisma-5.17.0-debian-openssl-3-engines
+          path: |
+            ${{ runner.temp }}/prisma-engine-recovery/schema-engine.gz
+            ${{ runner.temp }}/prisma-engine-recovery/libquery_engine.so.node.gz
+          if-no-files-found: error
+          retention-days: 1

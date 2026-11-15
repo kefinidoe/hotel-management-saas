@@ -117,7 +117,7 @@ export default async function FrontDeskPage() {
     prisma.roomType.findMany({
       where: { hotelId: session.hotelId },
       orderBy: { name: "asc" },
-      select: { id: true, name: true, baseRate: true, mealPlan: true },
+      select: { id: true, name: true, baseRate: true, mealPlan: true, maxAdults: true, maxChildren: true, extraAdultFee: true },
     }),
   ]);
 
@@ -145,14 +145,16 @@ export default async function FrontDeskPage() {
     <FrontDeskClient
       activeTenantId={session.hotelId}
       currentUserRole={session.role}
+      currency={session.hotel.currency}
       arrivals={arrivals.map(serializeReservation)}
       departures={departures.map(serializeReservation)}
       inHouse={inHouse.map(serializeReservation)}
       availableRoomsCount={rooms.filter((room) => isBookableToday(room.status)).length}
-      roomTypes={roomTypes.map((type) => ({ ...type, baseRate: Number(type.baseRate) }))}
+      roomTypes={roomTypes.map((type) => ({ ...type, baseRate: Number(type.baseRate), extraAdultFee: Number(type.extraAdultFee) }))}
       rooms={rooms.map((room) => ({
         id: room.id,
         number: room.number,
+        roomTypeId: room.roomTypeId,
         floor: room.floor,
         status: room.status,
         roomTypeName: room.roomType.name,

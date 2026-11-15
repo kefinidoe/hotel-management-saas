@@ -90,6 +90,7 @@ describe("core frontend API integrations", () => {
       <ReservationsClient
         rooms={[room]}
         roomTypes={[roomType]}
+        currency="KES"
         currentUserRole={"RECEPTIONIST" as never}
       />,
     );
@@ -105,6 +106,7 @@ describe("core frontend API integrations", () => {
       <ReservationsClient
         rooms={[room]}
         roomTypes={[roomType]}
+        currency="KES"
         currentUserRole={"RECEPTIONIST" as never}
       />,
     );
@@ -119,6 +121,7 @@ describe("core frontend API integrations", () => {
       <ReservationsClient
         rooms={[room]}
         roomTypes={[roomType]}
+        currency="KES"
         currentUserRole={"RECEPTIONIST" as never}
       />,
     );
@@ -146,6 +149,7 @@ describe("core frontend API integrations", () => {
       <ReservationsClient
         rooms={[room]}
         roomTypes={[roomType]}
+        currency="KES"
         currentUserRole={"RECEPTIONIST" as never}
       />,
     );
@@ -206,6 +210,21 @@ describe("core frontend API integrations", () => {
       method: "PUT",
       body: JSON.stringify({ name: "Standard Plus", baseRate: 5000, capacity: 2, mealPlan: "BED_ONLY" }),
     }));
+  });
+
+  it("saves physical room categories and guest fees in modular mode", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: "type-a" }));
+    render(<RoomsClient initialRooms={[]} initialRoomTypes={[{ ...roomType, maxAdults: 2, maxChildren: 1, extraAdultFee: 400 }]} canManage useModularPricing />);
+    fireEvent.click(screen.getByRole("button", { name: /Room Types/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Max adults"), { target: { value: "3" } });
+    fireEvent.change(screen.getByLabelText("Max children"), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText("Extra adult fee per night"), { target: { value: "750" } });
+    expect(screen.queryByText("Meal Plan")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/room-types/type-a", expect.objectContaining({
+      method: "PUT", body: JSON.stringify({ name: "Standard", baseRate: 5000, capacity: 5, maxAdults: 3, maxChildren: 2, extraAdultFee: 750 }),
+    })));
   });
 
   it("surfaces a failed check-in mutation without bypassing its API contract", async () => {

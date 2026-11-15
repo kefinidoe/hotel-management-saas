@@ -28,10 +28,11 @@ export default async function DashboardLayout({
 
   return (
     <div className="flex min-h-screen bg-bg">
-      <Sidebar userRole={context.role} isPlatformAdmin={context.isPlatformAdmin} />
+      <Sidebar userRole={context.role} hotelName={context.hotel.name} logoUrl={context.hotel.logoUrl} isPlatformAdmin={context.isPlatformAdmin} />
       <div className="flex-1 flex flex-col min-w-0">
         <Topbar
           userName={context.hotel.name}
+          logoUrl={context.hotel.logoUrl}
           userRole={context.role}
           isPlatformAdmin={context.isPlatformAdmin}
         />

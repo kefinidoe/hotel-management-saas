@@ -222,14 +222,80 @@ npm run test:ui
 npm run test:coverage
 ```
 
+### Node.js version
+
+The project runs on **Node.js 24**. `.nvmrc` and `package.json`'s `engines.node` (`>=24.0.0`) both
+say so, and CI installs 24 on both operating systems:
+
+```bash
+nvm use             # reads .nvmrc -> 24
+node --version      # v24.x
+```
+
+`vitest@5` supports `^22.12.0 || ^24.0.0 || >=26.0.0`; Node 24 is the supported line this project
+tests and deploys on. Node 22 still runs the suite locally, but `npm install` will warn with
+`EBADENGINE`, and nothing in CI or the deployment checklist is verified on it.
+
+### Windows checkouts
+
+Migration checksums are byte-level: Prisma hashes the raw bytes of `migration.sql`. Git stores those
+files as LF and `.gitattributes` pins them there, so a normal checkout is byte-identical on Windows
+and Linux even with `core.autocrlf=true`. If an older clone (or an editor that rewrote line endings)
+has reintroduced CRLF you will see:
+
+```
+npm run migration:verify-eol   # exits 1 and names the affected files
+```
+
+Recovery is a one-off, non-destructive re-checkout:
+
+```bash
+git config core.autocrlf false
+rm -rf prisma/migrations
+git checkout -- prisma/migrations
+```
+
+Manifest verification tolerates CRLF by comparing the LF bytes Git would deploy, and the migration
+tests assert that behaviour; only `npm run migration:adopt` refuses outright, because that is the
+command that writes digests into `_prisma_migrations`. See
+[docs/migration-strategy.md §4.0](docs/migration-strategy.md).
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs the same checks on `ubuntu-latest` and `windows-latest` for every
+push and pull request, on Node.js 24 with `npm ci`:
+
+| Step | Command | Needs a database? |
+|---|---|---|
+| Prisma client verification | `npm run check:prisma-client` | no |
+| Schema validation | `npx prisma validate` (placeholder URLs) | no — parses only, never connects |
+| Migration bytes | `npm run migration:verify-eol` + `npm run migration:manifest` | no |
+| TypeScript | `npx tsc --noEmit` | no |
+| Lint | `npm run lint` | no |
+| Tests | `npx vitest run` | no — PGlite is in-memory |
+| Build | `npm run build` | no |
+
+The Windows job additionally prints `core.autocrlf` and re-runs the CRLF detection tests, so the
+line-ending protections are exercised where CRLF actually occurs. The checks that genuinely require
+a PostgreSQL server — the restore rehearsal, `migration:rehearse`, `target-check`, the live
+`db-integrity` run and adoption — are **not** in CI and are not simulated there; Vitest reports the
+restore-rehearsal tests as *skipped* when `psql`/`pg_restore` or `REHEARSAL_TEST_BASE_URL` are
+absent, which is the expected CI state.
+
 ## Test Results Summary
 
-Latest full run on the worktree:
+Latest full local run (Node 22.22.3 on Linux); CI runs the identical suite on Node 24 on
+`ubuntu-latest` and `windows-latest` and reports the same counts:
 
 ```
-Test Files  50 passed (50)
-     Tests  768 passed | 4 skipped (772)
+Test Files  68 passed (68)
+     Tests  1030 passed | 6 skipped (1036)
 ```
+
+The six skips are environment gates, not disabled checks: five restore-rehearsal/archive-toc tests
+require a real PostgreSQL server (`psql`/`pg_restore` plus `REHEARSAL_TEST_BASE_URL`), and one
+requires only the PostgreSQL client binaries. See `docs/migration-strategy.md §4.0` and the
+"Continuous integration" section above.
 
 The PGlite schema/migration tests create disposable in-memory databases and close them after
 use. They exercise the current migration files from a fresh schema and representative legacy

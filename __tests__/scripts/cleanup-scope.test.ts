@@ -2,11 +2,16 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const SOURCE = readFileSync(resolve(__dirname, "../../scripts/clean-test-data.ts"), "utf8");
+// Line endings are a checkout artifact (Git stores LF; a Windows working copy may
+// hold CRLF), not part of the code under test. Normalise them once so the exact
+// whitespace assertions below still pin the script's structure on every platform.
+const SOURCE = readFileSync(resolve(__dirname, "../../scripts/clean-test-data.ts"), "utf8").replace(/\r\n/g, "\n");
 
 describe("test-data cleanup script safety", () => {
   it("requires the configured database safety check and an exact hotel ID confirmation", () => {
-    expect(SOURCE).toContain("assertDatabaseSafety();");
+    expect(SOURCE).toContain("assertDisposableDatabaseSafety();");
+    expect(SOURCE).toContain("assertDisposableDatabaseIdentity(disposableTarget, identity);");
+    expect(SOURCE.indexOf("assertDisposableDatabaseIdentity(disposableTarget, identity);")).toBeLessThan(SOURCE.indexOf("tx.payment.deleteMany"));
     expect(SOURCE).toContain('valueAfter("--hotel-id")');
     expect(SOURCE).toContain('valueAfter("--confirm-hotel-id")');
     expect(SOURCE).toContain("hotelId !== confirmation");

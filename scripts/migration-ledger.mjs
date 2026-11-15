@@ -66,8 +66,72 @@ export function readMigrations(migrationsRoot = MIGRATIONS_DIR) {
     .map((name) => {
       const sqlPath = path.join(migrationsRoot, name, "migration.sql");
       const sql = fs.readFileSync(sqlPath);
-      return { name, sqlPath, sql, checksum: sha256Hex(sql) };
+      const hasCrlfEol = sql.includes(0x0d);
+      const onDiskChecksum = sha256Hex(sql);
+      // Prisma hashes the bytes it deploys, and `.gitattributes` pins
+      // `*.sql text eol=lf`, so a CRLF working copy is a checkout artifact rather
+      // than content: Git would hand the deployment the LF bytes. The reviewed
+      // digest is therefore computed over the Git content on both platforms, while
+      // `onDiskChecksum` keeps what a deploy from *this* directory would record.
+      // Any path that writes a digest into a ledger refuses a CRLF tree outright
+      // (assertLfMigrationFiles), so the two can never disagree in practice.
+      const canonical = hasCrlfEol ? toLfBytes(sql) : sql;
+      return {
+        name,
+        sqlPath,
+        sql,
+        checksum: sha256Hex(canonical),
+        onDiskChecksum,
+        hasCrlfEol,
+      };
     });
+}
+
+/** LF-only copy of a buffer, without touching anything else. */
+export function toLfBytes(value) {
+  const buffer = Buffer.isBuffer(value) ? value : Buffer.from(String(value));
+  return Buffer.from(buffer.toString("latin1").replace(/\r\n/g, "\n"), "latin1");
+}
+
+/**
+ * Fail closed when a migration file carries CRLF line endings.
+ *
+ * `prisma migrate deploy` checksums raw file bytes, so adopting a CRLF working
+ * copy would record CRLF digests in `_prisma_migrations`; every later deploy from
+ * an LF checkout would then be rejected as modified. Adoption therefore refuses
+ * to run until the checkout is restored to the reviewed bytes.
+ */
+export function assertLfMigrationFiles(migrations) {
+  const crlf = migrations.filter((migration) => migration.hasCrlfEol).map((migration) => migration.name);
+  if (crlf.length === 0) return;
+  throw new Error(
+    [
+      `Refusing to record migration checksums: ${crlf.length} migration file(s) have CRLF line endings.`,
+      `Affected: ${crlf.join(", ")}`,
+      "Prisma checksums raw file bytes, so a CRLF checkout would record digests that a later LF deploy rejects.",
+      "Restore the reviewed LF bytes (the files are tracked, so nothing is lost):",
+      "  git config core.autocrlf false",
+      "  rm -rf prisma/migrations && git checkout -- prisma/migrations",
+      "Do not convert the line endings by hand and do not regenerate the manifest to match a CRLF tree.",
+    ].join("\n")
+  );
+}
+
+/**
+ * Operator-facing warnings for migrations checked out with CRLF line endings.
+ *
+ * Shared by the verification CLIs so a CRLF working copy is never silently
+ * tolerated: the digest comparison uses the LF (Git) bytes, which is only safe
+ * because adoption refuses to record checksums from such a checkout.
+ */
+export function crlfWarnings(migrations) {
+  return migrations
+    .filter((migration) => migration.hasCrlfEol)
+    .map(
+      (migration) =>
+        `Migration '${migration.name}' has CRLF line endings in this checkout; digests are compared using the LF (Git) bytes. ` +
+        "Restore LF with: git config core.autocrlf false && rm -rf prisma/migrations && git checkout -- prisma/migrations"
+    );
 }
 
 /**
@@ -138,17 +202,63 @@ export const SCHEMA_FEATURES = {
   fk_RecipeIngredient_recipe: constraint("RecipeIngredient_recipeId_hotelId_fkey"),
   fk_RecipeIngredient_inventoryItem: constraint("RecipeIngredient_inventoryItemId_hotelId_fkey"),
   fk_OrderItem_order: constraint("OrderItem_orderId_hotelId_fkey"),
+
+  // Configurable pricing engine (migration 20).
+  table_HotelPricingSettings: table("HotelPricingSettings"),
+  table_OccupancyType: table("OccupancyType"),
+  table_MealPlanConfig: table("MealPlanConfig"),
+  table_ReservationPriceSnapshot: table("ReservationPriceSnapshot"),
+  column_ReservationPriceSnapshot_grandTotal: column("ReservationPriceSnapshot", "grandTotal"),
   fk_OrderItem_menuItem: constraint("OrderItem_menuItemId_hotelId_fkey"),
+
+  // Pricing version history and financial retention (migration 21).
+  column_ReservationPriceSnapshot_version: column("ReservationPriceSnapshot", "version"),
+  column_ReservationPriceChange_newVersion: column("ReservationPriceChange", "newVersion"),
+  index_ReservationPriceSnapshot_reservationId_version:
+    index("ReservationPriceSnapshot_reservationId_version_key"),
+  restrict_ReservationPriceSnapshot_reservation:
+    `EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ReservationPriceSnapshot_reservationId_hotelId_fkey' AND confdeltype = 'r')`,
+  restrict_ReservationPriceChange_reservation:
+    `EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ReservationPriceChange_reservationId_hotelId_fkey' AND confdeltype = 'r')`,
+  trigger_ReservationPriceSnapshot_immutable:
+    `EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'ReservationPriceSnapshot_immutable' AND NOT tgisinternal)`,
+
+  // Inventory replay and stocktake version (migration 23).
+  table_InventoryRequest: table("InventoryRequest"),
+  column_InventoryItem_stockVersion: column("InventoryItem", "stockVersion"),
+  column_InventoryRequest_fingerprint: column("InventoryRequest", "fingerprint"),
+  column_InventoryRequest_response: column("InventoryRequest", "response"),
+  column_InventoryRequest_statusCode: column("InventoryRequest", "statusCode"),
+  index_InventoryRequest_key: index("InventoryRequest_hotelId_operation_requestKey_key"),
+  fk_InventoryRequest_hotel: constraint("InventoryRequest_hotelId_fkey"),
+
+  // Auditable stay extensions (migration 22).
+  table_ReservationExtension: table("ReservationExtension"),
+  column_ReservationExtension_additionalNights: column("ReservationExtension", "additionalNights"),
+  index_ReservationExtension_previousCheckOut:
+    index("ReservationExtension_reservationId_previousCheckOut_key"),
+  restrict_ReservationExtension_reservation:
+    `EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ReservationExtension_reservationId_hotelId_fkey' AND confdeltype = 'r')`,
 };
 
-/** One SQL statement that returns the whole feature map as JSON. */
+/**
+ * One SQL statement that returns the whole feature map as JSON.
+ *
+ * PostgreSQL refuses more than 100 arguments to a single function call, and the
+ * feature map is already past that, so it is built in chunks of 50 pairs and
+ * merged with `||`. The statement still starts with `json_build_object(`.
+ */
 export function buildFeatureQuery(features = SCHEMA_FEATURES) {
-  const entries = Object.entries(features)
-    .map(([name, sql]) => `'${name}', (${sql})`)
-    .join(",\n    ");
-  return `SELECT json_build_object(
-    ${entries}
-  )::text AS features;`;
+  const entries = Object.entries(features).map(([name, sql]) => `'${name}', (${sql})`);
+  const chunkSize = 50;
+  const chunks = [];
+  for (let index = 0; index < entries.length; index += chunkSize) {
+    chunks.push(entries.slice(index, index + chunkSize));
+  }
+  const rendered = chunks
+    .map((chunk) => `json_build_object(\n    ${chunk.join(",\n    ")}\n  )::jsonb`)
+    .join(" || ");
+  return `SELECT (${rendered})::text AS features;`;
 }
 
 /**
@@ -286,8 +396,8 @@ export const CHECKPOINTS = [
     forbid: ["column_ReservationRoom_hotelId"],
   },
   {
-    id: "saas_current",
-    label: "Current schema, all migrations applied (migrations 1-19)",
+    id: "saas_through_19",
+    label: "Tenant composite join keys applied, pricing engine missing (migrations 1-19)",
     appliedThrough: "20261029130000_add_tenant_composite_join_fks",
     require: [
       "table_Hotel",
@@ -306,6 +416,151 @@ export const CHECKPOINTS = [
       "fk_RecipeIngredient_inventoryItem",
       "fk_OrderItem_order",
       "fk_OrderItem_menuItem",
+    ],
+    forbid: [
+      "table_HotelPricingSettings",
+      "table_ReservationPriceSnapshot",
+    ],
+  },
+  {
+    id: "saas_through_20",
+    label: "Pricing engine without versioned history (migrations 1-20 applied)",
+    appliedThrough: "20261031120000_add_pricing_engine",
+    require: [
+      "table_Hotel",
+      "table_Subscription",
+      "column_HotelMembership_department",
+      "column_Order_idempotencyOperation",
+      "column_Payment_requestFingerprint",
+      "column_ReservationRoom_hotelId",
+      "column_Recipe_hotelId",
+      "column_RecipeIngredient_hotelId",
+      "column_OrderItem_hotelId",
+      "fk_ReservationRoom_reservation",
+      "fk_ReservationRoom_room",
+      "fk_Recipe_menuItem",
+      "fk_RecipeIngredient_recipe",
+      "fk_RecipeIngredient_inventoryItem",
+      "fk_OrderItem_order",
+      "fk_OrderItem_menuItem",
+      "table_HotelPricingSettings",
+      "table_OccupancyType",
+      "table_MealPlanConfig",
+      "table_ReservationPriceSnapshot",
+      "column_ReservationPriceSnapshot_grandTotal",
+    ],
+    forbid: [
+      "column_ReservationPriceSnapshot_version",
+      "column_ReservationPriceChange_newVersion",
+      "trigger_ReservationPriceSnapshot_immutable",
+    ],
+  },
+  {
+    id: "saas_through_21",
+    label: "Pricing version history without extension history (migrations 1-21 applied)",
+    appliedThrough: "20261031160000_price_version_history",
+    require: [
+      "table_Hotel",
+      "table_Subscription",
+      "column_HotelMembership_department",
+      "column_Payment_requestFingerprint",
+      "table_HotelPricingSettings",
+      "table_ReservationPriceSnapshot",
+      "column_ReservationPriceSnapshot_version",
+      "column_ReservationPriceChange_newVersion",
+      "index_ReservationPriceSnapshot_reservationId_version",
+      "restrict_ReservationPriceSnapshot_reservation",
+      "restrict_ReservationPriceChange_reservation",
+      "trigger_ReservationPriceSnapshot_immutable",
+    ],
+    forbid: [
+      "table_ReservationExtension",
+      "index_ReservationExtension_previousCheckOut",
+      "restrict_ReservationExtension_reservation",
+    ],
+  },
+  {
+    id: "saas_through_22",
+    label: "Stay extension history, before inventory replay ledger (migrations 1-22)",
+    appliedThrough: "20261101120000_add_reservation_extension_history",
+    require: [
+      "table_Hotel",
+      "table_Subscription",
+      "column_HotelMembership_department",
+      "column_Order_idempotencyOperation",
+      "column_Payment_requestFingerprint",
+      "column_ReservationRoom_hotelId",
+      "column_Recipe_hotelId",
+      "column_RecipeIngredient_hotelId",
+      "column_OrderItem_hotelId",
+      "fk_ReservationRoom_reservation",
+      "fk_ReservationRoom_room",
+      "fk_Recipe_menuItem",
+      "fk_RecipeIngredient_recipe",
+      "fk_RecipeIngredient_inventoryItem",
+      "fk_OrderItem_order",
+      "fk_OrderItem_menuItem",
+      "table_HotelPricingSettings",
+      "table_OccupancyType",
+      "table_MealPlanConfig",
+      "table_ReservationPriceSnapshot",
+      "column_ReservationPriceSnapshot_grandTotal",
+      "column_ReservationPriceSnapshot_version",
+      "column_ReservationPriceChange_newVersion",
+      "index_ReservationPriceSnapshot_reservationId_version",
+      "restrict_ReservationPriceSnapshot_reservation",
+      "restrict_ReservationPriceChange_reservation",
+      "trigger_ReservationPriceSnapshot_immutable",
+      "table_ReservationExtension",
+      "column_ReservationExtension_additionalNights",
+      "index_ReservationExtension_previousCheckOut",
+      "restrict_ReservationExtension_reservation",
+    ],
+    forbid: ["table_InventoryRequest", "column_InventoryItem_stockVersion"],
+  },
+  {
+    id: "saas_current",
+    label: "Schema through the inventory request ledger (migrations 1-23)",
+    appliedThrough: "20261104120000_inventory_request_ledger",
+    require: [
+      "table_Hotel",
+      "table_Subscription",
+      "column_HotelMembership_department",
+      "column_Order_idempotencyOperation",
+      "column_Payment_requestFingerprint",
+      "column_ReservationRoom_hotelId",
+      "column_Recipe_hotelId",
+      "column_RecipeIngredient_hotelId",
+      "column_OrderItem_hotelId",
+      "fk_ReservationRoom_reservation",
+      "fk_ReservationRoom_room",
+      "fk_Recipe_menuItem",
+      "fk_RecipeIngredient_recipe",
+      "fk_RecipeIngredient_inventoryItem",
+      "fk_OrderItem_order",
+      "fk_OrderItem_menuItem",
+      "table_HotelPricingSettings",
+      "table_OccupancyType",
+      "table_MealPlanConfig",
+      "table_ReservationPriceSnapshot",
+      "column_ReservationPriceSnapshot_grandTotal",
+      "column_ReservationPriceSnapshot_version",
+      "column_ReservationPriceChange_newVersion",
+      "index_ReservationPriceSnapshot_reservationId_version",
+      "restrict_ReservationPriceSnapshot_reservation",
+      "restrict_ReservationPriceChange_reservation",
+      "trigger_ReservationPriceSnapshot_immutable",
+      "table_ReservationExtension",
+      "column_ReservationExtension_additionalNights",
+      "index_ReservationExtension_previousCheckOut",
+      "restrict_ReservationExtension_reservation",
+      "table_InventoryRequest",
+      "column_InventoryItem_stockVersion",
+      "column_InventoryRequest_fingerprint",
+      "column_InventoryRequest_response",
+      "column_InventoryRequest_statusCode",
+      "index_InventoryRequest_key",
+      "fk_InventoryRequest_hotel",
     ],
     forbid: [],
   },
@@ -474,7 +729,10 @@ export function buildReleaseManifest(migrations, { prismaVersion } = {}) {
     purpose:
       "Reviewed migration release artifacts. `node scripts/migrate-adopt.mjs` refuses to baseline a migration whose file no longer matches this manifest.",
     prismaVersion: prismaVersion ?? null,
-    migrations: migrations.map((migration) => ({ name: migration.name, sha256: migration.checksum })),
+    migrations: migrations.map((migration) => ({
+      name: migration.name,
+      sha256: migration.checksum,
+    })),
   };
 }
 
@@ -486,18 +744,26 @@ export function readReleaseManifest(manifestPath = RELEASE_MANIFEST_PATH) {
 /**
  * Compare the migration directory against the committed manifest. Any
  * add/remove/edit is reported; a release requires both to agree exactly.
+ *
+ * The comparison uses each file's canonical (LF) digest, because `.gitattributes`
+ * pins these files to LF and Git would land LF bytes in the deployment. A CRLF
+ * working copy is reported separately in `warnings`: it must not corrupt a
+ * manifest check, but it must never be forgotten either, since adoption refuses
+ * to run on it (assertLfMigrationFiles).
  */
 export function verifyReleaseManifest(migrations, manifest) {
   const problems = [];
-  if (!manifest) return { problems: ["prisma/migration-release-manifest.json is missing."], unchecked: [] };
+  const warnings = crlfWarnings(migrations);
+  if (!manifest) return { problems: ["prisma/migration-release-manifest.json is missing."], warnings, unchecked: [] };
 
   const listed = new Map(manifest.migrations.map((entry) => [entry.name, entry.sha256]));
   for (const migration of migrations) {
+    const digest = migration.checksum;
     if (!listed.has(migration.name)) {
       problems.push(`Migration '${migration.name}' is not listed in the release manifest.`);
-    } else if (listed.get(migration.name) !== migration.checksum) {
+    } else if (listed.get(migration.name) !== digest) {
       problems.push(
-        `Migration '${migration.name}' does not match the reviewed checksum (manifest=${listed.get(migration.name)}, file=${migration.checksum}).`
+        `Migration '${migration.name}' does not match the reviewed checksum (manifest=${listed.get(migration.name)}, file=${digest}).`
       );
     }
   }
@@ -506,7 +772,7 @@ export function verifyReleaseManifest(migrations, manifest) {
       problems.push(`Release manifest lists '${name}', which no longer exists in prisma/migrations.`);
     }
   }
-  return { problems, unchecked: [] };
+  return { problems, warnings, unchecked: [] };
 }
 
 /** Reads a checksum from the manifest for a migration name (used in reports). */
@@ -539,7 +805,8 @@ function runCli(argv) {
       return 0;
     }
     if (rest.includes("--check")) {
-      const { problems } = verifyReleaseManifest(migrations, readReleaseManifest());
+      const { problems, warnings } = verifyReleaseManifest(migrations, readReleaseManifest());
+      for (const warning of warnings) process.stderr.write(`! ${warning}\n`);
       if (problems.length > 0) {
         process.stderr.write(`${problems.join("\n")}\n`);
         return 1;

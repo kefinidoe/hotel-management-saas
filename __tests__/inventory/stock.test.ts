@@ -3,9 +3,9 @@ import {
   formatQty,
   getStockStatus,
   computeAvailablePortions,
-  deductRecipeStock,
   type IngredientLine,
 } from "../../lib/inventory";
+import { deductRecipeStock } from "../../lib/recipe-stock";
 import type { CartLine } from "../../lib/restaurant";
 
 /**
@@ -311,10 +311,8 @@ describe("deductRecipeStock — multi-tenant isolation and stock deduction", () 
         findMany: async () => [
           { id: "inv-1", hotelId: TEST_HOTEL_ID, name: "Rice", currentStock: 1000, unit: "g" },
         ],
-        update: async (args: any) => {
-          updates.push(args);
-          return args;
-        },
+        updateMany: async (args: any) => { updates.push(args); return { count: 1 }; },
+        findUniqueOrThrow: async () => ({ currentStock: new (await import("@prisma/client")).Prisma.Decimal(600) }),
       },
       stockMovement: {
         create: async (args: any) => {
@@ -333,10 +331,10 @@ describe("deductRecipeStock — multi-tenant isolation and stock deduction", () 
     );
 
     expect(updates.length).toBe(1);
-    expect(updates[0].where).toEqual({ id_hotelId: { id: "inv-1", hotelId: TEST_HOTEL_ID } });
-    expect(updates[0].data.currentStock).toBe(600); // 1000 - (200 * 2)
+    expect(updates[0].where).toEqual({ id: "inv-1", hotelId: TEST_HOTEL_ID, currentStock: { gte: expect.anything() } });
+    expect(Number(updates[0].data.currentStock.decrement)).toBe(400); // 1000 - (200 * 2)
     expect(movements.length).toBe(1);
     expect(movements[0].data.hotelId).toBe(TEST_HOTEL_ID);
-    expect(movements[0].data.quantity).toBe(-400);
+    expect(Number(movements[0].data.quantity)).toBe(-400);
   });
 });

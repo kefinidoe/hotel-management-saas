@@ -19,6 +19,10 @@ if (process.env.NEXTAUTH_URL) {
 }
 
 export const authOptions: NextAuthOptions = {
+  // NextAuth's default cookie options are HttpOnly, SameSite=Lax and path=/.
+  // Force its secure cookie names and Secure attribute for production, even if
+  // a proxy presents an internal HTTP URL to the application.
+  useSecureCookies: process.env.NODE_ENV === "production" ? true : undefined,
   session: { strategy: "jwt", maxAge: 12 * 60 * 60, updateAge: 60 * 60 },
   pages: { signIn: "/login" },
   providers: [

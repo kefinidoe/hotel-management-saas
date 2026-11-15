@@ -333,7 +333,7 @@ export default function FolioModal({
         });
         if (!isPaymentResult(result)) throw new Error("The server returned an invalid payment response.");
       } catch (paymentError) {
-        const definitelyRejected = paymentError instanceof ApiRequestError && (
+        const definitelyRejected = !existingAttempt && paymentError instanceof ApiRequestError && (
           (paymentError.kind === "http" && [400, 404].includes(paymentError.status ?? 0)) ||
           (paymentError.kind === "unauthorized" && paymentError.status === 401) ||
           (paymentError.kind === "forbidden" && paymentError.status === 403)

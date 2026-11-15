@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   requireModule: vi.fn(),
   expenseFindFirst: vi.fn(),
   expenseUpdateMany: vi.fn(),
+  auditCreate: vi.fn(),
   recipeFindMany: vi.fn(),
   recipeFindFirst: vi.fn(),
   recipeCreate: vi.fn(),
@@ -120,6 +121,8 @@ beforeEach(() => {
   mocks.stockMovementFindMany.mockResolvedValue([]);
   mocks.transaction.mockImplementation(async (callback: (tx: any) => unknown) =>
     callback({
+      expense: { updateMany: mocks.expenseUpdateMany, findFirst: mocks.expenseFindFirst },
+      auditLog: { create: mocks.auditCreate },
       recipe: { updateMany: mocks.recipeUpdateMany, findFirst: mocks.recipeFindFirst },
       recipeIngredient: {
         deleteMany: mocks.recipeIngredientDeleteMany,
@@ -232,6 +235,7 @@ describe("legacy API routes now use the active tenant context", () => {
       data: { status: "APPROVED" },
     });
     expect(mocks.expenseFindFirst).toHaveBeenCalledWith({ where: { id: "expense-a", hotelId: "hotel-a" } });
+    expect(mocks.auditCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ hotelId: "hotel-a", action: "EXPENSE_REVIEWED" }) }));
   });
 
   it("returns 404 and does not update an expense owned by Hotel B", async () => {

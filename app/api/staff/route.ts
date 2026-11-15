@@ -1,3 +1,4 @@
+import { readMutationBody, validateMutation, staffCreateSchema, initialPasswordSchema } from "@/lib/staff-settings-validation";
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
@@ -89,12 +90,8 @@ export async function POST(req: Request) {
   const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
   if (blocked) return blocked;
 
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
-  }
+  // Parse only to identify the rate-limit bucket; invalid attempts are still counted.
+  const body: any = await readMutationBody(req);
 
   const name = typeof body?.name === "string" ? body.name.trim() : "";
   const email = typeof body?.email === "string" ? body.email.trim().toLowerCase() : "";
@@ -102,6 +99,19 @@ export async function POST(req: Request) {
   const requestedRole = typeof body?.role === "string" ? body.role.trim() : "";
   const department = typeof body?.department === "string" ? body.department.trim() : null;
   const phone = typeof body?.phone === "string" ? body.phone.trim() : null;
+
+  // This endpoint creates invitations for existing accounts. Bound both the
+  // target email and the inviting actor before looking up the target account.
+  const { limitAuthRequest } = await import("@/lib/auth-rate-limit");
+  const limited = await limitAuthRequest(req, "invitationCreate", email, tenant.userId);
+  if (limited) return limited;
+
+  // Authorization for owner grants must precede request validation.
+  if (requestedRole === HotelRole.HOTEL_OWNER && tenant.role !== HotelRole.HOTEL_OWNER) {
+    return NextResponse.json({ error: "Only hotel owners can grant the HOTEL_OWNER role." }, { status: 403 });
+  }
+  const validation = validateMutation(req, staffCreateSchema, body);
+  if (validation.response) return validation.response;
 
   if (!name || name.length < 2 || name.length > 100) {
     return NextResponse.json(
@@ -176,23 +186,21 @@ export async function POST(req: Request) {
       // (no access) and becomes ACTIVE when the invitee accepts — see
       // lib/invitations.ts. Seat limits are enforced at acceptance, because an
       // invitation does not occupy a seat.
-      const newMembership = await prisma.hotelMembership.create({
-        data: {
-          userId: existingUser.id,
-          hotelId: tenant.hotelId,
-          role: requestedRole as HotelRole,
-          department: department || null,
-          status: MembershipStatus.SUSPENDED,
-        },
-        include: { user: { select: { id: true, name: true, email: true, phone: true } } },
-      });
-
-      await recordInvitationCreated({
-        hotelId: tenant.hotelId,
-        membershipId: newMembership.id,
-        invitedUserId: existingUser.id,
-        role: newMembership.role,
-        invitedByUserId: tenant.userId,
+      const newMembership = await prisma.$transaction(async (tx) => {
+        const membership = await tx.hotelMembership.create({
+          data: {
+            userId: existingUser.id, hotelId: tenant.hotelId,
+            role: requestedRole as HotelRole, department: department || null,
+            status: MembershipStatus.SUSPENDED,
+          },
+          include: { user: { select: { id: true, name: true, email: true, phone: true } } },
+        });
+        await recordInvitationCreated({
+          hotelId: tenant.hotelId, membershipId: membership.id,
+          invitedUserId: existingUser.id, role: membership.role,
+          invitedByUserId: tenant.userId, client: tx,
+        });
+        return membership;
       });
 
       return NextResponse.json(
@@ -216,12 +224,8 @@ export async function POST(req: Request) {
     // A brand-new account needs an initial password. An existing account is only
     // invited, so this field is ignored for it — requiring it would push one
     // administrator into choosing a password for somebody else's account.
-    if (!password || password.length < 8) {
-      return NextResponse.json(
-        { error: "Initial password must be at least 8 characters long." },
-        { status: 400 }
-      );
-    }
+    const passwordValidation = validateMutation(req, initialPasswordSchema, { password });
+    if (passwordValidation.response) return passwordValidation.response;
 
     // Create new User and HotelMembership atomically
     const passwordHash = await bcrypt.hash(password, 10);

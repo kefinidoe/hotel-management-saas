@@ -1,3 +1,4 @@
+import { validateRoomStayMutation, roomTypeCreateSchema } from "@/lib/room-stay-mutation-validation";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
@@ -30,14 +31,12 @@ export async function POST(req: Request) {
   const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
   if (blocked) return blocked;
 
+  const validation = await validateRoomStayMutation(req, roomTypeCreateSchema, {});
+  if (validation.response) return validation.response;
+  const body = validation.data;
+
   const hotelId = tenant.hotelId;
 
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
-  }
 
   const name = typeof body?.name === "string" ? body.name.trim() : "";
   const baseRate = Number(body?.baseRate);
@@ -57,6 +56,9 @@ export async function POST(req: Request) {
       description: body.description ? String(body.description).trim() : null,
       baseRate,
       capacity: typeof body.capacity === "number" && body.capacity > 0 ? body.capacity : 2,
+      ...(body.maxAdults !== undefined && { maxAdults: body.maxAdults }),
+      ...(body.maxChildren !== undefined && { maxChildren: body.maxChildren }),
+      ...(body.extraAdultFee !== undefined && { extraAdultFee: body.extraAdultFee }),
       mealPlan,
     },
   });

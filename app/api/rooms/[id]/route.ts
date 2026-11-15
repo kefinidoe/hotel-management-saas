@@ -1,3 +1,4 @@
+import { validateRoomStayMutation, roomUpdateSchema, emptyMutationSchema } from "@/lib/room-stay-mutation-validation";
 import { Prisma, RoomStatus } from "@prisma/client";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
@@ -63,6 +64,10 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
   if (blocked) return blocked;
 
+  const validation = await validateRoomStayMutation(req, roomUpdateSchema, { id });
+  if (validation.response) return validation.response;
+  const body = validation.data;
+
   const hotelId = tenant.hotelId;
 
   const existing = await prisma.room.findUnique({
@@ -72,12 +77,6 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
     return NextResponse.json({ error: "Room not found." }, { status: 404 });
   }
 
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
-  }
 
   const roomNumber = typeof body?.number === "string" ? body.number.trim() : existing.number;
   const roomTypeId = typeof body?.roomTypeId === "string" ? body.roomTypeId.trim() : existing.roomTypeId;
@@ -182,7 +181,7 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   }
 }
 
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const tenant = await getTenantFromRoute();
   if (tenant instanceof NextResponse) return tenant;
@@ -192,6 +191,9 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
 
   const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
   if (blocked) return blocked;
+
+  const validation = await validateRoomStayMutation(req, emptyMutationSchema, { id, emptyBody: true });
+  if (validation.response) return validation.response;
 
   const hotelId = tenant.hotelId;
 
