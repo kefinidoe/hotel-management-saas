@@ -6,7 +6,10 @@ import GuestsClient from "@/components/guests/GuestsClient";
 import RoomsClient from "@/components/rooms/RoomsClient";
 import CheckInModal from "@/components/frontdesk/CheckInModal";
 import FolioModal from "@/components/frontdesk/FolioModal";
+import FrontDeskClient from "@/components/frontdesk/FrontDeskClient";
 import { addDays, isoDay, startOfWeek } from "@/lib/dates";
+
+vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: vi.fn() }) }));
 
 vi.mock("@/components/reservations/CreateReservationModal", () => ({
   default: () => null,
@@ -210,6 +213,71 @@ describe("core frontend API integrations", () => {
       method: "PUT",
       body: JSON.stringify({ name: "Standard Plus", baseRate: 5000, capacity: 2, mealPlan: "BED_ONLY" }),
     }));
+  });
+
+  it("saves physical room categories and guest fees in modular mode", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: "type-a" }));
+    render(<RoomsClient initialRooms={[]} initialRoomTypes={[{ ...roomType, maxAdults: 2, maxChildren: 1, extraAdultFee: 400 }]} canManage useModularPricing />);
+    fireEvent.click(screen.getByRole("button", { name: /Room Types/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Max adults"), { target: { value: "3" } });
+    fireEvent.change(screen.getByLabelText("Max children"), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText("Extra adult fee per night"), { target: { value: "750" } });
+    expect(screen.queryByText("Meal Plan")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/room-types/type-a", expect.objectContaining({
+      method: "PUT", body: JSON.stringify({ name: "Standard", baseRate: 5000, capacity: 5, maxAdults: 3, maxChildren: 2, extraAdultFee: 750 }),
+    })));
+  });
+
+  it("passes arrival snapshot pricing through the front desk to check-in", async () => {
+    fetchMock.mockResolvedValue(jsonResponse([{ id: "method-a", name: "Cash" }]));
+    render(<FrontDeskClient activeTenantId="hotel-a" currentUserRole="RECEPTIONIST" currency="KES"
+      arrivals={[{ id: "r", code: "RES-3", guestName: "Guest", checkInDate: new Date().toISOString(),
+        checkOutDate: new Date(Date.now() + 86400000).toISOString(), roomId: room.id, roomNumbers: "101",
+        openFolioId: null, hasFolio: false, requiredAmount: 5500, paidAmount: 0, balance: 5500, nightlyRateTotal: 3500,
+        pricingLines: [{ label: "Room", amount: 3500 }, { label: "Bed & Breakfast", amount: 1500 }, { label: "Child", amount: 500 }] }]}
+      departures={[]} inHouse={[]} availableRoomsCount={1} roomTypes={[]} rooms={[{ ...room, floor: "1" }]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Check In" }));
+    expect(screen.getByLabelText("Price breakdown").textContent).toContain("Bed & Breakfast");
+    expect((screen.getByLabelText("Amount paid now (KSh)") as HTMLInputElement).value).toBe("5500");
+    await screen.findByRole("option", { name: "Cash" });
+  });
+
+  it("shows frozen itemized charges and prefills the full check-in payment", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse([{ id: "method-a", name: "Cash" }]))
+      .mockResolvedValueOnce(jsonResponse({ ok: true, folioId: "folio-a" }));
+    const onCheckedIn = vi.fn();
+    render(<CheckInModal reservation={{ id: "reservation-a", code: "RES-3", guestName: "Guest", roomId: room.id,
+      roomNumbers: "192", requiredAmount: 5500, paidAmount: 0, pricingLines: [
+        { label: "Room 192", amount: 3500 }, { label: "Bed & Breakfast", amount: 1500 },
+        { label: "Child (3–12 yrs) (age 3) × 1 night", amount: 500 },
+      ] }} rooms={[{ id: room.id, number: room.number, status: "AVAILABLE" }]} onClose={vi.fn()} onCheckedIn={onCheckedIn} />);
+    const card = screen.getByLabelText("Price breakdown");
+    expect(card.textContent).toContain("Bed & Breakfast");
+    expect(card.textContent).toContain("Child (3–12 yrs) (age 3) × 1 night");
+    expect(card.textContent).toContain("3,500.00");
+    expect((screen.getByLabelText("Amount paid now (KSh)") as HTMLInputElement).value).toBe("5500");
+    expect(screen.getByText("Amount required").parentElement?.textContent).toContain("5,500.00");
+    expect(screen.getByText("Balance after check-in").parentElement?.textContent).toContain("0.00");
+    fireEvent.change(screen.getByLabelText("Amount paid now (KSh)"), { target: { value: "3500" } });
+    expect(screen.getByText("Balance after check-in").parentElement?.textContent).toContain("2,000.00");
+    fireEvent.change(screen.getByLabelText("Amount paid now (KSh)"), { target: { value: "5500" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm Check-in" }));
+    await waitFor(() => expect(onCheckedIn).toHaveBeenCalledWith("folio-a"));
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body as string).amountPaid).toBe(5500);
+  });
+
+  it("accounts for prior folio payments but blocks check-in when a folio already exists", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse([{ id: "method-a", name: "Cash" }]));
+    render(<CheckInModal reservation={{ id: "r", code: "R", guestName: "Guest", roomId: room.id,
+      roomNumbers: "101", requiredAmount: 5500, paidAmount: 1000, hasFolio: true }}
+      rooms={[{ id: room.id, number: room.number, status: "AVAILABLE" }]} onClose={vi.fn()} onCheckedIn={vi.fn()} />);
+    expect((screen.getByLabelText("Amount paid now (KSh)") as HTMLInputElement).value).toBe("4500");
+    expect(screen.getByText("Previously paid").parentElement?.textContent).toContain("1,000.00");
+    expect((screen.getByRole("button", { name: "Confirm Check-in" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("alert").textContent).toContain("already has a folio");
+    await screen.findByRole("option", { name: "Cash" });
   });
 
   it("surfaces a failed check-in mutation without bypassing its API contract", async () => {

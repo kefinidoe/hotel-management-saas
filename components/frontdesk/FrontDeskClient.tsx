@@ -30,6 +30,8 @@ type ResRow = {
   roomId: string;
   roomNumbers: string;
   openFolioId: string | null;
+  hasFolio: boolean;
+  pricingLines: { label: string; amount: number }[];
   requiredAmount: number;
   paidAmount: number;
   balance: number;

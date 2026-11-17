@@ -212,6 +212,7 @@ describe("affected server pages (Prisma mocked; page functions executed)", () =>
     expect(reservationQuery.where.hotelId).toBe("hotel-a");
     expect(reservationQuery.include.rooms.where.room.is.hotelId).toBe("hotel-a");
     expect(reservationQuery.include.folios.where).toEqual({ hotelId: "hotel-a" });
+    expect(reservationQuery.include.priceSnapshots).toEqual({ where: { hotelId: "hotel-a" }, orderBy: { version: "desc" }, take: 1 });
     expect(mocks.roomFindMany.mock.calls[0][0].where.hotelId).toBe("hotel-a");
     expect(mocks.roomTypeFindMany.mock.calls[0][0].where.hotelId).toBe("hotel-a");
     expect(element.props.inHouse.map((stay: any) => stay.id)).toEqual(["stay-a"]);
@@ -219,6 +220,25 @@ describe("affected server pages (Prisma mocked; page functions executed)", () =>
     expect(element.props.roomTypes.map((type: any) => type.id)).toEqual(["type-a"]);
     expect(JSON.stringify(element.props)).not.toContain("B-1");
     expect(JSON.stringify(element.props)).not.toContain("B secret type");
+  });
+
+  it("serializes the latest frozen full price and breakdown for arrivals", async () => {
+    const now = new Date();
+    const row = {
+      ...reservation("hotel-a", "stay-a"), status: "CONFIRMED", checkInDate: now,
+      checkOutDate: new Date(now.getTime() + 86400000), folios: [],
+      priceSnapshots: [{ grandTotal: 5500, breakdown: { lines: [
+        { label: "Room 192", amount: 3500 },
+        { label: "Bed & Breakfast", amount: 1500 },
+        { label: "Child (3–12 yrs) (age 3) × 1 night", amount: 500 },
+      ] } }],
+    };
+    mocks.reservationFindMany.mockResolvedValue([row]);
+    mocks.roomFindMany.mockResolvedValue([]);
+    mocks.roomTypeFindMany.mockResolvedValue([]);
+    const page = (await FrontDeskPage()) as any;
+    expect(page.props.arrivals[0]).toMatchObject({ requiredAmount: 5500, paidAmount: 0, balance: 5500,
+      hasFolio: false, pricingLines: row.priceSnapshots[0].breakdown.lines });
   });
 
   it("scopes inventory, movement-to-item relations, and purchasing records", async () => {
