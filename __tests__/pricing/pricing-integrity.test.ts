@@ -761,6 +761,52 @@ describe("tenant isolation on repricing", () => {
   });
 });
 
+describe("check-in folio reconciliation", () => {
+  const tenant = { userId: "user-manager", hotelId: "hotel-a", hotelName: "Hotel A", role: HotelRole.RECEPTIONIST, currency: "KES" };
+
+  it("does not add inclusive taxes twice and preserves the frozen room total despite nightly rounding", async () => {
+    const { payload } = await createStay();
+    const snapshot = dbHandle.current.snapshots[0];
+    snapshot.roomTotal = 17000.01;
+    snapshot.adjustmentsTotal = 0;
+    snapshot.grandTotal = 17000.01;
+    snapshot.taxTotal = 1000;
+    snapshot.breakdown.lines = [
+      { kind: "ROOM", label: "Room", amount: 17000.01, quantity: 2, unitPrice: 8500 },
+      { kind: "TAX", label: "VAT (included)", amount: 1000, quantity: 1, unitPrice: 1000 },
+    ];
+    const result = await checkIn(tenant, { reservationId: payload.id, amountPaid: 17000.01, paymentMethodId: "pm-cash" });
+    expect(result.required).toBe(17000.01);
+    expect(dbHandle.current.folioItems.reduce((sum, item) => sum + Number(item.total), 0)).toBe(17000.01);
+    expect(dbHandle.current.folioItems.filter((item) => item.type === "TAX")).toHaveLength(0);
+  });
+
+  it("posts only exclusive taxes and never treats a tax amount as a percentage", async () => {
+    const { payload } = await createStay();
+    const snapshot = dbHandle.current.snapshots[0];
+    snapshot.grandTotal = 17200;
+    snapshot.taxTotal = 1200;
+    snapshot.breakdown.lines.push(
+      { kind: "TAX", label: "VAT (included)", amount: 1000, quantity: 1, unitPrice: 1000 },
+      { kind: "TAX", label: "Levy", amount: 200, quantity: 1, unitPrice: 200 },
+    );
+    await checkIn(tenant, { reservationId: payload.id });
+    const taxes = dbHandle.current.folioItems.filter((item) => item.type === "TAX");
+    expect(taxes).toHaveLength(1);
+    expect(taxes[0]).toMatchObject({ description: "Levy", total: 200, taxRate: 0 });
+    expect(dbHandle.current.folioItems.reduce((sum, item) => sum + Number(item.total), 0)).toBe(17200);
+  });
+
+  it("rolls back check-in if the frozen breakdown cannot reconcile", async () => {
+    const { payload } = await createStay();
+    dbHandle.current.snapshots[0].grandTotal += 99;
+    await expect(checkIn(tenant, { reservationId: payload.id })).rejects.toThrow(/does not match the folio charges/i);
+    expect(dbHandle.current.folios).toHaveLength(0);
+    expect(dbHandle.current.folioItems).toHaveLength(0);
+    expect(dbHandle.current.reservations[0].status).toBe("CONFIRMED");
+  });
+});
+
 describe("folio charges follow the latest version", () => {
   it("bills the repriced total and the repriced breakdown", async () => {
     const { payload } = await createStay({ mealPlanId: "mp-half" });

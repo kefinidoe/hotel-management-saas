@@ -241,6 +241,17 @@ describe("affected server pages (Prisma mocked; page functions executed)", () =>
       hasFolio: false, pricingLines: row.priceSnapshots[0].breakdown.lines });
   });
 
+  it("displays discounts in older snapshots that omitted a discount line", async () => {
+    const now = new Date();
+    mocks.reservationFindMany.mockResolvedValue([{ ...reservation("hotel-a", "stay-a"), status: "CONFIRMED", checkInDate: now,
+      checkOutDate: new Date(now.getTime() + 86400000), folios: [],
+      priceSnapshots: [{ grandTotal: 5000, discountTotal: 500, breakdown: { lines: [{ kind: "ROOM", label: "Room", amount: 5500 }] } }] }]);
+    mocks.roomFindMany.mockResolvedValue([]);
+    mocks.roomTypeFindMany.mockResolvedValue([]);
+    const page = (await FrontDeskPage()) as any;
+    expect(page.props.arrivals[0].pricingLines).toEqual([{ label: "Room", amount: 5500 }, { label: "Discount", amount: -500 }]);
+  });
+
   it("scopes inventory, movement-to-item relations, and purchasing records", async () => {
     const items = [
       { id: "item-a", hotelId: "hotel-a", sku: "A", name: "A item", category: "Food", unit: "pcs", currentStock: 5, reorderLevel: 1, costPerUnit: 2, supplier: null },

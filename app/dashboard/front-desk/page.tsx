@@ -74,10 +74,16 @@ function serializeReservation(reservation: FrontDeskReservation) {
   const pricingLines = openFolio
     ? openFolio.items.map((item) => ({ label: item.description, amount: Number(item.total) }))
     : Array.isArray(rawLines)
-      ? rawLines.flatMap((line) => {
-          if (!line || typeof line !== "object" || Array.isArray(line) || typeof line.label !== "string" || typeof line.amount !== "number" || !Number.isFinite(line.amount)) return [];
-          return [{ label: line.label, amount: line.amount }];
-        })
+      ? [
+          ...rawLines.flatMap((line) => {
+            if (!line || typeof line !== "object" || Array.isArray(line) || typeof line.label !== "string" || typeof line.amount !== "number" || !Number.isFinite(line.amount)) return [];
+            return [{ label: line.label, amount: line.amount }];
+          }),
+          // Older custom/modular snapshots stored discountTotal but omitted its line.
+          ...(Number(snapshot?.discountTotal ?? 0) > 0 && !rawLines.some((line) =>
+            line && typeof line === "object" && !Array.isArray(line) && line.kind === "DISCOUNT"
+          ) ? [{ label: "Discount", amount: -Number(snapshot!.discountTotal) }] : []),
+        ]
       : !snapshot
         ? [
             ...reservation.rooms.map((room) => ({

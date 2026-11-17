@@ -13,7 +13,7 @@ describe("modular price breakdown foundation", () => {
     expect(p.nightlyRate).toBe(1150);
     expect(p.effectiveNightlyRate).toBe(1400);
     expect(p.totals).toMatchObject({ room: 2300, meals: 500, subtotal: 2800, discount: 100, grandTotal: 2700 });
-    expect(p.lines).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "MEAL_PLAN", amount: 500 })]));
+    expect(p.lines).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "MEAL_PLAN", amount: 500 }), expect.objectContaining({ kind: "DISCOUNT", amount: -100 })]));
   });
   it("rejects inactive plans, over-capacity bookings and excessive discounts", () => {
     expect(() => priceModularStay({ ...input, mealRates: [{ ...input.mealRates[0], isActive: false }] })).toThrow(/inactive/);

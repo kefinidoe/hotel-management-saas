@@ -60,6 +60,7 @@ export function priceCustomStay(input: {
       { kind: "ROOM", code: "ROOM", label: input.roomType.name, quantity: nights, unitPrice: amounts.base, amount: roundMoney(amounts.base * nights) },
       { kind: "ADJUSTMENT", code: "OCCUPANCY", label: input.occupancy.label, quantity: nights, unitPrice: amounts.occupancyTotal, amount: roundMoney(amounts.occupancyTotal * nights) },
       { kind: "MEAL_PLAN", code: "MEAL_PLAN", label: input.meal.name, quantity: nights, unitPrice: amounts.mealTotal, amount: meals },
+      ...(discount > 0 ? [{ kind: "DISCOUNT" as const, code: "DISCOUNT", label: "Discount", quantity: 1, unitPrice: discount, amount: -discount }] : []),
     ],
     totals: { room, adjustments: 0, meals, extras: 0, subtotal, discount, tax: 0, grandTotal, averagePerNight: roundMoney(grandTotal / nights) }, taxInclusive: false,
   };
