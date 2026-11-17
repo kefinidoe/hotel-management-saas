@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
+import { notify } from "@/lib/notifications";
 
 export async function GET() {
   const tenant = await getTenantFromRoute();
@@ -12,11 +13,18 @@ export async function GET() {
   const blocked = await requireModule(tenant.hotelId, "MAINTENANCE");
   if (blocked) return blocked;
 
-  const tickets = await prisma.maintenanceTicket.findMany({
-    where: { hotelId: tenant.hotelId },
-    include: { room: true, assignee: true },
-    orderBy: { updatedAt: "desc" },
-  });
+  const [tickets, memberships] = await Promise.all([
+    prisma.maintenanceTicket.findMany({
+      where: { hotelId: tenant.hotelId },
+      include: { room: true },
+      orderBy: { updatedAt: "desc" },
+    }),
+    prisma.hotelMembership.findMany({
+      where: { hotelId: tenant.hotelId, status: "ACTIVE", user: { isActive: true } },
+      select: { userId: true, user: { select: { name: true } } },
+    }),
+  ]);
+  const staffNamesByUserId = new Map(memberships.map((membership) => [membership.userId, membership.user.name]));
 
   return NextResponse.json(
     tickets.map((t) => ({
@@ -28,8 +36,8 @@ export async function GET() {
       cost: t.cost ? Number(t.cost) : null,
       roomId: t.roomId,
       roomNumber: t.room?.number ?? null,
-      assigneeId: t.assigneeId,
-      assigneeName: t.assignee?.name ?? null,
+      assigneeId: t.assigneeId && staffNamesByUserId.has(t.assigneeId) ? t.assigneeId : null,
+      assigneeName: t.assigneeId ? staffNamesByUserId.get(t.assigneeId) ?? null : null,
       updatedAt: t.updatedAt.toISOString(),
     }))
   );
@@ -81,6 +89,20 @@ export async function POST(req: Request) {
       data: { status: "MAINTENANCE" },
     });
   }
+
+  // Whoever raised the ticket knows about it; the point of the notification is
+  // that the people who fix and pay for things find out without being told.
+  const room = roomId
+    ? await prisma.room.findFirst({ where: { id: roomId, hotelId: tenant.hotelId }, select: { number: true } })
+    : null;
+  await notify({
+    hotelId: tenant.hotelId,
+    type: "MAINTENANCE",
+    title: `Maintenance: ${ticket.title}`,
+    message: `${room ? `Room ${room.number} - ` : ""}${ticket.priority} priority ticket opened${
+      body.takeOutOfService ? "; the room has been taken out of service" : ""
+    }.`,
+  });
 
   return NextResponse.json(ticket, { status: 201 });
 }

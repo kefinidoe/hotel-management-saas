@@ -12,15 +12,21 @@
  * Usage:
  *   node scripts/backup-db.mjs                 # uses DATABASE_URL / DIRECT_URL from .env
  *   node scripts/backup-db.mjs --url "postgresql://..."
+ *
+ * Requires SAAS_ENVIRONMENT=saas and SAAS_DATABASE_IDENTIFIER to match the target.
+ * That match does not prove database ownership or migration history; verify both
+ * independently before exporting records.
  *   node scripts/backup-db.mjs --keep 60       # how many dumps to retain (default 30)
  *   node scripts/backup-db.mjs --out D:\hms-backups
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sanitiseForPgTools } from "./pg-url.mjs";
+import { assertDatabaseTarget } from "./database-target-safety.mjs";
+import { loadEnvFiles } from "./env-file.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -28,26 +34,6 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 function arg(name, fallback = undefined) {
   const index = process.argv.indexOf(`--${name}`);
   return index !== -1 && process.argv[index + 1] ? process.argv[index + 1] : fallback;
-}
-
-// ── .env ──────────────────────────────────────────────────────────────────────
-function readEnv() {
-  const file = join(ROOT, ".env");
-  if (!existsSync(file)) return {};
-  const env = {};
-  for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
-    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (!match) continue;
-    let value = match[2].trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    env[match[1]] = value;
-  }
-  return env;
 }
 
 // ── finding pg_dump ───────────────────────────────────────────────────────────
@@ -85,15 +71,38 @@ function run(command, args, { quiet = false } = {}) {
 
 // ── main ──────────────────────────────────────────────────────────────────────
 async function main() {
-  const env = readEnv();
+  // One loader for the whole repository: prisma/.env then .env, never overriding
+  // a variable the caller already exported (scripts/env-file.mjs).
+  loadEnvFiles({ rootDir: ROOT });
+  const env = process.env;
   const keep = Number(arg("keep", "30"));
   const outDir = resolve(ROOT, arg("out", "backups"));
+
+  if (!Number.isInteger(keep) || keep < 1 || keep > 3650) {
+    throw new Error("--keep must be a whole number between 1 and 3650.");
+  }
 
   const rawUrl = arg("url") ?? env.DIRECT_URL ?? env.DATABASE_URL;
   if (!rawUrl) {
     console.error("No database URL found. Set DATABASE_URL in .env, or pass --url.");
     process.exit(1);
   }
+
+  // This is a read/export operation, but it can still expose production records.
+  // Bind both configured app URLs and any explicit --url to the approved target.
+  if (env.DATABASE_URL) {
+    assertDatabaseTarget({
+      environment: env.SAAS_ENVIRONMENT,
+      identifier: env.SAAS_DATABASE_IDENTIFIER,
+      databaseUrl: env.DATABASE_URL,
+      directUrl: env.DIRECT_URL,
+    });
+  }
+  assertDatabaseTarget({
+    environment: env.SAAS_ENVIRONMENT,
+    identifier: env.SAAS_DATABASE_IDENTIFIER,
+    databaseUrl: rawUrl,
+  });
 
   const connection = sanitiseForPgTools(rawUrl);
   const host = new URL(rawUrl).hostname;

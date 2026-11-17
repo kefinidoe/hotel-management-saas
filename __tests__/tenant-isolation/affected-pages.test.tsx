@@ -6,10 +6,18 @@ const mocks = vi.hoisted(() => {
     GUEST_STAYS: ["HOTEL_OWNER", "HOTEL_ADMIN", "MANAGER", "RECEPTIONIST"],
     FRONT_DESK: ["HOTEL_OWNER", "HOTEL_ADMIN", "MANAGER", "RECEPTIONIST", "CASHIER"],
     MANAGEMENT: ["HOTEL_OWNER", "HOTEL_ADMIN", "MANAGER"],
+    FINANCIAL_REPORTS: ["HOTEL_OWNER", "HOTEL_ADMIN", "MANAGER", "ACCOUNTANT"],
   };
   return {
     groups,
-    tenant: { hotelId: "hotel-a", userId: "user-a", role: "HOTEL_ADMIN" },
+    // requirePageRole returns a full TenantContext in the app; the pages now read
+    // the active hotel's currency from it, so the mock must supply it too.
+    tenant: {
+      hotelId: "hotel-a",
+      userId: "user-a",
+      role: "HOTEL_ADMIN",
+      hotel: { id: "hotel-a", name: "Hotel A", slug: "hotel-a", currency: "KES", timezone: "Africa/Nairobi", status: "ACTIVE" },
+    },
     requirePageRole: vi.fn(),
     expenseFindMany: vi.fn(),
     guestFindMany: vi.fn(),
@@ -99,7 +107,12 @@ function reservation(hotelId: string, id: string, roomHotelId = hotelId) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.tenant = { hotelId: "hotel-a", userId: "user-a", role: "HOTEL_ADMIN" };
+  mocks.tenant = {
+    hotelId: "hotel-a",
+    userId: "user-a",
+    role: "HOTEL_ADMIN",
+    hotel: { id: "hotel-a", name: "Hotel A", slug: "hotel-a", currency: "KES", timezone: "Africa/Nairobi", status: "ACTIVE" },
+  };
   mocks.requirePageRole.mockImplementation(async (allowed: string[]) => {
     if (!allowed.includes(mocks.tenant.role)) throw new Error("page authorization denied");
     return mocks.tenant;
@@ -124,9 +137,12 @@ describe("affected server pages (Prisma mocked; page functions executed)", () =>
       }));
     });
 
-    const element = (await ExpensesPage()) as any;
+    const wrapper = (await ExpensesPage()) as any;
+    expect(wrapper.props.hotelId).toBe("hotel-a");
+    expect(wrapper.props.actorId).toBe("user-a");
+    const element = wrapper.props.children;
 
-    expect(mocks.requirePageRole).toHaveBeenCalledWith(mocks.groups.ALL_STAFF);
+    expect(mocks.requirePageRole).toHaveBeenCalledWith(mocks.groups.ALL_STAFF, "EXPENSES");
     expect(mocks.expenseFindMany.mock.calls[0][0].where).toEqual({ hotelId: "hotel-a" });
     expect(element.props.initialExpenses.map((item: any) => item.id)).toEqual(["expense-a", "expense-a-old-user"]);
     expect(element.props.initialExpenses[1].requestedByName).toBe("Former staff");
@@ -183,17 +199,46 @@ describe("affected server pages (Prisma mocked; page functions executed)", () =>
       { id: "room-a", hotelId: "hotel-a", number: "A-1", floor: "1", status: "AVAILABLE", roomType: { name: "A type", baseRate: 100 } },
       { id: "room-b", hotelId: "hotel-b", number: "B-1", floor: "1", status: "AVAILABLE", roomType: { name: "B type", baseRate: 100 } },
     ];
+    const roomTypes = [
+      { id: "type-a", hotelId: "hotel-a", name: "A type", baseRate: 100, mealPlan: "BED_ONLY" },
+      { id: "type-b", hotelId: "hotel-b", name: "B secret type", baseRate: 900, mealPlan: "FULL_BOARD" },
+    ];
     mocks.roomFindMany.mockImplementation(async (args) => byHotel(roomRows, args));
+    mocks.roomTypeFindMany.mockImplementation(async (args) => byHotel(roomTypes, args));
 
     const element = (await FrontDeskPage()) as any;
     const reservationQuery = mocks.reservationFindMany.mock.calls[0][0];
+    expect(element.props.activeTenantId).toBe("hotel-a");
     expect(reservationQuery.where.hotelId).toBe("hotel-a");
     expect(reservationQuery.include.rooms.where.room.is.hotelId).toBe("hotel-a");
     expect(reservationQuery.include.folios.where).toEqual({ hotelId: "hotel-a" });
+    expect(reservationQuery.include.priceSnapshots).toEqual({ where: { hotelId: "hotel-a" }, orderBy: { version: "desc" }, take: 1 });
     expect(mocks.roomFindMany.mock.calls[0][0].where.hotelId).toBe("hotel-a");
+    expect(mocks.roomTypeFindMany.mock.calls[0][0].where.hotelId).toBe("hotel-a");
     expect(element.props.inHouse.map((stay: any) => stay.id)).toEqual(["stay-a"]);
     expect(element.props.rooms.map((room: any) => room.number)).toEqual(["A-1"]);
+    expect(element.props.roomTypes.map((type: any) => type.id)).toEqual(["type-a"]);
     expect(JSON.stringify(element.props)).not.toContain("B-1");
+    expect(JSON.stringify(element.props)).not.toContain("B secret type");
+  });
+
+  it("serializes the latest frozen full price and breakdown for arrivals", async () => {
+    const now = new Date();
+    const row = {
+      ...reservation("hotel-a", "stay-a"), status: "CONFIRMED", checkInDate: now,
+      checkOutDate: new Date(now.getTime() + 86400000), folios: [],
+      priceSnapshots: [{ grandTotal: 5500, breakdown: { lines: [
+        { label: "Room 192", amount: 3500 },
+        { label: "Bed & Breakfast", amount: 1500 },
+        { label: "Child (3–12 yrs) (age 3) × 1 night", amount: 500 },
+      ] } }],
+    };
+    mocks.reservationFindMany.mockResolvedValue([row]);
+    mocks.roomFindMany.mockResolvedValue([]);
+    mocks.roomTypeFindMany.mockResolvedValue([]);
+    const page = (await FrontDeskPage()) as any;
+    expect(page.props.arrivals[0]).toMatchObject({ requiredAmount: 5500, paidAmount: 0, balance: 5500,
+      hasFolio: false, pricingLines: row.priceSnapshots[0].breakdown.lines });
   });
 
   it("scopes inventory, movement-to-item relations, and purchasing records", async () => {
@@ -217,9 +262,12 @@ describe("affected server pages (Prisma mocked; page functions executed)", () =>
     mocks.purchaseFindMany.mockImplementation(async (args) => byHotel(purchases, args)
       .filter((purchase: any) => purchase.inventoryItem.hotelId === args.where.inventoryItem.is.hotelId));
 
-    const element = (await InventoryPage()) as any;
+    const wrapper = (await InventoryPage()) as any;
+    expect(wrapper.props.hotelId).toBe("hotel-a");
+    expect(wrapper.props.actorId).toBe("user-a");
+    const element = wrapper.props.children;
 
-    expect(mocks.requirePageRole).toHaveBeenCalledWith(mocks.groups.MANAGEMENT);
+    expect(mocks.requirePageRole).toHaveBeenCalledWith(mocks.groups.MANAGEMENT, "INVENTORY");
     expect(mocks.inventoryItemFindMany.mock.calls[0][0].where).toEqual({ hotelId: "hotel-a" });
     expect(mocks.stockMovementFindMany.mock.calls[0][0].where.hotelId).toBe("hotel-a");
     expect(mocks.stockMovementFindMany.mock.calls[0][0].where.inventoryItem.is.hotelId).toBe("hotel-a");
@@ -255,13 +303,22 @@ describe("affected server pages (Prisma mocked; page functions executed)", () =>
       { id: "room-a", hotelId: "hotel-a", number: "A-1", status: "AVAILABLE", roomType: { name: "A type", baseRate: 10 } },
       { id: "room-b", hotelId: "hotel-b", number: "B-1", status: "AVAILABLE", roomType: { name: "B secret type", baseRate: 99 } },
     ];
+    const types = [
+      { id: "type-a", hotelId: "hotel-a", name: "A type", baseRate: 10, mealPlan: "BED_ONLY" },
+      { id: "type-b", hotelId: "hotel-b", name: "B secret type", baseRate: 99, mealPlan: "FULL_BOARD" },
+    ];
     mocks.roomFindMany.mockImplementation(async (args) => byHotel(rooms, args));
+    mocks.roomTypeFindMany.mockImplementation(async (args) => byHotel(types, args));
 
     const element = (await ReservationsPage()) as any;
 
-    expect(mocks.requirePageRole).toHaveBeenCalledWith(mocks.groups.GUEST_STAYS);
+    expect(mocks.requirePageRole).toHaveBeenCalledWith(mocks.groups.GUEST_STAYS, "RESERVATIONS");
     expect(mocks.roomFindMany.mock.calls[0][0].where.hotelId).toBe("hotel-a");
+    expect(mocks.roomTypeFindMany.mock.calls[0][0].where.hotelId).toBe("hotel-a");
     expect(element.props.rooms.map((room: any) => room.id)).toEqual(["room-a"]);
+    expect(element.props.roomTypes.map((type: any) => type.id)).toEqual(["type-a"]);
+    // The hotel's own currency is what the form must show, never a hardcoded KSh.
+    expect(element.props.currency).toBe("KES");
     expect(JSON.stringify(element.props)).not.toContain("B secret type");
   });
 

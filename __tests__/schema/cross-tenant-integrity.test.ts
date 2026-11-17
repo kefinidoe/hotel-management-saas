@@ -1,7 +1,16 @@
 // @vitest-environment node
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
-import { applyPendingMigrations } from "./migration-runner";
+import { PGLITE_MIGRATION_TIMEOUT_MS, applyPendingMigrations } from "./migration-runner";
+
+// This suite applies the entire migration chain to an in-memory PGlite database:
+// a WASM Postgres working through ~22 migration files. That is legitimately slow
+// and markedly slower on Windows (roughly 5-7s against ~2s on Linux), which the
+// default 5s per-test/per-hook budget does not cover. Raise the budget for this
+// file only — where that work actually happens — so a real hang elsewhere still
+// fails fast instead of hiding behind a global timeout.
+vi.setConfig({ testTimeout: PGLITE_MIGRATION_TIMEOUT_MS, hookTimeout: PGLITE_MIGRATION_TIMEOUT_MS });
+
 
 describe("Phase 3 Cross-Tenant Referential Integrity Test Suite", () => {
   let db: PGlite;
@@ -194,6 +203,14 @@ describe("Phase 3 Cross-Tenant Referential Integrity Test Suite", () => {
       }
       expect(allowed).toBe(true);
     });
+
+    it("DATABASE REJECTS: ReservationRoom cannot connect a hotel A reservation to a hotel B room", async () => {
+      await expect(db.query(
+        `INSERT INTO "ReservationRoom" (id, "reservationId", "roomId", "hotelId", rate)
+         VALUES ('rr-cross-tenant', $1, $2, $3, 100.00)`,
+        [alphaReservationId, betaRoomId, alphaHotelId],
+      )).rejects.toThrow(/ReservationRoom_roomId_hotelId_fkey|foreign key/i);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -322,6 +339,15 @@ describe("Phase 3 Cross-Tenant Referential Integrity Test Suite", () => {
       }
       expect(orderAllowed).toBe(true);
     });
+
+    it("DATABASE REJECTS: OrderItem cannot reference another hotel's MenuItem", async () => {
+      await db.query(`INSERT INTO "Order" (id, "hotelId", total) VALUES ('order-alpha-integrity', $1, 15.00)`, [alphaHotelId]);
+      await expect(db.query(
+        `INSERT INTO "OrderItem" (id, "orderId", "hotelId", "menuItemId", name, "unitPrice", quantity, total)
+         VALUES ('order-item-cross-tenant', 'order-alpha-integrity', $1, $2, 'Coffee', 5.00, 1, 5.00)`,
+        [alphaHotelId, betaMenuItemId],
+      )).rejects.toThrow(/OrderItem_menuItemId_hotelId_fkey|foreign key/i);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -381,6 +407,19 @@ describe("Phase 3 Cross-Tenant Referential Integrity Test Suite", () => {
         recipeAllowed = false;
       }
       expect(recipeAllowed).toBe(true);
+    });
+
+    it("DATABASE REJECTS: RecipeIngredient cannot reference inventory from another hotel", async () => {
+      await db.query(
+        `INSERT INTO "Recipe" (id, "menuItemId", "hotelId", portions, "updatedAt")
+         VALUES ('recipe-alpha-integrity', $1, $2, 1, NOW())`,
+        [alphaMenuItemId, alphaHotelId],
+      );
+      await expect(db.query(
+        `INSERT INTO "RecipeIngredient" (id, "recipeId", "inventoryItemId", "hotelId", quantity)
+         VALUES ('recipe-ingredient-cross-tenant', 'recipe-alpha-integrity', $1, $2, 1.00)`,
+        [betaInventoryId, alphaHotelId],
+      )).rejects.toThrow(/RecipeIngredient_inventoryItemId_hotelId_fkey|foreign key/i);
     });
   });
 

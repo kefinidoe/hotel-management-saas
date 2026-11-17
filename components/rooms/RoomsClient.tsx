@@ -6,6 +6,8 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Plus, X, Settings2 } from "lucide-react";
 import clsx from "clsx";
+import { apiErrorMessage, requestJson } from "@/lib/client-api";
+import { MEAL_PLANS, MEAL_PLAN_LABELS, type MealPlanCode } from "@/lib/tariffs";
 
 type Room = {
   id: string;
@@ -23,6 +25,15 @@ type RoomType = {
   description: string | null;
   baseRate: number;
   capacity: number;
+  maxAdults?: number;
+  maxChildren?: number;
+  extraAdultFee?: number;
+  /**
+   * The meal plan a room type is sold on. Reservations pick a tariff by
+   * occupancy + meal plan, so a room type without one cannot be booked — the
+   * reservation dialog reports "no tariff for this occupancy and meal plan".
+   */
+  mealPlan: string | null;
 };
 
 const STATUS_OPTIONS = ROOM_STATUSES;
@@ -35,10 +46,12 @@ export default function RoomsClient({
   initialRooms,
   initialRoomTypes,
   canManage,
+  useModularPricing = false,
 }: {
   initialRooms: Room[];
   initialRoomTypes: RoomType[];
   canManage: boolean;
+  useModularPricing?: boolean;
 }) {
   const router = useRouter();
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
@@ -72,7 +85,7 @@ export default function RoomsClient({
       </div>
 
       {error && (
-        <p className="text-sm text-danger bg-danger/5 border border-danger/20 rounded-control px-3 py-2 mb-4">
+        <p role="alert" className="text-sm text-danger bg-danger/5 border border-danger/20 rounded-control px-3 py-2 mb-4">
           {error}
         </p>
       )}
@@ -84,7 +97,7 @@ export default function RoomsClient({
             onClick={() => setSelectedRoom(room)}
             className="group relative overflow-hidden rounded-2xl border border-border bg-surface text-left shadow-sm transition-all duration-300 hover:-translate-y-1 hover:border-primary-300 hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-primary-500/30"
           >
-            <div className="relative h-2 bg-gradient-to-r from-primary-500 via-primary-400 to-champagne-400" />
+            <div className="relative h-2 bg-gradient-to-r from-primary-500 via-primary-400 to-accent-400" />
 
             <div className="p-4">
               <div className="flex items-start justify-between gap-3">
@@ -179,6 +192,7 @@ export default function RoomsClient({
 
       {canManage && manageTypesOpen && (
         <RoomTypesModal
+          useModularPricing={useModularPricing}
           roomTypes={initialRoomTypes}
           onClose={() => setManageTypesOpen(false)}
           onSaved={refresh}
@@ -237,19 +251,19 @@ function AddRoomModal({
     e.preventDefault();
     setLoading(true);
     onError(null);
-    const res = await fetch("/api/rooms", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ number, floor, roomTypeId }),
-    });
-    setLoading(false);
-    if (!res.ok) {
-      const data = await res.json();
-      onError(data.error || "Could not add room.");
-      return;
+    try {
+      await requestJson<{ id: string }>("/api/rooms", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ number, floor, roomTypeId }),
+      });
+      onSaved();
+      onClose();
+    } catch (saveError) {
+      onError(apiErrorMessage(saveError, "Could not add room."));
+    } finally {
+      setLoading(false);
     }
-    onSaved();
-    onClose();
   }
 
   return (
@@ -304,19 +318,19 @@ function RoomDetailModal({
   async function save() {
     setLoading(true);
     onError(null);
-    const res = await fetch(`/api/rooms/${room.id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ number: room.number, floor: room.floor, roomTypeId, status, notes }),
-    });
-    setLoading(false);
-    if (!res.ok) {
-      const data = await res.json();
-      onError(data.error || "Could not update room.");
-      return;
+    try {
+      await requestJson<{ id: string }>(`/api/rooms/${room.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ number: room.number, floor: room.floor, roomTypeId, status, notes }),
+      });
+      onSaved();
+      onClose();
+    } catch (saveError) {
+      onError(apiErrorMessage(saveError, "Could not update room."));
+    } finally {
+      setLoading(false);
     }
-    onSaved();
-    onClose();
   }
 
   async function remove() {
@@ -329,15 +343,15 @@ function RoomDetailModal({
     }
     setLoading(true);
     onError(null);
-    const res = await fetch(`/api/rooms/${room.id}`, { method: "DELETE" });
-    setLoading(false);
-    if (!res.ok) {
-      const data = await res.json();
-      onError(data.error || "Could not remove room from the hotel.");
-      return;
+    try {
+      await requestJson<{ ok: true }>(`/api/rooms/${room.id}`, { method: "DELETE" });
+      onSaved();
+      onClose();
+    } catch (removeError) {
+      onError(apiErrorMessage(removeError, "Could not remove room from the hotel."));
+    } finally {
+      setLoading(false);
     }
-    onSaved();
-    onClose();
   }
 
   return (
@@ -395,12 +409,14 @@ function RoomDetailModal({
 }
 
 function RoomTypesModal({
+  useModularPricing,
   roomTypes,
   onClose,
   onSaved,
   onError,
 }: {
   roomTypes: RoomType[];
+  useModularPricing: boolean;
   onClose: () => void;
   onSaved: () => void;
   onError: (e: string | null) => void;
@@ -408,80 +424,192 @@ function RoomTypesModal({
   const [name, setName] = useState("");
   const [baseRate, setBaseRate] = useState("");
   const [capacity, setCapacity] = useState("2");
+  const [maxChildren, setMaxChildren] = useState("0");
+  const [extraAdultFee, setExtraAdultFee] = useState("0");
+  const [mealPlan, setMealPlan] = useState<MealPlanCode>("BED_ONLY");
+  const [editingType, setEditingType] = useState<RoomType | null>(null);
   const [loading, setLoading] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  async function addType(e: React.FormEvent) {
-    e.preventDefault();
-    setLoading(true);
+  function startEditing(roomType: RoomType) {
+    setEditingType(roomType);
+    setName(roomType.name);
+    setBaseRate(String(roomType.baseRate));
+    setCapacity(String(useModularPricing ? roomType.maxAdults ?? roomType.capacity : roomType.capacity));
+    setMaxChildren(String(roomType.maxChildren ?? 0));
+    setExtraAdultFee(String(roomType.extraAdultFee ?? 0));
+    setMealPlan(MEAL_PLANS.includes(roomType.mealPlan as MealPlanCode) ? (roomType.mealPlan as MealPlanCode) : "BED_ONLY");
     onError(null);
-    const res = await fetch("/api/room-types", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, baseRate: Number(baseRate), capacity: Number(capacity) }),
-    });
-    setLoading(false);
-    if (!res.ok) {
-      const data = await res.json();
-      onError(data.error || "Could not add room type.");
-      return;
-    }
+  }
+
+  function cancelEditing() {
+    setEditingType(null);
     setName("");
     setBaseRate("");
-    onSaved();
+    setCapacity("2");
+    setMaxChildren("0");
+    setExtraAdultFee("0");
+    setMealPlan("BED_ONLY");
+    onError(null);
+  }
+
+  async function saveType(e: React.FormEvent) {
+    e.preventDefault();
+    const numericRate = Number(baseRate);
+    const numericCapacity = Number(capacity);
+    if (!name.trim() || !Number.isFinite(numericRate) || numericRate < 0) {
+      onError("Enter a room type name and a valid non-negative base rate.");
+      return;
+    }
+    if (!Number.isInteger(numericCapacity) || numericCapacity < 1) {
+      onError("Capacity must be a positive whole number.");
+      return;
+    }
+
+    const childrenValue = Number(maxChildren);
+    const fee = Number(extraAdultFee);
+    if (useModularPricing && (!Number.isInteger(childrenValue) || childrenValue < 0 || childrenValue > 1000 || numericCapacity + childrenValue > 1000 || !Number.isFinite(fee) || fee < 0)) {
+      onError("Enter a valid child capacity and extra adult fee (total capacity at most 1000).");
+      return;
+    }
+    setLoading(true);
+    onError(null);
+    const payload = useModularPricing
+      ? { name: name.trim(), baseRate: numericRate, capacity: numericCapacity + childrenValue, maxAdults: numericCapacity, maxChildren: childrenValue, extraAdultFee: fee }
+      : { name: name.trim(), baseRate: numericRate, capacity: numericCapacity, mealPlan };
+    try {
+      if (editingType) {
+        await requestJson<RoomType>(`/api/room-types/${editingType.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      } else {
+        await requestJson<RoomType>("/api/room-types", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      }
+      cancelEditing();
+      onSaved();
+    } catch (saveError) {
+      onError(apiErrorMessage(saveError, editingType ? "Could not update room type." : "Could not add room type."));
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function removeType(id: string) {
-    if (!confirm("Delete this room type?")) return;
-    const res = await fetch(`/api/room-types/${id}`, { method: "DELETE" });
-    if (!res.ok) {
-      const data = await res.json();
-      onError(data.error || "Could not delete room type.");
-      return;
+    if (deletingId || !confirm("Delete this room type?")) return;
+    setDeletingId(id);
+    onError(null);
+    try {
+      await requestJson<{ ok: true }>(`/api/room-types/${id}`, { method: "DELETE" });
+      if (editingType?.id === id) cancelEditing();
+      onSaved();
+    } catch (removeError) {
+      onError(apiErrorMessage(removeError, "Could not delete room type."));
+    } finally {
+      setDeletingId(null);
     }
-    onSaved();
   }
 
   return (
     <ModalShell title="Room Types" onClose={onClose}>
       <div className="space-y-2 mb-4">
         {roomTypes.map((rt) => (
-          <div key={rt.id} className="flex items-center justify-between border border-border rounded-control px-3 py-2">
+          <div key={rt.id} className="flex items-center justify-between gap-3 border border-border rounded-control px-3 py-2">
             <div>
               <p className="text-sm font-medium">{rt.name}</p>
               <p className="text-xs text-text-secondary">
-                KSh {rt.baseRate.toLocaleString()} · sleeps {rt.capacity}
+                KSh {rt.baseRate.toLocaleString()} · {useModularPricing ? `up to ${rt.maxAdults ?? rt.capacity} adults, ${rt.maxChildren ?? 0} children` : `sleeps ${rt.capacity} · ${rt.mealPlan ? MEAL_PLAN_LABELS[rt.mealPlan as MealPlanCode] : "no meal plan"}`}
               </p>
             </div>
-            <button onClick={() => removeType(rt.id)} className="text-text-secondary hover:text-danger">
-              <X size={16} />
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => startEditing(rt)}
+                disabled={loading || deletingId !== null}
+                className="text-xs text-primary-700 hover:underline disabled:opacity-50"
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                onClick={() => void removeType(rt.id)}
+                disabled={loading || deletingId === rt.id}
+                aria-label={`Delete ${rt.name}`}
+                className="text-text-secondary hover:text-danger disabled:opacity-50"
+              >
+                {deletingId === rt.id ? <span className="text-xs">Deleting…</span> : <X size={16} />}
+              </button>
+            </div>
           </div>
         ))}
+        {roomTypes.length === 0 && (
+          <p className="text-sm text-text-secondary">No room types yet. Add one before creating rooms or reservations.</p>
+        )}
       </div>
 
-      <form onSubmit={addType} className="space-y-3 border-t border-border pt-4">
-        <p className="text-sm font-medium">Add a room type</p>
+      <form onSubmit={saveType} className="space-y-3 border-t border-border pt-4">
+        <p className="text-sm font-medium">{editingType ? `Edit ${editingType.name}` : "Add a room type"}</p>
         <input placeholder="Name (e.g. Deluxe)" value={name} onChange={(e) => setName(e.target.value)} required className={inputClass()} />
         <div className="grid grid-cols-2 gap-2">
           <input
             placeholder="Rate (KSh)"
             type="number"
+            min="0"
+            step="0.01"
             value={baseRate}
             onChange={(e) => setBaseRate(e.target.value)}
             required
             className={inputClass()}
           />
           <input
-            placeholder="Capacity"
+            placeholder={useModularPricing ? "Max adults" : "Capacity"}
+            aria-label={useModularPricing ? "Max adults" : "Capacity"}
             type="number"
+            min="1"
+            step="1"
             value={capacity}
             onChange={(e) => setCapacity(e.target.value)}
+            required
             className={inputClass()}
           />
         </div>
-        <button type="submit" disabled={loading} className="btn-primary w-full">
-          {loading ? "Adding..." : "Add Room Type"}
-        </button>
+        {useModularPricing ? (
+          <div className="grid grid-cols-2 gap-2">
+            <label className="text-sm">Max children<input aria-label="Max children" type="number" min="0" step="1" value={maxChildren} onChange={(e) => setMaxChildren(e.target.value)} required className={inputClass()} /></label>
+            <label className="text-sm">Extra adult fee per night<input aria-label="Extra adult fee per night" type="number" min="0" step="0.01" value={extraAdultFee} onChange={(e) => setExtraAdultFee(e.target.value)} required className={inputClass()} /></label>
+          </div>
+        ) : <div>
+          <label className="block text-sm font-medium mb-1.5">Meal Plan</label>
+          <select
+            value={mealPlan}
+            onChange={(e) => setMealPlan(e.target.value as MealPlanCode)}
+            className={inputClass()}
+          >
+            {MEAL_PLANS.map((plan) => (
+              <option key={plan} value={plan}>
+                {MEAL_PLAN_LABELS[plan]}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs text-text-muted mt-1">
+            Reservations match a room type by occupancy and meal plan, so this is required to book it.
+          </p>
+        </div>}
+        <div className="flex gap-2">
+          {editingType && (
+            <button type="button" onClick={cancelEditing} disabled={loading} className="btn-secondary flex-1">
+              Cancel
+            </button>
+          )}
+          <button type="submit" disabled={loading} className="btn-primary flex-1">
+            {loading ? (editingType ? "Saving..." : "Adding...") : (editingType ? "Save Changes" : "Add Room Type")}
+          </button>
+        </div>
       </form>
     </ModalShell>
   );

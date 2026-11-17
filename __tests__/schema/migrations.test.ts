@@ -1,8 +1,21 @@
 // @vitest-environment node
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import fs from "node:fs";
-import { applyPendingMigrations, migrationDirectories } from "./migration-runner";
+import {
+  PGLITE_MIGRATION_TIMEOUT_MS,
+  applyPendingMigrations,
+  migrationDirectories,
+} from "./migration-runner";
+
+// This suite applies the entire migration chain to an in-memory PGlite database:
+// a WASM Postgres working through ~22 migration files. That is legitimately slow
+// and markedly slower on Windows (roughly 5-7s against ~2s on Linux), which the
+// default 5s per-test/per-hook budget does not cover. Raise the budget for this
+// file only — where that work actually happens — so a real hang elsewhere still
+// fails fast instead of hiding behind a global timeout.
+vi.setConfig({ testTimeout: PGLITE_MIGRATION_TIMEOUT_MS, hookTimeout: PGLITE_MIGRATION_TIMEOUT_MS });
+
 
 const SCHEMA_PATH = "prisma/schema.prisma";
 
@@ -207,7 +220,88 @@ describe("Prisma migration history", () => {
       "Payment_paymentMethodId_hotelId_fkey",
       "MenuItem_categoryId_hotelId_fkey",
       "StockMovement_inventoryItemId_hotelId_fkey",
+      "ReservationRoom_reservationId_hotelId_fkey",
+      "ReservationRoom_roomId_hotelId_fkey",
+      "Recipe_menuItemId_hotelId_fkey",
+      "RecipeIngredient_recipeId_hotelId_fkey",
+      "RecipeIngredient_inventoryItemId_hotelId_fkey",
+      "OrderItem_orderId_hotelId_fkey",
+      "OrderItem_menuItemId_hotelId_fkey",
     ]) expect(names.has(name), `missing tenant-scoped foreign key ${name}`).toBe(true);
+  });
+});
+
+describe("tenant join-key migration", () => {
+  it("aborts before changing the schema when an existing reservation-room link crosses hotels", async () => {
+    const rehearsal = new PGlite();
+    try {
+      const seedAndCorruptBeforeDraft = async (directory: string, target: PGlite) => {
+        if (directory === "20261008123000_multi_tenant_saas_init") {
+          await target.exec(fs.readFileSync("__tests__/schema/fixtures/pre-saas-conversion.sql", "utf8"));
+        }
+        if (directory === "20261029130000_add_tenant_composite_join_fks") {
+          await target.exec(`
+            INSERT INTO "Hotel" (id, name, slug, "updatedAt") VALUES ('cross-hotel', 'Cross Hotel', 'cross-hotel', NOW());
+            INSERT INTO "RoomType" (id, "hotelId", name, "baseRate", capacity, "updatedAt") VALUES ('cross-room-type', 'cross-hotel', 'Other', 100, 1, NOW());
+            INSERT INTO "Room" (id, "hotelId", number, "roomTypeId", "updatedAt") VALUES ('cross-room', 'cross-hotel', '201', 'cross-room-type', NOW());
+            UPDATE "ReservationRoom" SET "roomId" = 'cross-room' WHERE id = 'legacy-reservation-room';
+          `);
+        }
+      };
+
+      await expect(applyPendingMigrations(rehearsal, seedAndCorruptBeforeDraft))
+        .rejects.toThrow(/Tenant-integrity precheck failed: ReservationRoom/);
+      const draftColumn = await rehearsal.query(
+        `SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'ReservationRoom' AND column_name = 'hotelId'`,
+      );
+      expect(draftColumn.rows).toHaveLength(0);
+    } finally {
+      await rehearsal.close();
+    }
+  });
+
+  it("backfills join-table tenant IDs from authoritative parents before enforcing composite FKs", async () => {
+    const rehearsal = new PGlite();
+    try {
+      const seedBeforeDraft = async (directory: string, target: PGlite) => {
+        if (directory !== "20261029130000_add_tenant_composite_join_fks") return;
+        await target.exec(`
+          INSERT INTO "Hotel" (id, name, slug, "updatedAt") VALUES ('join-test-hotel', 'Join Test', 'join-test', NOW());
+          INSERT INTO "User" (id, name, email, "passwordHash", "updatedAt") VALUES ('join-test-user', 'Join Test', 'join-test@example.test', 'hash', NOW());
+          INSERT INTO "RoomType" (id, "hotelId", name, "baseRate", capacity, "updatedAt") VALUES ('join-test-room-type', 'join-test-hotel', 'Standard', 100, 1, NOW());
+          INSERT INTO "Room" (id, "hotelId", number, "roomTypeId", "updatedAt") VALUES ('join-test-room', 'join-test-hotel', '101', 'join-test-room-type', NOW());
+          INSERT INTO "Guest" (id, "hotelId", "fullName", "updatedAt") VALUES ('join-test-guest', 'join-test-hotel', 'Test Guest', NOW());
+          INSERT INTO "Reservation" (id, "hotelId", code, "guestId", "createdById", "checkInDate", "checkOutDate", "updatedAt")
+            VALUES ('join-test-reservation', 'join-test-hotel', 'JOIN-001', 'join-test-guest', 'join-test-user', NOW(), NOW() + interval '1 day', NOW());
+          INSERT INTO "ReservationRoom" (id, "reservationId", "roomId", rate) VALUES ('join-test-reservation-room', 'join-test-reservation', 'join-test-room', 100);
+          INSERT INTO "MenuCategory" (id, "hotelId", name) VALUES ('join-test-category', 'join-test-hotel', 'Test');
+          INSERT INTO "MenuItem" (id, "hotelId", "categoryId", name, price) VALUES ('join-test-menu-item', 'join-test-hotel', 'join-test-category', 'Test Item', 10);
+          INSERT INTO "InventoryItem" (id, "hotelId", sku, name, category, unit, "updatedAt") VALUES ('join-test-inventory', 'join-test-hotel', 'JOIN-1', 'Test Stock', 'Test', 'pcs', NOW());
+          INSERT INTO "Recipe" (id, "menuItemId", portions, "updatedAt") VALUES ('join-test-recipe', 'join-test-menu-item', 1, NOW());
+          INSERT INTO "RecipeIngredient" (id, "recipeId", "inventoryItemId", quantity) VALUES ('join-test-ingredient', 'join-test-recipe', 'join-test-inventory', 1);
+          INSERT INTO "Order" (id, "hotelId", total) VALUES ('join-test-order', 'join-test-hotel', 10);
+          INSERT INTO "OrderItem" (id, "orderId", "menuItemId", name, "unitPrice", quantity, total)
+            VALUES ('join-test-order-item', 'join-test-order', 'join-test-menu-item', 'Test Item', 10, 1, 10);
+        `);
+      };
+
+      await applyPendingMigrations(rehearsal, seedBeforeDraft);
+      const result = await rehearsal.query<{ reservationHotel: string; recipeHotel: string; ingredientHotel: string; orderItemHotel: string }>(`
+        SELECT
+          (SELECT "hotelId" FROM "ReservationRoom" WHERE id = 'join-test-reservation-room') AS "reservationHotel",
+          (SELECT "hotelId" FROM "Recipe" WHERE id = 'join-test-recipe') AS "recipeHotel",
+          (SELECT "hotelId" FROM "RecipeIngredient" WHERE id = 'join-test-ingredient') AS "ingredientHotel",
+          (SELECT "hotelId" FROM "OrderItem" WHERE id = 'join-test-order-item') AS "orderItemHotel"
+      `);
+      expect(result.rows).toEqual([{
+        reservationHotel: "join-test-hotel",
+        recipeHotel: "join-test-hotel",
+        ingredientHotel: "join-test-hotel",
+        orderItemHotel: "join-test-hotel",
+      }]);
+    } finally {
+      await rehearsal.close();
+    }
   });
 });
 
@@ -217,33 +311,18 @@ describe("legacy data conversion", () => {
     try {
       const seedLegacyRows = async (directory: string, target: PGlite) => {
         if (directory !== "20261008123000_multi_tenant_saas_init") return;
-        await target.exec(`
-          INSERT INTO "User" ("id", "name", "email", "passwordHash", "role", "updatedAt")
-          VALUES ('legacy-admin', 'Legacy Admin', 'legacy@example.test', 'hash', 'ADMIN', CURRENT_TIMESTAMP);
-          INSERT INTO "RoomType" ("id", "name", "baseRate", "capacity", "mealPlan", "updatedAt")
-          VALUES ('legacy-room-type', 'Legacy Half Board', 120.00, 2, 'HALF_BOARD', CURRENT_TIMESTAMP);
-          INSERT INTO "Room" ("id", "number", "roomTypeId", "status", "updatedAt")
-          VALUES ('legacy-room', '101', 'legacy-room-type', 'AVAILABLE', CURRENT_TIMESTAMP);
-          INSERT INTO "Guest" ("id", "fullName", "updatedAt")
-          VALUES ('legacy-guest', 'Legacy Guest', CURRENT_TIMESTAMP);
-          INSERT INTO "Reservation" ("id", "code", "guestId", "checkInDate", "checkOutDate", "createdById", "updatedAt")
-          VALUES ('legacy-reservation', 'LEGACY-001', 'legacy-guest', '2026-10-27', '2026-10-29', 'legacy-admin', CURRENT_TIMESTAMP);
-          INSERT INTO "MenuCategory" ("id", "name") VALUES
-            ('legacy-dessert-a', 'Desserts'), ('legacy-dessert-b', 'Desserts');
-          INSERT INTO "MenuItem" ("id", "categoryId", "name", "price")
-          VALUES ('legacy-dessert-item', 'legacy-dessert-b', 'Cake', 8.00);
-          INSERT INTO "Notification" ("id", "title", "body")
-          VALUES ('legacy-notification', 'Legacy title', 'Legacy notification body');
-          INSERT INTO "AuditLog" ("id", "userId", "action", "entityType", "entityId", "before", "after", "reason")
-          VALUES ('legacy-audit', 'legacy-admin', 'UPDATED', 'Reservation', 'legacy-reservation', '{"status":"PENDING"}', '{"status":"CONFIRMED"}', 'migration fixture');
-        `);
+        await target.exec(fs.readFileSync("__tests__/schema/fixtures/pre-saas-conversion.sql", "utf8"));
       };
       await applyPendingMigrations(legacyDb, seedLegacyRows);
 
-      const membership = await legacyDb.query<{ role: string; hotelId: string }>(`
-        SELECT role, "hotelId" FROM "HotelMembership" WHERE "userId" = 'legacy-admin'
+      const membership = await legacyDb.query<{ role: string; hotelId: string; department: string }>(`
+        SELECT role, "hotelId", department FROM "HotelMembership" WHERE "userId" = 'legacy-admin'
       `);
-      expect(membership.rows).toEqual([{ role: "HOTEL_OWNER", hotelId: "legacy-hotel" }]);
+      expect(membership.rows).toEqual([{
+        role: "HOTEL_OWNER",
+        hotelId: "legacy-hotel",
+        department: "Legacy Operations",
+      }]);
 
       const room = await legacyDb.query<{ hotelId: string; mealPlan: string }>(`
         SELECT r."hotelId", rt."mealPlan" FROM "Room" r
@@ -259,6 +338,25 @@ describe("legacy data conversion", () => {
         GROUP BY item."categoryId"
       `);
       expect(categoryMerge.rows).toEqual([{ categoryId: "legacy-dessert-a", categoryCount: 1 }]);
+
+      const joinOwnership = await legacyDb.query<{
+        reservationRoomHotelId: string;
+        recipeHotelId: string;
+        recipeIngredientHotelId: string;
+        orderItemHotelId: string;
+      }>(`
+        SELECT
+          (SELECT "hotelId" FROM "ReservationRoom" WHERE id = 'legacy-reservation-room') AS "reservationRoomHotelId",
+          (SELECT "hotelId" FROM "Recipe" WHERE id = 'legacy-recipe') AS "recipeHotelId",
+          (SELECT "hotelId" FROM "RecipeIngredient" WHERE id = 'legacy-recipe-ingredient') AS "recipeIngredientHotelId",
+          (SELECT "hotelId" FROM "OrderItem" WHERE id = 'legacy-order-item') AS "orderItemHotelId"
+      `);
+      expect(joinOwnership.rows).toEqual([{
+        reservationRoomHotelId: "legacy-hotel",
+        recipeHotelId: "legacy-hotel",
+        recipeIngredientHotelId: "legacy-hotel",
+        orderItemHotelId: "legacy-hotel",
+      }]);
 
       const notification = await legacyDb.query<{ hotelId: string; message: string; type: string }>(`
         SELECT "hotelId", message, type FROM "Notification" WHERE id = 'legacy-notification'
@@ -282,5 +380,75 @@ describe("legacy data conversion", () => {
     } finally {
       await legacyDb.close();
     }
+  });
+});
+
+describe("charge-to-room idempotency migration", () => {
+  const hotel = "pos-idempotency-hotel";
+
+  beforeAll(async () => {
+    await db.query(
+      `INSERT INTO "Hotel" (id, name, slug, "updatedAt") VALUES ($1, 'POS Idempotency', 'pos-idempotency', NOW())`,
+      [hotel]
+    );
+  });
+
+  it("allows many orders without an idempotency key", async () => {
+    for (const id of ["pos-plain-1", "pos-plain-2"]) {
+      await db.query(`INSERT INTO "Order" (id, "hotelId", total) VALUES ($1, $2, 10)`, [id, hotel]);
+    }
+    const rows = await db.query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM "Order" WHERE "hotelId" = $1 AND "idempotencyKey" IS NULL`,
+      [hotel]
+    );
+    expect(rows.rows[0].count).toBe(2);
+  });
+
+  it("rejects a replayed key for the same hotel and operation", async () => {
+    await db.query(
+      `INSERT INTO "Order" (id, "hotelId", total, "idempotencyOperation", "idempotencyKey", "requestFingerprint")
+       VALUES ('pos-key-1', $1, 10, 'CHARGE_TO_ROOM', 'key-1', 'fingerprint-1')`,
+      [hotel]
+    );
+    await expect(
+      db.query(
+        `INSERT INTO "Order" (id, "hotelId", total, "idempotencyOperation", "idempotencyKey", "requestFingerprint")
+         VALUES ('pos-key-2', $1, 10, 'CHARGE_TO_ROOM', 'key-1', 'fingerprint-2')`,
+        [hotel]
+      )
+    ).rejects.toThrow(/Order_hotelId_idempotencyOperation_idempotencyKey_key/);
+  });
+
+  it("scopes a client key to its operation, so another operation may reuse it", async () => {
+    await db.query(
+      `INSERT INTO "Order" (id, "hotelId", total, "idempotencyOperation", "idempotencyKey", "requestFingerprint")
+       VALUES ('pos-key-3', $1, 10, 'OTHER_OPERATION', 'key-1', 'fingerprint-1')`,
+      [hotel]
+    );
+    const rows = await db.query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM "Order" WHERE "hotelId" = $1 AND "idempotencyKey" = 'key-1'`,
+      [hotel]
+    );
+    expect(rows.rows[0].count).toBe(2);
+  });
+
+  it("rejects a partially populated idempotency tuple", async () => {
+    await expect(
+      db.query(
+        `INSERT INTO "Order" (id, "hotelId", total, "idempotencyOperation", "idempotencyKey")
+         VALUES ('pos-key-partial', $1, 10, 'CHARGE_TO_ROOM', 'key-partial')`,
+        [hotel]
+      )
+    ).rejects.toThrow(/Order_idempotency_triple_check/);
+  });
+
+  it("rejects an empty idempotency value", async () => {
+    await expect(
+      db.query(
+        `INSERT INTO "Order" (id, "hotelId", total, "idempotencyOperation", "idempotencyKey", "requestFingerprint")
+         VALUES ('pos-key-empty', $1, 10, 'CHARGE_TO_ROOM', '   ', 'fingerprint')`,
+        [hotel]
+      )
+    ).rejects.toThrow(/Order_idempotency_triple_check/);
   });
 });

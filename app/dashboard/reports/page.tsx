@@ -5,6 +5,6 @@ import { ROLE_GROUPS } from "@/lib/permissions";
 export const dynamic = "force-dynamic";
 
 export default async function ReportsPage() {
-  await requirePageRole(ROLE_GROUPS.FINANCIAL_REPORTS);
+  await requirePageRole(ROLE_GROUPS.FINANCIAL_REPORTS, "REPORTS");
   return <ReportsClient />;
 }

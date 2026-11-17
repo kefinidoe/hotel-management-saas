@@ -1,4 +1,4 @@
-# Hotel Management System — Architecture & Current State
+# HotelFlow — Architecture & Current State
 
 Written from a full read of the repo at commit `1fb45bf` ("Update hotel management system").
 Every claim below was checked against the files named next to it.
@@ -7,7 +7,7 @@ Every claim below was checked against the files named next to it.
 
 ## 1. What this actually is
 
-A **single Next.js 14 (App Router) application** for Axis Hotel Nakuru. There is no separate
+A **Next.js App Router SaaS application** for multiple hotel workspaces. There is no separate
 backend service. The "backend" is:
 
 - **PostgreSQL** (hosted on Supabase) holding the data
@@ -127,6 +127,10 @@ Design decisions worth knowing about:
   writes to `Folio`/`FolioItem` instead. These two models are dead weight today.
 
 5 migrations, latest `20260929182000_add_room_is_twin`. Schema and migrations are in sync.
+
+> **Note (2026-10-30):** this section is a snapshot of an earlier step. The repository now carries 19
+> reviewed migrations, `Order`/`OrderItem` are written by the charge-to-room route, and the
+> deployment strategy for a database without a Prisma ledger is in `docs/migration-strategy.md`.
 
 ---
 

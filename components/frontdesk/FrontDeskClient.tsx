@@ -7,6 +7,7 @@ import type { HotelRole } from "@prisma/client";
 import CreateReservationModal from "@/components/reservations/CreateReservationModal";
 import FolioModal from "./FolioModal";
 import CheckInModal from "./CheckInModal";
+import RepriceDialog from "@/components/reservations/RepriceDialog";
 import ExtendStayModal from "./ExtendStayModal";
 import { hasRole, ROLE_GROUPS } from "@/lib/permissions";
 import type { RoomStatus } from "@prisma/client";
@@ -29,12 +30,15 @@ type ResRow = {
   roomId: string;
   roomNumbers: string;
   openFolioId: string | null;
+  hasFolio: boolean;
+  pricingLines: { label: string; amount: number }[];
   requiredAmount: number;
   paidAmount: number;
   balance: number;
   nightlyRateTotal: number;
 };
 type Room = {
+  roomTypeId?: string;
   id: string;
   number: string;
   floor: string | null;
@@ -51,18 +55,24 @@ function money(value: number) {
 }
 
 export default function FrontDeskClient({
+  activeTenantId,
   currentUserRole,
+  currency,
   arrivals,
   departures,
   inHouse,
   availableRoomsCount,
+  roomTypes,
   rooms,
 }: {
+  activeTenantId: string;
   currentUserRole: HotelRole;
+  currency: string;
   arrivals: ResRow[];
   departures: ResRow[];
   inHouse: ResRow[];
   availableRoomsCount: number;
+  roomTypes: { id: string; name: string; baseRate: number; mealPlan: string | null }[];
   rooms: Room[];
 }) {
   const router = useRouter();
@@ -72,6 +82,7 @@ export default function FrontDeskClient({
   const [walkInOpen, setWalkInOpen] = useState(false);
   const [checkInReservation, setCheckInReservation] = useState<ResRow | null>(null);
   const [extendReservation, setExtendReservation] = useState<ResRow | null>(null);
+  const [repriceReservation, setRepriceReservation] = useState<ResRow | null>(null);
   const [openFolio, setOpenFolio] = useState<{ folioId: string; reservationId: string } | null>(null);
 
   const roomSummary = summariseRooms(rooms);
@@ -214,15 +225,28 @@ export default function FrontDeskClient({
                 </div>
 
                 {canManageStays && (
-                  <button
-                    onClick={() => {
-                      setError(null);
-                      setCheckInReservation(r);
-                    }}
-                    className="btn-primary w-full mt-4 transition-all duration-200 group-hover:shadow-sm"
-                  >
-                    Check In
-                  </button>
+                  <div className={canOverrideBalance ? "mt-4 grid grid-cols-2 gap-2" : "mt-4"}>
+                    <button
+                      onClick={() => {
+                        setError(null);
+                        setCheckInReservation(r);
+                      }}
+                      className="btn-primary w-full transition-all duration-200 group-hover:shadow-sm"
+                    >
+                      Check In
+                    </button>
+                    {canOverrideBalance && (
+                      <button
+                        onClick={() => {
+                          setError(null);
+                          setRepriceReservation(r);
+                        }}
+                        className="btn-secondary w-full"
+                      >
+                        Reprice
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             ))}
@@ -241,7 +265,7 @@ export default function FrontDeskClient({
               <h2 className="text-base font-bold">Departures</h2>
               <p className="text-xs text-text-secondary mt-0.5">Guests checking out today</p>
             </div>
-            <span className="min-w-8 h-8 px-2 rounded-full bg-champagne-50 text-champagne-500 flex items-center justify-center text-xs font-bold">
+            <span className="min-w-8 h-8 px-2 rounded-full bg-accent-50 text-accent-500 flex items-center justify-center text-xs font-bold">
               {departures.length}
             </span>
           </div>
@@ -259,7 +283,7 @@ export default function FrontDeskClient({
                       Room {r.roomNumbers} <span className="mx-1">·</span> {r.code}
                     </p>
                   </div>
-                  <span className="shrink-0 rounded-full bg-champagne-50 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-champagne-500">
+                  <span className="shrink-0 rounded-full bg-accent-50 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-accent-500">
                     Departure
                   </span>
                 </div>
@@ -387,8 +411,10 @@ export default function FrontDeskClient({
       {canManageStays && walkInOpen && rooms.length > 0 && (
         <CreateReservationModal
           rooms={rooms}
+          roomTypes={roomTypes}
           defaultRoomId={rooms[0].id}
           defaultDate={new Date()}
+          currency={currency}
           canApplyDiscount={canOverrideBalance}
           onClose={() => setWalkInOpen(false)}
           onCreated={() => refresh()}
@@ -419,8 +445,22 @@ export default function FrontDeskClient({
         />
       )}
 
+      {repriceReservation && (
+        <RepriceDialog
+          reservation={repriceReservation}
+          currency={currency}
+          onClose={() => setRepriceReservation(null)}
+          onRepriced={(message) => {
+            refresh();
+            setError(message);
+          }}
+        />
+      )}
+
       {openFolio && (
         <FolioModal
+          key={`${activeTenantId}:${openFolio.folioId}`}
+          activeTenantId={activeTenantId}
           folioId={openFolio.folioId}
           reservationId={openFolio.reservationId}
           canCheckout={canManageStays}

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { afterEach, describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@prisma/client", () => ({
   HotelRole: {
@@ -96,6 +96,8 @@ vi.mock("@/lib/prisma", () => {
       folio: table,
       reservationRoom: table,
       reservation: table,
+      reservationPriceSnapshot: table,
+      reservationPriceChange: table,
       housekeepingTask: table,
       maintenanceTicket: table,
       stockMovement: table,
@@ -147,8 +149,11 @@ describe("Phase 4: Multi-Tenant Context & Access Control", () => {
   };
 
   beforeEach(() => {
+    vi.stubEnv("DATABASE_URL", "postgresql://mock:mock@localhost/mock");
     vi.clearAllMocks();
   });
+
+  afterEach(() => vi.unstubAllEnvs());
 
   describe("1. Active Hotel Resolution & Strict Validation", () => {
     it("resolves context when valid explicit active_hotel_id cookie is provided", async () => {
@@ -163,6 +168,21 @@ describe("Phase 4: Multi-Tenant Context & Access Control", () => {
       expect(ctx.role).toBe(HotelRole.HOTEL_ADMIN);
       expect(ctx.hotel.name).toBe("Hotel Alpha");
       expect(ctx.isPlatformAdmin).toBe(false);
+    });
+
+    it("uses the selected workspace's name and logo after switching hotels", async () => {
+      const hotels = [
+        { ...sampleHotel, id: "hotel-kim", name: "Kim Resort", logoUrl: "https://example.test/kim.png" },
+        { ...sampleHotel, id: "hotel-james", name: "James Resort", logoUrl: "https://example.test/james.png" },
+      ];
+      for (const hotel of hotels) {
+        mockGetServerSession.mockResolvedValueOnce({ user: { id: "user-123" } });
+        mockPrismaUser.findUnique.mockResolvedValueOnce(activeUser);
+        mockCookiesGet.mockReturnValueOnce({ value: hotel.id });
+        mockPrismaHotelMembership.findUnique.mockResolvedValueOnce({ ...activeMembership, hotelId: hotel.id, hotel });
+        const ctx = await getTenantContext();
+        expect(ctx.hotel).toMatchObject({ id: hotel.id, name: hotel.name, logoUrl: hotel.logoUrl });
+      }
     });
 
     it("fails closed and NEVER silently falls back when cookie contains an invalid/unauthorized hotel", async () => {
@@ -398,6 +418,23 @@ describe("Phase 4: Multi-Tenant Context & Access Control", () => {
       expect(json.error).toBe("NO_ACTIVE_MEMBERSHIP");
     });
 
+    it("returns a clear 503 and preserves membership state while offline", async () => {
+      const { POST } = await import("../../app/api/auth/switch-hotel/route");
+      vi.stubEnv("DATABASE_URL", "");
+      mockGetServerSession.mockResolvedValueOnce({ user: { id: "user-123" } });
+
+      const req = new Request("http://localhost:3000/api/auth/switch-hotel", {
+        method: "POST",
+        headers: { origin: "http://localhost:3000", "content-type": "application/json" },
+        body: JSON.stringify({ hotelId: "hotel-alpha" }),
+      });
+
+      const res = await POST(req);
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toBe("DATABASE_UNAVAILABLE");
+      expect(mockPrismaHotelMembership.findUnique).not.toHaveBeenCalled();
+    });
+
     it("sets active_hotel_id cookie when switching to valid operational hotel", async () => {
       const { POST } = await import("../../app/api/auth/switch-hotel/route");
       mockGetServerSession.mockResolvedValueOnce({ user: { id: "user-123" } });
@@ -422,121 +459,5 @@ describe("Phase 4: Multi-Tenant Context & Access Control", () => {
     });
   });
 
-  describe("6. Tenant-Isolated Clean Test Data Endpoint (/api/admin/clean-test-data)", () => {
-    it("fails closed by default when ALLOW_TEST_DATA_CLEANUP is not set to true", async () => {
-      const originalEnv = process.env.ALLOW_TEST_DATA_CLEANUP;
-      delete process.env.ALLOW_TEST_DATA_CLEANUP;
 
-      const { POST } = await import("../../app/api/admin/clean-test-data/route");
-      mockGetServerSession.mockResolvedValueOnce({ user: { id: "user-123" } });
-      mockPrismaUser.findUnique.mockResolvedValueOnce(activeUser);
-      mockCookiesGet.mockReturnValueOnce({ value: "hotel-alpha" });
-      mockPrismaHotelMembership.findUnique.mockResolvedValueOnce({
-        ...activeMembership,
-        role: HotelRole.HOTEL_ADMIN,
-      });
-
-      const res = await POST();
-      expect(res.status).toBe(403);
-      const json = await res.json();
-      expect(json.error).toBe("FORBIDDEN");
-      expect(json.message).toContain("Test data cleanup is strictly disabled in SaaS environments");
-
-      process.env.ALLOW_TEST_DATA_CLEANUP = originalEnv;
-    });
-
-    it("fails closed in production even if ALLOW_TEST_DATA_CLEANUP is true", async () => {
-      const originalNodeEnv = process.env.NODE_ENV;
-      const originalFlag = process.env.ALLOW_TEST_DATA_CLEANUP;
-      (process.env as any).NODE_ENV = "production";
-      process.env.ALLOW_TEST_DATA_CLEANUP = "true";
-
-      const { POST } = await import("../../app/api/admin/clean-test-data/route");
-      mockGetServerSession.mockResolvedValueOnce({ user: { id: "user-123" } });
-      mockPrismaUser.findUnique.mockResolvedValueOnce(activeUser);
-      mockCookiesGet.mockReturnValueOnce({ value: "hotel-alpha" });
-      mockPrismaHotelMembership.findUnique.mockResolvedValueOnce({
-        ...activeMembership,
-        role: HotelRole.HOTEL_ADMIN,
-      });
-
-      const res = await POST();
-      expect(res.status).toBe(403);
-      const json = await res.json();
-      expect(json.error).toBe("FORBIDDEN");
-
-      (process.env as any).NODE_ENV = originalNodeEnv;
-      process.env.ALLOW_TEST_DATA_CLEANUP = originalFlag;
-    });
-
-    it("rejects unauthorized staff without hotel management role (e.g. WAITER) even when flag is enabled", async () => {
-      const originalFlag = process.env.ALLOW_TEST_DATA_CLEANUP;
-      const originalNodeEnv = process.env.NODE_ENV;
-      (process.env as any).NODE_ENV = "test";
-      process.env.ALLOW_TEST_DATA_CLEANUP = "true";
-
-      const { POST } = await import("../../app/api/admin/clean-test-data/route");
-      mockGetServerSession.mockResolvedValueOnce({ user: { id: "user-123" } });
-      mockPrismaUser.findUnique.mockResolvedValueOnce(activeUser);
-      mockCookiesGet.mockReturnValueOnce({ value: "hotel-alpha" });
-      mockPrismaHotelMembership.findUnique.mockResolvedValueOnce({
-        ...activeMembership,
-        role: HotelRole.WAITER,
-      });
-
-      const res = await POST();
-      expect(res.status).toBe(403);
-      const json = await res.json();
-      expect(json.error).toBe("FORBIDDEN");
-
-      (process.env as any).NODE_ENV = originalNodeEnv;
-      process.env.ALLOW_TEST_DATA_CLEANUP = originalFlag;
-    });
-
-    it("executes destructive cleanup strictly scoped to active hotelId when explicitly opted in and authorized", async () => {
-      const originalFlag = process.env.ALLOW_TEST_DATA_CLEANUP;
-      const originalNodeEnv = process.env.NODE_ENV;
-      (process.env as any).NODE_ENV = "test";
-      process.env.ALLOW_TEST_DATA_CLEANUP = "true";
-
-      const { POST } = await import("../../app/api/admin/clean-test-data/route");
-      mockGetServerSession.mockResolvedValueOnce({ user: { id: "user-123" } });
-      mockPrismaUser.findUnique.mockResolvedValueOnce(activeUser);
-      mockCookiesGet.mockReturnValueOnce({ value: "hotel-alpha" });
-      mockPrismaHotelMembership.findUnique.mockResolvedValueOnce({
-        ...activeMembership,
-        role: HotelRole.HOTEL_ADMIN,
-      });
-
-      const res = await POST();
-      expect(res.status).toBe(200);
-      const json = await res.json();
-      expect(json.ok).toBe(true);
-      expect(json.hotelId).toBe("hotel-alpha");
-
-      // Verify that every single deletion operation was called WITH { where: { hotelId: 'hotel-alpha' } }
-      expect(mockDeleteMany).toHaveBeenCalled();
-      for (const call of mockDeleteMany.mock.calls) {
-        const arg = call[0];
-        const hasDirectHotelId = arg?.where?.hotelId === "hotel-alpha";
-        const hasParentHotelId =
-          arg?.where?.folio?.hotelId === "hotel-alpha" ||
-          arg?.where?.order?.hotelId === "hotel-alpha" ||
-          arg?.where?.reservation?.hotelId === "hotel-alpha";
-        expect(hasDirectHotelId || hasParentHotelId).toBe(true);
-      }
-
-      // Verify room update was strictly scoped to hotel-alpha
-      expect(mockUpdateMany).toHaveBeenCalledWith({
-        where: { hotelId: "hotel-alpha" },
-        data: {
-          status: "AVAILABLE",
-          notes: null,
-        },
-      });
-
-      (process.env as any).NODE_ENV = originalNodeEnv;
-      process.env.ALLOW_TEST_DATA_CLEANUP = originalFlag;
-    });
-  });
 });

@@ -90,7 +90,7 @@ export function roomStatusClasses(status: RoomStatus): string {
     case "READY":
       return "bg-primary-50 text-primary-700 border-primary-100";
     case "OCCUPIED":
-      return "bg-champagne-50 text-champagne-500 border-champagne-100";
+      return "bg-accent-50 text-accent-500 border-accent-100";
     case "RESERVED":
     case "CLEANING":
       return "bg-info/10 text-info border-info/20";
@@ -111,7 +111,7 @@ export function roomStatusDotClasses(status: RoomStatus): string {
     case "READY":
       return "bg-primary-500";
     case "OCCUPIED":
-      return "bg-champagne-500";
+      return "bg-accent-500";
     case "RESERVED":
     case "CLEANING":
       return "bg-info";

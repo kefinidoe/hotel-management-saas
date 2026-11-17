@@ -1,3 +1,4 @@
+import { validateIdempotencyKey, validateFinancialMutation, payNowSchema } from "@/lib/financial-mutation-validation";
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
@@ -5,13 +6,22 @@ import { prisma } from "@/lib/prisma";
 import {
   cartTotal,
   computePosFingerprint,
+  type CartLine,
   readCartRequest,
   resolveCartLines,
   round2,
 } from "@/lib/restaurant";
-import { deductRecipeStock } from "@/lib/inventory";
+import { deductRecipeStock } from "@/lib/recipe-stock";
+import { syncLowStockAlerts } from "@/lib/notifications";
 
 const WALK_IN_GUEST = "Walk-in Guest";
+
+class PosNotCommittedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PosNotCommittedError";
+  }
+}
 
 class PosIdempotencyError extends Error {
   constructor(
@@ -52,6 +62,16 @@ export async function POST(req: Request) {
   const tenant = await getTenantFromRoute();
   if (tenant instanceof NextResponse) return tenant;
 
+  // This is only a stale-client consistency guard. Authorization and tenant
+  // selection remain derived exclusively from the authenticated request context.
+  const expectedTenantId = req.headers.get("x-expected-hotel-id");
+  if (expectedTenantId && expectedTenantId !== tenant.hotelId) {
+    return NextResponse.json(
+      { error: "The active hotel changed. Refresh the POS before retrying this saved attempt.", code: "TENANT_CONTEXT_MISMATCH", outcome: "UNKNOWN" },
+      { status: 409 },
+    );
+  }
+
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.RESTAURANT_POS);
   if (forbidden) return forbidden;
 
@@ -61,12 +81,9 @@ export async function POST(req: Request) {
   const blocked = await requireModule(tenant.hotelId, "RESTAURANT_POS");
   if (blocked) return blocked;
 
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body.", code: "INVALID_JSON_BODY" }, { status: 400 });
-  }
+  const validation = await validateFinancialMutation(req, payNowSchema, { pos: true });
+  if (validation.response) return validation.response;
+  const body = validation.data;
 
   const rawIdempotencyKey =
     req.headers.get("x-idempotency-key") ||
@@ -76,19 +93,8 @@ export async function POST(req: Request) {
   const idempotencyKey =
     typeof rawIdempotencyKey === "string" ? rawIdempotencyKey.trim() : "";
 
-  if (!idempotencyKey) {
-    return NextResponse.json(
-      { error: "An idempotency key is required for POS payments.", code: "MISSING_IDEMPOTENCY_KEY" },
-      { status: 400 }
-    );
-  }
-
-  if (idempotencyKey.length < 4 || idempotencyKey.length > 128) {
-    return NextResponse.json(
-      { error: "Idempotency key must be between 4 and 128 characters.", code: "INVALID_IDEMPOTENCY_KEY_LENGTH" },
-      { status: 400 }
-    );
-  }
+  const invalidKey = validateIdempotencyKey(idempotencyKey, "pos");
+  if (invalidKey) return invalidKey;
 
   const paymentMethodId: string | undefined =
     typeof body?.paymentMethodId === "string" ? body.paymentMethodId.trim() : undefined;
@@ -98,7 +104,7 @@ export async function POST(req: Request) {
   const tableNumber = typeof body?.tableNumber === "string" ? body.tableNumber.trim() : "";
 
   if (!paymentMethodId) {
-    return NextResponse.json({ error: "Choose how the guest is paying.", code: "MISSING_PAYMENT_METHOD" }, { status: 400 });
+    return NextResponse.json({ error: "Choose how the guest is paying.", code: "MISSING_PAYMENT_METHOD", outcome: "NOT_COMMITTED" }, { status: 400 });
   }
 
   let requestedItems: ReturnType<typeof readCartRequest>;
@@ -106,12 +112,12 @@ export async function POST(req: Request) {
     requestedItems = readCartRequest(body.items);
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "The order is invalid.", code: "INVALID_ORDER_ITEMS" },
+      { error: error instanceof Error ? error.message : "The order is invalid.", code: "INVALID_ORDER_ITEMS", outcome: "NOT_COMMITTED" },
       { status: 400 }
     );
   }
   if (requestedItems.length === 0) {
-    return NextResponse.json({ error: "Add at least one item to the order.", code: "EMPTY_ORDER" }, { status: 400 });
+    return NextResponse.json({ error: "Add at least one item to the order.", code: "EMPTY_ORDER", outcome: "NOT_COMMITTED" }, { status: 400 });
   }
 
   const fingerprint = computePosFingerprint({
@@ -122,6 +128,15 @@ export async function POST(req: Request) {
     customerPhone,
     tableNumber,
     reference,
+  });
+
+  const successBody = (result: Record<string, unknown>) => ({
+    ...result,
+    ok: true,
+    hotelId,
+    operation: "PAY_NOW" as const,
+    idempotencyKey,
+    requestFingerprint: fingerprint,
   });
 
   const prefix = tableNumber ? `Restaurant (Table ${tableNumber})` : "Restaurant";
@@ -167,14 +182,21 @@ export async function POST(req: Request) {
           );
         }
 
-        const lines = await resolveCartLines(tx, requestedItems, hotelId);
+        let lines: CartLine[];
+        try {
+          lines = await resolveCartLines(tx, requestedItems, hotelId);
+        } catch (error) {
+          // Cart resolution precedes all writes inside this transaction. These
+          // business-rule failures are definitively rolled back and safe to clear.
+          throw new PosNotCommittedError(error instanceof Error ? error.message : "The order items are invalid.");
+        }
         const total = cartTotal(lines);
 
         const method = await tx.paymentMethod.findUnique({
           where: { id_hotelId: { id: paymentMethodId, hotelId } },
         });
         if (!method || !method.isActive) {
-          throw new Error("That payment method is unavailable in this hotel.");
+          throw new PosNotCommittedError("That payment method is unavailable in this hotel.");
         }
 
         let guest = customerPhone
@@ -240,10 +262,19 @@ export async function POST(req: Request) {
       }
     );
 
-    return NextResponse.json({ ok: true, ...result }, { status: 201 });
+    await syncLowStockAlerts(hotelId);
+
+    return NextResponse.json(successBody(result), { status: 201 });
   } catch (error) {
+    if (error instanceof PosNotCommittedError) {
+      return NextResponse.json(
+        { error: error.message, code: "POS_REQUEST_REJECTED", outcome: "NOT_COMMITTED" },
+        { status: 400 },
+      );
+    }
+
     if (error instanceof PosIdempotencyError) {
-      return NextResponse.json({ error: error.message, code: error.code }, { status: error.status });
+      return NextResponse.json({ error: error.message, code: error.code, outcome: "CONFLICT" }, { status: error.status });
     }
 
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
@@ -269,15 +300,14 @@ export async function POST(req: Request) {
           if (winningPayment && winningPayment.hotelId === hotelId) {
             if (winningPayment.requestFingerprint === fingerprint) {
               return NextResponse.json(
-                {
-                  ok: true,
+                successBody({
                   guestName: winningPayment.folio.guest.fullName,
                   folioId: winningPayment.folioId,
                   paymentId: winningPayment.id,
                   total: Number(winningPayment.amount),
                   method: winningPayment.paymentMethod.name,
                   isIdempotentReplay: true,
-                },
+                }),
                 { status: 201 }
               );
             } else {
@@ -285,6 +315,7 @@ export async function POST(req: Request) {
                 {
                   error: "Idempotency key was previously used with different order details.",
                   code: "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD",
+                  outcome: "CONFLICT",
                 },
                 { status: 409 }
               );
@@ -298,6 +329,7 @@ export async function POST(req: Request) {
           {
             error: "A payment with this idempotency key was submitted concurrently. Refresh and verify.",
             code: "CONCURRENT_IDEMPOTENCY_RACE",
+            outcome: "UNKNOWN",
           },
           { status: 409 }
         );
@@ -308,6 +340,7 @@ export async function POST(req: Request) {
         {
           error: "A unique record constraint violation occurred. Please verify your records.",
           code: "DATABASE_UNIQUE_CONSTRAINT_CONFLICT",
+          outcome: "UNKNOWN",
         },
         { status: 409 }
       );
@@ -318,6 +351,7 @@ export async function POST(req: Request) {
         {
           error: "The inventory or payment records changed. Refresh and try again.",
           code: "CONCURRENT_MUTATION_CONFLICT",
+          outcome: "UNKNOWN",
         },
         { status: 409 }
       );
@@ -325,10 +359,11 @@ export async function POST(req: Request) {
 
     return NextResponse.json(
       {
-        error: error instanceof Error ? error.message : "Could not complete the order.",
-        code: "PRE_COMMIT_VALIDATION_ERROR",
+        error: "Could not confirm the payment outcome. Retry this exact saved request to verify it.",
+        code: "PAYMENT_OUTCOME_UNKNOWN",
+        outcome: "UNKNOWN",
       },
-      { status: 400 }
+      { status: 500 }
     );
   }
 }

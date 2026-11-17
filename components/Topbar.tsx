@@ -2,19 +2,23 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Bell, HelpCircle, KeyRound, LogOut, Building2, Shield } from "lucide-react";
+import { HelpCircle, KeyRound, LogOut, Building2, Shield } from "lucide-react";
 import { signOut } from "next-auth/react";
 import type { HotelRole } from "@prisma/client";
 import SearchBar from "@/components/SearchBar";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
+import NotificationBell from "@/components/NotificationBell";
+import PropertyLogo from "@/components/PropertyLogo";
 import { hasRole, ROLE_GROUPS } from "@/lib/permissions";
 
 export default function Topbar({
   userName,
+  logoUrl,
   userRole,
   isPlatformAdmin = false,
 }: {
   userName: string;
+  logoUrl?: string | null;
   userRole: HotelRole;
   isPlatformAdmin?: boolean;
 }) {
@@ -30,9 +34,7 @@ export default function Topbar({
       </div>
 
       <div className="flex items-center gap-4">
-        <button className="text-text-secondary hover:text-text-primary" title="Notifications">
-          <Bell size={19} strokeWidth={1.8} />
-        </button>
+        <NotificationBell />
         <button className="text-text-secondary hover:text-text-primary" title="Help">
           <HelpCircle size={19} strokeWidth={1.8} />
         </button>
@@ -44,12 +46,7 @@ export default function Topbar({
               {userRole.toLowerCase().replace("_", " ")}
             </p>
           </div>
-          <div
-            className="h-9 w-9 rounded-full bg-primary-500 text-white flex items-center justify-center
-                       text-sm font-semibold shrink-0"
-          >
-            {userName.charAt(0).toUpperCase()}
-          </div>
+          <PropertyLogo logoUrl={logoUrl} className="h-9 w-9 rounded-full" />
           <Link
             href="/select-hotel"
             title="Switch hotel workspace"

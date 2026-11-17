@@ -1,5 +1,8 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { currentPriceVersion } from "@/lib/pricing/versions";
+import { recordAudit } from "@/lib/audit";
+import { ROOM_BLOCKING_RESERVATION_STATUSES } from "@/lib/reservation-status";
 import { rangesOverlap } from "@/lib/dates";
 import { blocksGuestPlacement, isBookableToday, ROOM_STATUS_LABELS } from "@/lib/room-status";
 import { accommodationRequired, folioTotals, parseMoney, roundMoney, stayNights } from "@/lib/billing";
@@ -63,6 +66,10 @@ export async function executeCheckIn(tenant: TenantContext, options: CheckInOpti
         include: {
           rooms: { include: { room: true } },
           folios: { where: { hotelId }, select: { id: true } },
+          // The newest frozen price (version 1 at creation, higher after an
+          // explicit repricing). It — not a recomputation — decides what the
+          // guest owes.
+          priceSnapshots: { orderBy: { version: "desc" }, take: 1 },
         },
       });
 
@@ -108,7 +115,7 @@ export async function executeCheckIn(tenant: TenantContext, options: CheckInOpti
             roomId: target.id,
             reservation: {
               hotelId,
-              status: { notIn: ["CANCELLED", "NO_SHOW"] },
+              status: { in: [...ROOM_BLOCKING_RESERVATION_STATUSES] },
               id: { not: reservation.id },
             },
           },
@@ -153,13 +160,19 @@ export async function executeCheckIn(tenant: TenantContext, options: CheckInOpti
       let nights: number;
       let required: number;
       const discount = Number(reservation.discount ?? 0);
+      const snapshot = currentPriceVersion(reservation.priceSnapshots);
       try {
         nights = stayNights(reservation.checkInDate, reservation.checkOutDate);
-        required = accommodationRequired(
-          reservation.rooms.map((room) => Number(room.rate)),
-          nights,
-          discount
-        );
+        required = snapshot
+          ? Number(snapshot.grandTotal)
+          : accommodationRequired(
+              reservation.rooms.map((room) => Number(room.rate)),
+              nights,
+              discount
+            );
+        if (!Number.isFinite(required) || required < 0) {
+          throw new Error("The reservation charges are invalid.");
+        }
       } catch (error) {
         throw new CheckInError(
           error instanceof Error ? error.message : "The accommodation charges are invalid.",
@@ -211,16 +224,41 @@ export async function executeCheckIn(tenant: TenantContext, options: CheckInOpti
         });
       }
 
-      if (discount > 0) {
+      // Meals, extras and taxes were priced into the snapshot, so they are billed
+      // as their own folio lines. Without this the folio would only contain the
+      // room charge and the guest would appear to owe less than they were quoted.
+      if (snapshot) {
+        const pricedLines = Array.isArray((snapshot.breakdown as { lines?: unknown }).lines)
+          ? ((snapshot.breakdown as { lines: Array<{ kind: string; label: string; amount: number; quantity: number; unitPrice: number }> }).lines)
+          : [];
+        for (const line of pricedLines) {
+          if (line.kind === "ROOM" || line.kind === "ADJUSTMENT" || line.kind === "DISCOUNT") continue;
+          if (!Number.isFinite(line.amount) || line.amount === 0) continue;
+          await tx.folioItem.create({
+            data: {
+              folioId: folio.id,
+              type: line.kind === "TAX" ? "TAX" : "OTHER_SERVICE",
+              description: line.label,
+              quantity: Math.max(1, Number(line.quantity) || 1),
+              unitPrice: Number(line.unitPrice) || 0,
+              taxRate: line.kind === "TAX" ? Number(snapshot.taxTotal) : 0,
+              total: Number(line.amount),
+            },
+          });
+        }
+      }
+
+      const billingDiscount = snapshot ? Number(snapshot.discountTotal) : discount;
+      if (billingDiscount > 0) {
         await tx.folioItem.create({
           data: {
             folioId: folio.id,
             type: "DISCOUNT",
             description: "Discount",
             quantity: 1,
-            unitPrice: discount,
+            unitPrice: billingDiscount,
             taxRate: 0,
-            total: -discount,
+            total: -billingDiscount,
           },
         });
       }
@@ -368,6 +406,18 @@ export async function executeCheckOut(tenant: TenantContext, options: CheckOutOp
           },
         });
       }
+
+      await recordAudit(
+        {
+          hotelId,
+          userId: tenant.userId,
+          action: allowOutstandingBalance ? "CHECK_OUT_WITH_BALANCE" : "CHECK_OUT",
+          entity: "Reservation",
+          entityId: reservation.id,
+          metadata: { folioId: openFolio.id, balance: totals.balance },
+        },
+        tx
+      );
 
       return { folioId: openFolio.id, ...totals };
     },

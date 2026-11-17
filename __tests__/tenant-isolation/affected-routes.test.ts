@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   requireModule: vi.fn(),
   expenseFindFirst: vi.fn(),
   expenseUpdateMany: vi.fn(),
+  auditCreate: vi.fn(),
   recipeFindMany: vi.fn(),
   recipeFindFirst: vi.fn(),
   recipeCreate: vi.fn(),
@@ -120,6 +121,8 @@ beforeEach(() => {
   mocks.stockMovementFindMany.mockResolvedValue([]);
   mocks.transaction.mockImplementation(async (callback: (tx: any) => unknown) =>
     callback({
+      expense: { updateMany: mocks.expenseUpdateMany, findFirst: mocks.expenseFindFirst },
+      auditLog: { create: mocks.auditCreate },
       recipe: { updateMany: mocks.recipeUpdateMany, findFirst: mocks.recipeFindFirst },
       recipeIngredient: {
         deleteMany: mocks.recipeIngredientDeleteMany,
@@ -232,6 +235,7 @@ describe("legacy API routes now use the active tenant context", () => {
       data: { status: "APPROVED" },
     });
     expect(mocks.expenseFindFirst).toHaveBeenCalledWith({ where: { id: "expense-a", hotelId: "hotel-a" } });
+    expect(mocks.auditCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ hotelId: "hotel-a", action: "EXPENSE_REVIEWED" }) }));
   });
 
   it("returns 404 and does not update an expense owned by Hotel B", async () => {
@@ -302,6 +306,15 @@ describe("legacy API routes now use the active tenant context", () => {
       hotelId: "hotel-a", id: { in: ["item-a"] },
     });
     expect(mocks.recipeCreate).toHaveBeenCalledOnce();
+    // The ingredient rows inherit `hotelId` from the parent recipe through the
+    // composite foreign key; passing it in the nested create is rejected by
+    // Prisma ("Unknown argument hotelId"), which broke recipe creation until it
+    // was removed. The tenancy assertion is the recipe's own hotelId below.
+    expect(mocks.recipeCreate.mock.calls[0][0].data).toMatchObject({
+      hotelId: "hotel-a",
+      ingredients: { create: [{ inventoryItemId: "item-a", quantity: 1 }] },
+    });
+    expect(mocks.recipeCreate.mock.calls[0][0].data.ingredients.create[0]).not.toHaveProperty("hotelId");
   });
 
   it("rejects a Hotel B menu item or inventory ingredient when creating a recipe", async () => {
@@ -368,6 +381,9 @@ describe("legacy API routes now use the active tenant context", () => {
     });
     expect(mocks.recipeIngredientDeleteMany.mock.calls[0][0].where.recipe.is.menuItem.is.hotelId).toBe("hotel-a");
     expect(mocks.recipeIngredientCreateMany).toHaveBeenCalledOnce();
+    expect(mocks.recipeIngredientCreateMany.mock.calls[0][0].data).toEqual([
+      { recipeId: "recipe-a", hotelId: "hotel-a", inventoryItemId: "item-a", quantity: 2 },
+    ]);
   });
 
   it("returns only Hotel A search results and scopes all three resource queries", async () => {

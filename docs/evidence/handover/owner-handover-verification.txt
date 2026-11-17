@@ -1,0 +1,71 @@
+PASS  [login] PLATFORM_SUPER_ADMIN signs in with its own password — 200 dashboard 307, platform 200
+PASS  [login] HOTEL_OWNER signs in with its own password — 200 dashboard 307, 2 workspaces
+PASS  [login] HOTEL_ADMIN signs in with its own password — 200/200
+PASS  [login] MANAGER signs in with its own password — 200/200
+PASS  [login] RECEPTIONIST signs in with its own password — 200/200
+PASS  [login] ACCOUNTANT signs in with its own password — 200/200
+PASS  [login] WAITER signs in with its own password — 200/200
+PASS  [login] CASHIER signs in with its own password — 200/200
+PASS  [login] HOUSEKEEPER signs in with its own password — 200/200
+PASS  [login] TECHNICIAN signs in with its own password — 200/200
+PASS  [login] HOTEL_OWNER signs in with its own password — 200/200
+PASS  [login] HOTEL_ADMIN signs in with its own password — 200/200
+PASS  [login] MANAGER signs in with its own password — 200/200
+PASS  [login] RECEPTIONIST signs in with its own password — 200/200
+PASS  [login] ACCOUNTANT signs in with its own password — 200/200
+PASS  [login] WAITER signs in with its own password — 200/200
+PASS  [login] CASHIER signs in with its own password — 200/200
+PASS  [login] HOUSEKEEPER signs in with its own password — 200/200
+PASS  [login] TECHNICIAN signs in with its own password — 200/200
+PASS  [switching] a two-hotel owner is asked to choose a workspace — 307
+PASS  [modules] owner@riverside-grand.demo can open /dashboard — 200
+PASS  [modules] owner@riverside-grand.demo can open /dashboard/front-desk — 200
+PASS  [modules] owner@riverside-grand.demo can open /dashboard/reservations — 200
+PASS  [modules] owner@riverside-grand.demo can open /dashboard/rooms — 200
+PASS  [modules] owner@riverside-grand.demo can open /dashboard/guests — 200
+PASS  [modules] owner@riverside-grand.demo can open /dashboard/housekeeping — 200
+PASS  [modules] owner@riverside-grand.demo can open /dashboard/maintenance — 200
+PASS  [modules] owner@riverside-grand.demo can open /dashboard/restaurant — 200
+PASS  [modules] owner@riverside-grand.demo can open /dashboard/inventory — 200
+PASS  [modules] owner@riverside-grand.demo can open /dashboard/expenses — 200
+PASS  [modules] owner@riverside-grand.demo can open /dashboard/reports — 200
+PASS  [modules] owner@riverside-grand.demo can open /dashboard/staff — 200
+PASS  [modules] owner@riverside-grand.demo can open /dashboard/subscription — 200
+PASS  [modules] owner@riverside-grand.demo can open /dashboard/audit — 200
+PASS  [modules] receptionist@riverside-grand.demo can open /dashboard — 200
+PASS  [modules] receptionist@riverside-grand.demo can open /dashboard/front-desk — 200
+PASS  [modules] receptionist@riverside-grand.demo can open /dashboard/reservations — 200
+PASS  [modules] receptionist@riverside-grand.demo can open /dashboard/rooms — 200
+PASS  [modules] receptionist@riverside-grand.demo can open /dashboard/guests — 200
+PASS  [modules] receptionist@riverside-grand.demo is redirected away from /dashboard/reports — 307
+PASS  [modules] receptionist@riverside-grand.demo is redirected away from /dashboard/staff — 307
+PASS  [modules] receptionist@riverside-grand.demo is redirected away from /dashboard/audit — 307
+PASS  [modules] receptionist@riverside-grand.demo is redirected away from /dashboard/maintenance — 307
+PASS  [modules] accountant@riverside-grand.demo can open /dashboard — 200
+PASS  [modules] accountant@riverside-grand.demo can open /dashboard/expenses — 200
+PASS  [modules] accountant@riverside-grand.demo can open /dashboard/reports — 200
+PASS  [modules] accountant@riverside-grand.demo is redirected away from /dashboard/restaurant — 307
+PASS  [modules] accountant@riverside-grand.demo is redirected away from /dashboard/housekeeping — 307
+PASS  [modules] accountant@riverside-grand.demo is redirected away from /dashboard/audit — 307
+PASS  [modules] waiter@riverside-grand.demo can open /dashboard — 200
+PASS  [modules] waiter@riverside-grand.demo can open /dashboard/restaurant — 200
+PASS  [modules] waiter@riverside-grand.demo is redirected away from /dashboard/reports — 307
+PASS  [modules] waiter@riverside-grand.demo is redirected away from /dashboard/staff — 307
+PASS  [modules] waiter@riverside-grand.demo is redirected away from /dashboard/audit — 307
+PASS  [modules] housekeeping@riverside-grand.demo can open /dashboard — 200
+PASS  [modules] housekeeping@riverside-grand.demo can open /dashboard/housekeeping — 200
+PASS  [modules] housekeeping@riverside-grand.demo is redirected away from /dashboard/restaurant — 307
+PASS  [modules] housekeeping@riverside-grand.demo is redirected away from /dashboard/reports — 307
+PASS  [modules] housekeeping@riverside-grand.demo is redirected away from /dashboard/audit — 307
+PASS  [platform] platform admin opens the platform console — 200
+PASS  [platform] platform admin reads the platform overview — 200
+PASS  [platform] platform admin lists the demo hotels — Lakeview Lodge, Riverside Grand Hotel, Legacy Hotel
+PASS  [switching] the owner has two workspaces — Lakeview Lodge | Riverside Grand Hotel
+PASS  [switching] owner switches to Lakeview Lodge — 200
+PASS  [switching] owner switches back to Riverside Grand — 200
+PASS  [revocation] owner creates a temporary receptionist — 201 {"id":"d29d36bf-68c5-432c-a120-cd27b30a4436","userId":"a3b6fd4d-b2e4-4538-b024-7a84c66640b9","name":"Temporary Revocatio
+PASS  [revocation] the new receptionist can work before removal — 200/200
+PASS  [revocation] owner removes the receptionist — 200 {"ok":true,"mode":"deleted","name":"Temporary Revocation Check","message":"Temporary Revocation Check was removed from t
+PASS  [revocation] the removed receptionist loses access — 403
+
+PASS — 69/69 checks

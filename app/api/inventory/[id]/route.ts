@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
+import { inventoryRequest } from "@/lib/inventory-idempotency";
+import { syncLowStockAlerts } from "@/lib/notifications";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 
 export async function GET(
@@ -91,40 +94,36 @@ export async function PATCH(
   }
 
   if (body.newQuantity !== undefined) {
-    const after = Number(body.newQuantity);
-
-    if (!Number.isFinite(after) || after < 0) {
-      return NextResponse.json(
-        { error: "Quantity must be a valid non-negative number." },
-        { status: 400 }
-      );
+    const afterNumber = Number(body.newQuantity);
+    const expectedNumber = Number(body.expectedQuantity);
+    const expectedVersion = body.expectedVersion;
+    if (body.newQuantity === null || body.expectedQuantity === undefined || body.expectedQuantity === null ||
+        !Number.isFinite(afterNumber) || afterNumber < 0 || !new Prisma.Decimal(afterNumber).mul(100).isInteger() ||
+        !Number.isInteger(expectedVersion) || expectedVersion < 0 ||
+        !Number.isFinite(expectedNumber) || !new Prisma.Decimal(expectedNumber).mul(100).isInteger() ||
+        (body.reason !== undefined && typeof body.reason !== "string")) {
+      return NextResponse.json({ error: "Valid non-negative quantities with at most two decimals and the expected stock balance are required." }, { status: 400 });
     }
+    const after = new Prisma.Decimal(afterNumber);
+    const before = new Prisma.Decimal(expectedNumber);
+    // A stocktake is an absolute count, not a delta. Compare against the
+    // balance displayed to the user so concurrent activity cannot be erased.
+    const response = await inventoryRequest(req, tenant.hotelId, tenant.userId, "ADJUSTMENT", { id, body }, async (tx) => {
+      const updated = await tx.inventoryItem.updateMany({
+        where: { id: item.id, hotelId: tenant.hotelId, currentStock: before, stockVersion: expectedVersion },
+        data: { currentStock: after, stockVersion: { increment: 1 } },
+      });
+      if (updated.count !== 1) return { status: 409, body: { error: "Stock changed since it was displayed. Refresh and retry the stocktake." } };
+      const movement = await tx.stockMovement.create({ data: {
+        hotelId: tenant.hotelId, inventoryItemId: item.id, type: "ADJUSTMENT",
+        quantity: after.sub(before), beforeQty: before, afterQty: after,
+        reference: body.reason?.trim() || "Manual adjustment", userId: tenant.userId,
+      } });
+      return { status: 200, body: { ok: true, movement } };
+    });
 
-    const before = Number(item.currentStock);
-    const delta = after - before;
-
-    const [, movement] = await prisma.$transaction([
-      prisma.inventoryItem.update({
-        where: {
-          id_hotelId: { id: item.id, hotelId: tenant.hotelId },
-        },
-        data: { currentStock: after },
-      }),
-      prisma.stockMovement.create({
-        data: {
-          hotelId: tenant.hotelId,
-          inventoryItemId: item.id,
-          type: "ADJUSTMENT",
-          quantity: delta,
-          beforeQty: before,
-          afterQty: after,
-          reference: body.reason || "Manual adjustment",
-          userId: tenant.userId,
-        },
-      }),
-    ]);
-
-    return NextResponse.json({ ok: true, movement });
+    if (response.ok) await syncLowStockAlerts(tenant.hotelId);
+    return response;
   }
 
   const updated = await prisma.inventoryItem.update({

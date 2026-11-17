@@ -6,7 +6,7 @@ import { ROLE_GROUPS } from "@/lib/permissions";
 export const dynamic = 'force-dynamic';
 
 export default async function GuestsPage() {
-  const tenant = await requirePageRole(ROLE_GROUPS.GUEST_STAYS);
+  const tenant = await requirePageRole(ROLE_GROUPS.GUEST_STAYS, "RESERVATIONS");
 
   const guests = await prisma.guest.findMany({
     where: { hotelId: tenant.hotelId, isArchived: false },

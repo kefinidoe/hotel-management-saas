@@ -1,42 +1,57 @@
 # HMS Testing Documentation
 
-> ## Current verification status
+> ## Current verification status (2026-10-30)
 >
-> The latest full run reports **451 tests: 448 pass and 3 fail**. The three failures are
-> in `schema/migrations.test.ts`: the multi-tenant migration conflicts with earlier migrations
-> when applied to an empty database. Do not deploy or reset a database to work around this.
+> The latest full Vitest run passed **768 tests across 50 files** (4 skipped), and `npm run lint` passed.
+> `npx tsc --noEmit` currently reports 296 diagnostics, all of them consequences of the Prisma
+> client not being generated in this sandbox (77 missing `@prisma/client` exports plus cascading
+> inference errors); none are in the migration, adoption or rehearsal code. Prisma generation,
+> schema validation and the Next.js production build could not run here because Prisma fetches its
+> engines from `binaries.prisma.sh`, which this sandbox cannot reach.
 >
-> The former 46-test `api/endpoints.test.ts` placeholder suite has been replaced with **10
-> tests that invoke the real guest API route handlers**. The guest lifecycle suite (36 tests)
-> and utility helpers suite (37 tests) still contain placeholder assertions; those 73 tests
-> should not be treated as proof that the corresponding workflows work.
+> **73 tests remain illustrative placeholders**: 36 in `workflows/guest-lifecycle.test.ts` and
+> 37 in `utilities/helpers.test.ts`. Their passing result is not evidence that the complete
+> guest lifecycle or those utility functions work end-to-end.
 >
-> `npm run lint` passes and `npm audit` reports zero known package vulnerabilities. A full
-> TypeScript/build check is still unverified here because Prisma Client generation needs a
-> binary download unavailable in this environment.
+> The migration work is additionally covered by a **real PostgreSQL 17.11 rehearsal**
+> (`scripts/migration-rehearsal.mjs`, 8 scenarios, 83 assertions, all passing) that applies the
+> committed migrations, adopts ledgerless databases and proves the fail-closed paths, and by the
+> evidence tools `scripts/target-check.mjs` (read-only checkpoint/fingerprint) and
+> `scripts/restore-rehearsal.mjs` (digest-enforced restore into a scratch database). Details in
+> `docs/saas-migration-rehearsal.md`. The pinned 5.17.0 engine, the owner's archive and the live
+> target are still not exercised here, because of the engine-availability and credential limitations
+> above; production readiness is not claimed.
 
 ## Overview
-The current suite contains **451 tests**: 378 exercise application code and 73 remain
-placeholder assertions. The full suite is not yet green because of the migration failures above.
+The current suite has **772 tests in 50 files** (four skip without a live PostgreSQL server). It is green as a test suite, but mocked and
+placeholder cases have limited reach. Relevant tenant and schema test groups include:
 
-The tests that exercise real code, by suite:
+| Suite | Tests | What it checks |
+|---|---:|---|
+| `schema/migrations.test.ts` | 12 | Migration chain, schema parity, legacy conversion, tenant join-key prechecks, idempotency guards (disposable PGlite) |
+| `schema/migration-adoption.test.ts` | 26 | Release manifest, checkpoint classification and ledgerless-adoption planning (pure, no database) |
+| `schema/multi-tenant-schema.test.ts` | 9 | Tenant-scoped schema constraints |
+| `schema/cross-tenant-integrity.test.ts` | 24 | Cross-tenant foreign-key and integrity rules |
+| `tenant-isolation/affected-routes.test.ts` | 29 | Tenant isolation across route handlers with mocks |
+| `platform/platform-administration.test.ts` | 23 | Platform administration behavior with in-memory mocks |
+| `auth/tenant-auth.test.ts` | 19 | Tenant selection, role authorization, and hotel switching |
+| `onboarding/hotel-onboarding.test.ts` | 13 | Registration/onboarding validation, mocked persistence, offline and uniqueness cases |
+| `subscriptions/subscription-entitlements.test.ts` | 48 | Subscription and entitlement behavior with mocked storage |
+| `scripts/cleanup-scope.test.ts` | 3 | Static guardrails against unscoped cleanup and non-transactional execution |
+| `scripts/database-target-safety.test.ts` | 4 | Identifier validation and wiring for standalone backup/restore target checks |
+| `scripts/migration-readiness.test.ts` | 9 | The three prerequisites are reported individually with the PASS / BLOCKED / FAIL vocabulary; approval is always PENDING APPROVAL; decision is the worst prerequisite |
+| `scripts/prisma-engine-pin.test.ts` | 16 | Pinned Prisma 5.17.0 digests and commit: parser, match/mismatch/missing paths, and the `verify-pin` CLI refusals |
+| `scripts/archive-toc.test.ts` | 46 | The `pg_restore --list` parser and the `--use-list` filter: Supabase-schema detection, extension/type exclusion, the `SCHEMA`-name regression that let `auth` survive filtering, dependency-aware exclusion of an excluded extension's or schema's `COMMENT`/`ACL` entries, multi-word TOC types (`ROW SECURITY`, `PUBLICATION TABLE`, `SEQUENCE OWNED BY`), a retained function signature that references an excluded schema, and the CLI's `--help`/`--dump`/`--toc` contract (pure, no database; the real-archive case needs `REHEARSAL_TEST_BASE_URL`) |
+| `scripts/migration-evidence-tools.test.ts` | 23 | CLI-level refusals for `target-check.mjs` (no write path, target binding, pooler port) and `restore-rehearsal.mjs` (digest, missing archive, corrupt archive preflight, shared host, reserved names, unknown `--profile`, `--exclude-schema public`, plain-SQL `--toc`) — no database needed; the archive-reading cases skip when `psql`/`pg_restore` are not installed; three end-to-end restore tests run only when `REHEARSAL_TEST_BASE_URL` names a disposable server |
+| `safety/offline-auth-routes.test.ts` | 3 | Offline 503 responses without importing Prisma-backed auth modules |
 
-| Suite | Tests | What it pins down |
-|---|---|---|
-| `seed/seed.test.ts` | 8 | runs the real `prisma/seed.ts` against a fake Prisma client that enforces P2025 and foreign keys, so seed *ordering* cannot regress; also asserts every tariff name matches its occupancy prefix |
-| `seed/cleanup-guard.test.ts` | 24 | the pure rules deciding whether the destructive placeholder-room cleanup may run |
-| `schema/migrations.test.ts` | 4 | applies all 16 migration files to PostgreSQL (PGlite), then diffs the result against `schema.prisma`; currently exposes the broken multi-tenant migration chain |
-| `rooms/room-status.test.ts` | 13 | the floor-board status rules |
-| `rooms/tariffs.test.ts` | 12 | tariff matching across occupancy x meal plan |
-| `auth/session-revocation.test.ts` | 7 | session invalidation |
-| `utilities/dates.test.ts` | 8 | timezone-pinned date display, including the midnight boundary |
-| `middleware/matcher.test.ts` | 4 | `middleware.ts` protects both `/dashboard/*` and `/api/*` |
-| `restaurant/cart.test.ts` | 23 | the POS cart trust boundary (a forged price must not survive) and cart arithmetic |
-| `inventory/stock.test.ts` | 21 | recipe availability, stock status, unit formatting |
-| `reports/excel-export.test.ts` | 8 | the Excel workbook is well-formed and columns line up |
-| `scripts/pg-url.test.ts` | 14 | the connection-string handling shared by the backup and restore scripts |
-
-Each of these was mutation-tested: reintroducing the bug it guards makes it fail.
+Browser E2E, backup/restore against the real target, cleanup and seed against a real database were
+**not run**. The PGlite suite proves that the current migration files execute against fresh
+disposable in-memory databases and satisfy their fixtures. It is complemented by
+`scripts/migration-rehearsal.mjs`, which was run against a real PostgreSQL 17.11 server and covers
+the fresh chain, the legacy upgrade, ledgerless adoption, the fail-closed conflict path and re-run
+idempotency. Neither establishes that `prisma migrate deploy` behaves identically, because the
+pinned Prisma engines are unavailable here.
 
 ## Test Framework
 - **Vitest** - Modern, fast test runner with Vue/React support
@@ -52,7 +67,9 @@ __tests__/
 │   ├── seed.test.ts                   # REAL: runs prisma/seed.ts (8 tests)
 │   └── cleanup-guard.test.ts          # REAL: destructive-cleanup rules (24 tests)
 ├── schema/
-│   └── migrations.test.ts             # REAL: migrations vs Postgres vs schema.prisma (4 tests)
+│   ├── migrations.test.ts             # REAL: migration/schema checks in PGlite (12 tests)
+│   ├── migration-adoption.test.ts     # REAL: manifest + ledgerless adoption planning (26 tests)
+│   └── migration-runner.ts            # PGlite chain runner used by the migration tests
 ├── middleware/
 │   └── matcher.test.ts                # REAL: verifies middleware.ts matcher (4 tests)
 ├── rooms/
@@ -205,209 +222,137 @@ npm run test:ui
 npm run test:coverage
 ```
 
+### Node.js version
+
+The project runs on **Node.js 24**. `.nvmrc` and `package.json`'s `engines.node` (`>=24.0.0`) both
+say so, and CI installs 24 on both operating systems:
+
+```bash
+nvm use             # reads .nvmrc -> 24
+node --version      # v24.x
+```
+
+`vitest@5` supports `^22.12.0 || ^24.0.0 || >=26.0.0`; Node 24 is the supported line this project
+tests and deploys on. Node 22 still runs the suite locally, but `npm install` will warn with
+`EBADENGINE`, and nothing in CI or the deployment checklist is verified on it.
+
+### Windows checkouts
+
+Migration checksums are byte-level: Prisma hashes the raw bytes of `migration.sql`. Git stores those
+files as LF and `.gitattributes` pins them there, so a normal checkout is byte-identical on Windows
+and Linux even with `core.autocrlf=true`. If an older clone (or an editor that rewrote line endings)
+has reintroduced CRLF you will see:
+
+```
+npm run migration:verify-eol   # exits 1 and names the affected files
+```
+
+Recovery is a one-off, non-destructive re-checkout:
+
+```bash
+git config core.autocrlf false
+rm -rf prisma/migrations
+git checkout -- prisma/migrations
+```
+
+Manifest verification tolerates CRLF by comparing the LF bytes Git would deploy, and the migration
+tests assert that behaviour; only `npm run migration:adopt` refuses outright, because that is the
+command that writes digests into `_prisma_migrations`. See
+[docs/migration-strategy.md §4.0](docs/migration-strategy.md).
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs the same checks on `ubuntu-latest` and `windows-latest` for every
+push and pull request, on Node.js 24 with `npm ci`:
+
+| Step | Command | Needs a database? |
+|---|---|---|
+| Prisma client verification | `npm run check:prisma-client` | no |
+| Schema validation | `npx prisma validate` (placeholder URLs) | no — parses only, never connects |
+| Migration bytes | `npm run migration:verify-eol` + `npm run migration:manifest` | no |
+| TypeScript | `npx tsc --noEmit` | no |
+| Lint | `npm run lint` | no |
+| Tests | `npx vitest run` | no — PGlite is in-memory |
+| Build | `npm run build` | no |
+
+The Windows job additionally prints `core.autocrlf` and re-runs the CRLF detection tests, so the
+line-ending protections are exercised where CRLF actually occurs. The checks that genuinely require
+a PostgreSQL server — the restore rehearsal, `migration:rehearse`, `target-check`, the live
+`db-integrity` run and adoption — are **not** in CI and are not simulated there; Vitest reports the
+restore-rehearsal tests as *skipped* when `psql`/`pg_restore` or `REHEARSAL_TEST_BASE_URL` are
+absent, which is the expected CI state.
+
 ## Test Results Summary
 
-Latest full run in this workspace:
+Latest full local run (Node 22.22.3 on Linux); CI runs the identical suite on Node 24 on
+`ubuntu-latest` and `windows-latest` and reports the same counts:
 
 ```
-Test Files  29 passed, 1 failed (30)
-     Tests  448 passed, 3 failed (451)
+Test Files  68 passed (68)
+     Tests  1030 passed | 6 skipped (1036)
 ```
 
-The three failing assertions are in `schema/migrations.test.ts`. The 16-file chain fails at
-`20261008123000_multi_tenant_saas_init` because it recreates types already established by
-earlier migrations; the remaining schema-diff failures are consequences of that incomplete
-migration run. This needs a data-safe migration repair before deployment.
+The six skips are environment gates, not disabled checks: five restore-rehearsal/archive-toc tests
+require a real PostgreSQL server (`psql`/`pg_restore` plus `REHEARSAL_TEST_BASE_URL`), and one
+requires only the PostgreSQL client binaries. See `docs/migration-strategy.md §4.0` and the
+"Continuous integration" section above.
+
+The PGlite schema/migration tests create disposable in-memory databases and close them after
+use. They exercise the current migration files from a fresh schema and representative legacy
+fixtures; they do not connect to an external database. The separate PostgreSQL rehearsal
+(`REHEARSAL_BASE_URL=postgresql://postgres@127.0.0.1:<port> npm run migration:rehearse`) covers a
+real server of the target major version and the ledgerless-adoption paths.
+
+The two evidence tools are also exercised end to end outside Vitest, on a disposable loopback
+PostgreSQL 17.11 server, in `docs/saas-migration-rehearsal.md` §9: a digest-verified restore of a
+94 951-byte archive (28 tables, data intact, scratch database dropped), a read-only checkpoint and
+fingerprint check against both a ledgerless copy and a 19-row ledger, and the refusal paths
+(wrong digest, missing archive, shared host, existing database name, tampered ledger).
+
+Beyond those two layers, `npm run migration:verify-engine` drives Prisma's own migrate implementation
+(`@prisma/migrate` + the official WebAssembly schema engine) against disposable PostgreSQL 17.11
+databases: 6 scenarios, 37 assertions covering deploy, `migrate resolve --applied`,
+`migrate resolve --rolled-back`, drift detection and adoption-tool interop. It runs out of process
+with a verification-only tool stack and is not part of the vitest suite; see
+[docs/migration-strategy.md §7](docs/migration-strategy.md). The pinned 5.17.0 engine and the real
+Supabase target are still not exercised by any of these layers.
 
 ### Coverage notes
-- The 10-test guest API suite exercises actual route handlers.
-- Guest lifecycle (36) and utility helper (37) suites remain placeholder assertions.
-- Focused tenant-auth and subscription suites pass with mocked Prisma enum exports.
-- Inventory, POS, and folio-payment suites have targeted behavior tests.
 
-### The suites that test real code
+- Tenant authorization, platform administration, subscriptions, reservations, folios, staff,
+  and affected API routes have mock-backed test groups. A passing mock test is not live-database
+  integration evidence.
+- Registration/onboarding tests exercise mocked persistence and now cover invalid IANA time
+  zones, uniqueness races, and blank-database responses.
+- Static maintenance-script tests guard cleanup scoping and database-target identifier checks.
+  Cleanup, reset-password, and seed scripts were not executed against any DB.
+- `backup-db.mjs` and `restore-rehearsal.mjs` were executed against a disposable local PostgreSQL
+  17.11 server (never the target); `target-check.mjs` was executed read-only against local copies only.
+- `migration-readiness.mjs` was run with no inputs, with a digest-matching archive, with a deliberately
+  non-matching archive, with configured-but-uncontacted credentials, and with `--check-target` against a
+  disposable local database (archive PASS, credentials PASS, engine BLOCKED, decision BLOCKED).
+- `prisma-engine-pin.mjs` was executed against deliberately wrong and missing files (both refused) and
+  in its `--help`/no-argument forms. Its positive path needs the genuine 5.17.0 artifacts, which no
+  reachable host serves, so it has not been run against a real engine.
+- `workflows/guest-lifecycle.test.ts` (36 tests) and `utilities/helpers.test.ts` (37 tests) are
+  illustrative placeholders. They do not call application routes or the real utility functions.
+- Middleware matcher tests check route matching, not a full browser session or live middleware
+  behavior.
 
-`__tests__/seed/seed.test.ts` imports `prisma/seed.ts` and runs it end to end against a
-fake Prisma client that rejects an `update` on a missing row (P2025) and a `room.create`
-whose `roomTypeId` doesn't exist. It asserts the admin login, the 6 tariff room types
-(with the Twin rows correctly named and capacity 2), the 26 rooms with only 27 & 28 flagged
-`isTwin`, the 4 payment methods, and the menu / inventory / recipe seed data.
+### Checks and limits
 
-It is a genuine regression guard: run the same harness against the pre-fix seed from git
-and it fails with exactly the error that made `npm run seed` unusable on a fresh database.
+- Prisma 5.17.0 client generation and schema validation passed with the pinned Linux engines.
+- Full TypeScript, lint, and production build checks passed.
+- Browser E2E was not run. Migration rehearsals did run, but only against disposable local
+  PostgreSQL 17.11 databases: the 8-scenario psql rehearsal, the 6-scenario real-engine run, and
+  digest-verified backup/restore cycles on archives built here. No Supabase or shared database was
+  contacted, the live target's checkpoint has not been observed, the owner's archive has not been
+  restored, and the pinned 5.17.0 engine has not run (its artifacts and acceptance steps are
+  recorded in `docs/migration-strategy.md` §7.1.1–7.1.3).
+- The PGlite migration runner checks SQL behavior on fresh disposable in-memory databases only.
+  It does not validate the target's migration ledger/checksums or Prisma deploy recovery semantics.
 
-```bash
-git show 1fb45bf:prisma/seed.ts   # -> P2025 on roomType "tariff-triple-bo", process.exit(1)
-```
-
-`__tests__/schema/migrations.test.ts` runs all five `migration.sql` files against
-**PostgreSQL 18 compiled to WebAssembly** (`@electric-sql/pglite`, a devDependency — it needs
-no server and no network, so it works in CI). It then introspects the result and compares it
-to `prisma/schema.prisma`: 25 tables, 13 enums, 193 scalar/enum columns, all matching. It also
-asserts the six foreign keys the app's joins depend on actually exist, and that every
-enum-like literal in `app/**` and `prisma/seed.ts` is a member of a real enum — so a typo like
-`status: "NEEDS_CLEANNG"` fails here instead of at runtime.
-
-Caveat: PGlite is PostgreSQL 18 and Supabase may run 15 or 16. All the syntax used is
-long-stable, but this is not a substitute for `prisma migrate deploy` against the real project.
-
-`__tests__/middleware/matcher.test.ts` reads the real `config.matcher` out of `middleware.ts`
-and pushes all 37 API routes, 9 NextAuth endpoints and the public pages through Next's own
-`getPathMatch`. The matcher fails *open* when it is wrong, so this is the only cheap way to
-catch a regression. Restore the pre-fix `middleware.ts` and it reports all 37 API routes as
-unguarded.
-
-## Key Test Scenarios
-
-### 1. Complete Guest Stay
-```
-Registration → Reservation → Check-in →
-Stay (with charges) → Payments → Check-out →
-Housekeeping Task
-```
-
-### 2. Revenue Management
-```
-Room Charges (base rate × nights) →
-Restaurant Charges →
-Room Service →
-Housekeeping Charges →
-Total Folio
-```
-
-### 3. Payment Processing
-```
-Full Payment → Partial Payments →
-Overpayments → Refunds →
-Multi-method Payments
-```
-
-### 4. Room Availability
-```
-Check date range →
-Detect overlaps →
-Calculate rates →
-Prevent double-booking
-```
-
-## Mock Data
-
-Pre-defined mock objects in `fixtures/mock-data.ts`:
-
-```typescript
-mockGuest        // Sample guest data
-mockRoom         // Sample room with type
-mockReservation  // Sample reservation with guest
-mockFolio        // Sample billing folio
-mockPayment      // Sample payment transaction
-mockUser         // Sample staff member
-mockCheckIn      // Sample check-in data
-mockCheckOut     // Sample check-out data
-```
-
-## Configuration Files
-
-### `vitest.config.ts`
-- Framework: Vitest 5.0.1
-- Environment: jsdom
-- Global test utilities enabled
-- Path aliases (@/) configured
-- Coverage reporting enabled
-
-### `vitest.setup.ts`
-- Testing library matchers
-- Mock implementations for Next.js routing
-- Environment variables for tests
-
-### `package.json` Scripts
-```json
-{
-  "test": "vitest",
-  "test:ui": "vitest --ui",
-  "test:run": "vitest run",
-  "test:coverage": "vitest run --coverage"
-}
-```
-
-## Best Practices
-
-1. **Data Isolation**: Each test uses fresh mock data
-2. **Clear Assertions**: Each test validates specific behavior
-3. **Workflow Coverage**: Tests follow actual business processes
-4. **Edge Cases**: Includes validation and error scenarios
-5. **Realistic Data**: Mock data matches production schema
-
-## Next Steps
-
-### To Add More Tests:
-1. Create test files in appropriate `__tests__` subdirectories
-2. Follow naming convention: `*.test.ts` or `*.spec.ts`
-3. Use mock data from `fixtures/mock-data.ts`
-4. Import utilities from `test-utils.tsx`
-
-### To Test Components:
-```typescript
-import { render, screen } from '__tests__/test-utils';
-import MyComponent from '@/components/MyComponent';
-
-describe('MyComponent', () => {
-  it('should render correctly', () => {
-    render(<MyComponent />);
-    expect(screen.getByText('Expected Text')).toBeInTheDocument();
-  });
-});
-```
-
-### To Test API Routes:
-1. Mock Prisma client
-2. Mock request/response objects
-3. Test route handlers with various inputs
-4. Verify response status and data
-
-## Troubleshooting
-
-### Tests fail with "Cannot find package"
-```bash
-npm install --legacy-peer-deps
-```
-
-### Vite config warning about ESM
-This is a known warning in Vitest. Can be suppressed with:
-```bash
-VITE_CONFIG_NATIVE_IGNORE_WARNING=true npm run test:run
-```
-
-### Tests running slowly
-- Check for heavy imports
-- Verify mock implementations
-- Use `test.only` to debug specific tests
-- Run: `npm run test:run` for faster single run
-
-## Integration with CI/CD
-
-Add to your GitHub Actions or CI pipeline:
-
-```yaml
-- name: Run tests
-  run: npm run test:run
-
-- name: Generate coverage
-  run: npm run test:coverage
-```
-
-## Summary
-
-The suite now has targeted tests for selected application logic and real guest API handlers.
-It does **not** yet prove the full guest lifecycle or all API endpoints: 73 legacy tests are
-placeholders, and the migration suite currently fails as described above.
-
-The next coverage priorities are:
-- Real guest lifecycle tests against the route handlers
-- Tenant-isolation tests for reservation, room, and billing routes
-- Database integration tests after the migration chain is repaired
-
-The test suite is intended to ensure:
-- Reliability of booking workflow
-- Correctness of financial calculations
-- Proper error handling
-- Data consistency across modules
+Before any non-test database operation, independently verify the exact project/host, the
+`_prisma_migrations` history and checksums, and that the target is an approved isolated SaaS
+instance. Identifier matching alone is not proof of safety. Never use Axis production credentials
+or records for these tests.

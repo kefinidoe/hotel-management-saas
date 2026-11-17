@@ -282,6 +282,35 @@ export const SUBSCRIPTION_PLANS: Record<string, RoomBand> = {
 export const DEFAULT_PLAN_ID = "BAND_1_10";
 
 /**
+ * The price schedule is published in KES and USD only. A hotel may record
+ * operations in another currency (EUR, GBP, ...), but its subscription is still
+ * billed in one of these two; mapping anything else to KES keeps the billed
+ * currency and the displayed  price schedule in agreement.
+ */
+export function normaliseBillingCurrency(currency: string | null | undefined): "KES" | "USD" {
+  return (currency ?? "KES").toUpperCase() === "USD" ? "USD" : "KES";
+}
+
+/**
+ * Server-side price for a stored subscription, in the currency it is billed in.
+ * Returns null for unknown plans and custom-quote bands (which have no list
+ * price), so callers never invent an amount.
+ */
+export function priceForSubscription(params: {
+  planId: string;
+  billingInterval?: BillingInterval;
+  currency?: string | null;
+}): number | null {
+  const plan = SUBSCRIPTION_PLANS[(params.planId ?? "").toUpperCase()];
+  if (!plan || plan.isCustomQuote) return null;
+  const usd = normaliseBillingCurrency(params.currency) === "USD";
+  if (params.billingInterval === BillingInterval.YEARLY) {
+    return usd ? plan.yearlyPriceUSD : plan.yearlyPriceKES;
+  }
+  return usd ? plan.monthlyPriceUSD : plan.monthlyPriceKES;
+}
+
+/**
  * Returns the RoomBand matching a specific billable room count.
  * Handles edge cases (0 rooms defaults to Band 1, negative numbers normalized).
  */

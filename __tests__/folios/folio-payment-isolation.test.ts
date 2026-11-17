@@ -149,6 +149,7 @@ interface TestDB {
   inventoryItems: Map<string, any>;
   locks: string[];
   simulateP2002OnPaymentCreate?: boolean;
+  simulateP2002WinnerOverrides?: Record<string, unknown>;
 }
 
 function createFreshTestDB(): TestDB {
@@ -298,6 +299,8 @@ vi.doMock("@/lib/prisma", () => ({
           },
           create: async ({ data }: any) => {
             if (db.simulateP2002OnPaymentCreate) {
+              const id = "pay-concurrent-winner";
+              db.payments.set(id, { id, ...data, ...(db.simulateP2002WinnerOverrides ?? {}) });
               throw new MockPrismaClientKnownRequestError("Unique constraint failed", "P2002");
             }
             if (data.idempotencyKey) {
@@ -374,6 +377,18 @@ vi.doMock("@/lib/prisma", () => ({
           .filter((p) => p.folioId === f.id && (!hotelId || p.hotelId === hotelId))
           .map((p) => ({ ...p, paymentMethod: db.paymentMethods.get(p.paymentMethodId) }));
         return { ...f, guest, items, payments };
+      },
+    },
+    payment: {
+      findUnique: async ({ where }: any) => {
+        if (where?.hotelId_idempotencyKey) {
+          const { hotelId, idempotencyKey } = where.hotelId_idempotencyKey;
+          for (const payment of db.payments.values()) {
+            if (payment.hotelId === hotelId && payment.idempotencyKey === idempotencyKey) return payment;
+          }
+          return null;
+        }
+        return null;
       },
     },
     paymentMethod: {
@@ -463,10 +478,34 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
   });
 
   describe("Batch 2: Payments and Billing Security", () => {
+    it("rejects a stale tenant header without querying or creating a payment", async () => {
+      const req = new Request("http://localhost:3000/api/payments", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Expected-Hotel-Id": "hotel-b",
+        },
+        body: JSON.stringify({
+          folioId: "folio-a-open",
+          paymentMethodId: "pm-a-cash",
+          amount: 1000,
+        }),
+      });
+
+      const response = await createPayment(req);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        code: "TENANT_CONTEXT_MISMATCH",
+        outcome: "UNKNOWN",
+      });
+      expect(db.payments.size).toBe(0);
+      expect(db.locks).toEqual([]);
+    });
+
     it("Hotel A cannot record a payment against Hotel B's folio", async () => {
       const req = new Request("http://localhost:3000/api/payments", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "valid-key-test" },
         body: JSON.stringify({
           folioId: "folio-b-open",
           paymentMethodId: "pm-a-cash",
@@ -484,7 +523,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
     it("Rejects payment referencing a payment method belonging to another hotel", async () => {
       const req = new Request("http://localhost:3000/api/payments", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "valid-key-test" },
         body: JSON.stringify({
           folioId: "folio-a-open",
           paymentMethodId: "pm-b-card", // belongs to hotel-b
@@ -502,7 +541,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
     it("Ignores client-forged cashierId, status, and hotelId in request payload", async () => {
       const req = new Request("http://localhost:3000/api/payments", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "valid-key-test" },
         body: JSON.stringify({
           folioId: "folio-a-open",
           paymentMethodId: "pm-a-cash",
@@ -531,7 +570,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
       for (const badAmount of [-500, 0, "invalid", 10.999]) {
         const req = new Request("http://localhost:3000/api/payments", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "Idempotency-Key": "valid-key-test" },
           body: JSON.stringify({
             folioId: "folio-a-open",
             paymentMethodId: "pm-a-cash",
@@ -548,7 +587,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
     it("Blocks payments exceeding the folio's outstanding balance", async () => {
       const req = new Request("http://localhost:3000/api/payments", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "valid-key-test" },
         body: JSON.stringify({
           folioId: "folio-a-open",
           paymentMethodId: "pm-a-cash",
@@ -566,7 +605,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
     it("Blocks payment recording on a closed folio", async () => {
       const req = new Request("http://localhost:3000/api/payments", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "valid-key-test" },
         body: JSON.stringify({
           folioId: "folio-a-closed",
           paymentMethodId: "pm-a-cash",
@@ -585,7 +624,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
       db.locks = [];
       const req = new Request("http://localhost:3000/api/payments", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "valid-key-test" },
         body: JSON.stringify({
           folioId: "folio-a-open",
           paymentMethodId: "pm-a-cash",
@@ -611,6 +650,12 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
       expect(methods.some((m: any) => m.id === "pm-b-card")).toBe(false);
     });
 
+    it("rejects a payment without an idempotency key", async () => {
+      const req = new Request("http://localhost:3000/api/payments", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ folioId: "folio-a-open", paymentMethodId: "pm-a-cash", amount: 1000 }) });
+      expect((await createPayment(req)).status).toBe(400);
+      expect(db.payments.size).toBe(0);
+    });
+
     it("Rejects invalid idempotency keys outside length bounds (4-128 chars)", async () => {
       // Too short
       const reqShort = new Request("http://localhost:3000/api/payments", {
@@ -625,7 +670,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
       const resShort = await createPayment(reqShort);
       expect(resShort.status).toBe(400);
       const dataShort = await resShort.json();
-      expect(dataShort.error).toContain("Idempotency key must be between 4 and 128 characters");
+      expect(dataShort.error).toContain("An idempotency key between 4 and 128 characters is required");
 
       // Too long
       const reqLong = new Request("http://localhost:3000/api/payments", {
@@ -641,7 +686,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
       const resLong = await createPayment(reqLong);
       expect(resLong.status).toBe(400);
       const dataLong = await resLong.json();
-      expect(dataLong.error).toContain("Idempotency key must be between 4 and 128 characters");
+      expect(dataLong.error).toContain("An idempotency key between 4 and 128 characters is required");
     });
 
     it("Accepts and records a payment with valid idempotency key via header", async () => {
@@ -668,6 +713,7 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
       const saved = Array.from(db.payments.values()).find((p) => p.id === data.id);
       expect(saved).toBeDefined();
       expect(saved.idempotencyKey).toBe("idem-key-alpha-100");
+      expect(saved.requestFingerprint).toMatch(/^[a-f0-9]{64}$/);
     });
 
     it("Replaying payment with same idempotency key and identical payload returns original payment record", async () => {
@@ -709,6 +755,40 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
       expect(data2.id).toBe(data1.id);
       // No duplicate payment created in database
       expect(db.payments.size).toBe(initialPaymentCount + 1);
+    });
+
+    it("Compares references when replaying legacy payments without a fingerprint", async () => {
+      db.payments.set("pay-legacy-idem", {
+        id: "pay-legacy-idem",
+        hotelId: "hotel-a",
+        folioId: "folio-a-open",
+        paymentMethodId: "pm-a-cash",
+        amount: 500,
+        reference: "LEGACY-REF",
+        idempotencyKey: "legacy-idem-key",
+        requestFingerprint: null,
+        status: "COMPLETED",
+      });
+
+      const makeRequest = (reference: string) => new Request("http://localhost:3000/api/payments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "legacy-idem-key" },
+        body: JSON.stringify({
+          folioId: "folio-a-open",
+          paymentMethodId: "pm-a-cash",
+          amount: 500,
+          reference,
+        }),
+      });
+
+      const same = await createPayment(makeRequest("LEGACY-REF"));
+      expect(same.status).toBe(201);
+      expect((await same.json()).id).toBe("pay-legacy-idem");
+
+      const changedReference = await createPayment(makeRequest("DIFFERENT-REF"));
+      expect(changedReference.status).toBe(409);
+      expect((await changedReference.json()).error).toContain("different payment details");
+      expect(db.payments.size).toBe(1);
     });
 
     it("Rejecting replay with same idempotency key but conflicting payload returns 409 Conflict", async () => {
@@ -757,9 +837,26 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
       expect(resDiffMethod.status).toBe(409);
       const dataDiffMethod = await resDiffMethod.json();
       expect(dataDiffMethod.error).toContain("Idempotency key was previously used with different payment details");
+
+      // Reference and folio are also part of the idempotency payload.
+      const reqDiffReference = new Request("http://localhost:3000/api/payments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "idem-conflict-test" },
+        body: JSON.stringify({ ...initialPayload, reference: "MPESA-NEW" }),
+      });
+      expect((await createPayment(reqDiffReference)).status).toBe(409);
+
+      const reqDiffFolio = new Request("http://localhost:3000/api/payments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "idem-conflict-test" },
+        body: JSON.stringify({ ...initialPayload, folioId: "folio-a-closed" }),
+      });
+      expect((await createPayment(reqDiffFolio)).status).toBe(409);
+      expect(db.payments.size).toBe(1);
     });
 
-    it("Handles concurrent database unique conflict (P2002) returning 409 Conflict", async () => {
+    // Mocked P2002 winner injection exercises the conflict handler, not real database concurrency.
+    it("Mocked P2002 race replays the winner for a matching payload", async () => {
       db.simulateP2002OnPaymentCreate = true;
       try {
         const req = new Request("http://localhost:3000/api/payments", {
@@ -776,11 +873,38 @@ describe("Phase 4: Multi-Tenant Folio, Payment & Billing Security Hardening", ()
         });
 
         const res = await createPayment(req);
-        expect(res.status).toBe(409);
+        expect(res.status).toBe(201);
         const data = await res.json();
-        expect(data.error).toContain("A payment with this idempotency key was submitted concurrently");
+        expect(data.isIdempotentReplay).toBe(true);
+        expect(data.id).toBe("pay-concurrent-winner");
+        expect(db.payments.size).toBe(1);
       } finally {
         db.simulateP2002OnPaymentCreate = false;
+      }
+    });
+
+    it("Mocked P2002 race rejects a mismatched concurrent payload", async () => {
+      db.simulateP2002OnPaymentCreate = true;
+      db.simulateP2002WinnerOverrides = { reference: "OTHER-REF", requestFingerprint: null };
+      const req = new Request("http://localhost:3000/api/payments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "concurrent-conflict-key" },
+        body: JSON.stringify({
+          folioId: "folio-a-open",
+          paymentMethodId: "pm-a-cash",
+          amount: 1000,
+          reference: "REQUEST-REF",
+        }),
+      });
+
+      try {
+        const res = await createPayment(req);
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toContain("different payment details");
+        expect(db.payments.size).toBe(1);
+      } finally {
+        db.simulateP2002OnPaymentCreate = false;
+        db.simulateP2002WinnerOverrides = undefined;
       }
     });
 

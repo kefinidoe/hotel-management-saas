@@ -1,3 +1,4 @@
+import { DurableMutationProvider } from "@/components/recovery/DurableMutationProvider";
 import { prisma } from "@/lib/prisma";
 import { getStockStatus } from "@/lib/inventory";
 import InventoryClient from "@/components/inventory/InventoryClient";
@@ -7,7 +8,7 @@ import { ROLE_GROUPS } from "@/lib/permissions";
 export const dynamic = "force-dynamic";
 
 export default async function InventoryPage() {
-  const tenant = await requirePageRole(ROLE_GROUPS.MANAGEMENT);
+  const tenant = await requirePageRole(ROLE_GROUPS.MANAGEMENT, "INVENTORY");
 
   const startOfToday = new Date();
   startOfToday.setHours(0, 0, 0, 0);
@@ -46,6 +47,7 @@ export default async function InventoryPage() {
       category: item.category,
       unit: item.unit,
       currentStock,
+      stockVersion: item.stockVersion,
       reorderLevel,
       costPerUnit,
       supplier: item.supplier,
@@ -74,5 +76,5 @@ export default async function InventoryPage() {
     todaysPurchases: todaysPurchasesValue,
   };
 
-  return <InventoryClient initialItems={initialItems} kpis={kpis} />;
+  return <DurableMutationProvider hotelId={tenant.hotelId} actorId={tenant.userId}><InventoryClient initialItems={initialItems} kpis={kpis} /></DurableMutationProvider>;
 }

@@ -1,6 +1,7 @@
 import { strToU8, zipSync } from "fflate";
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
 import { HOTEL_TIMEZONE } from "@/lib/dates";
+import { BRAND_COLORS, PRODUCT_NAME } from "@/lib/brand";
 
 type ReportExportData = {
   range: { startDate: string; endDate: string };
@@ -227,11 +228,11 @@ function workbookFiles(sheets: Sheet[]) {
 </Relationships>`),
     "docProps/core.xml": strToU8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <dc:title>Axis Hotel Management Report</dc:title><dc:creator>Axis Hotel HMS</dc:creator>
+  <dc:title>${PRODUCT_NAME} Management Report</dc:title><dc:creator>${PRODUCT_NAME}</dc:creator>
   <dcterms:created xsi:type="dcterms:W3CDTF">${now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified>
 </cp:coreProperties>`),
     "docProps/app.xml": strToU8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Axis Hotel HMS</Application></Properties>`),
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>${PRODUCT_NAME}</Application></Properties>`),
     "xl/workbook.xml": strToU8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${workbookSheets}</sheets></workbook>`),
     "xl/_rels/workbook.xml.rels": strToU8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -240,7 +241,7 @@ function workbookFiles(sheets: Sheet[]) {
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <numFmts count="2"><numFmt numFmtId="164" formatCode="&quot;KSh&quot; #,##0.00;[Red]-&quot;KSh&quot; #,##0.00"/><numFmt numFmtId="165" formatCode="#,##0.00"/></numFmts>
   <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="Calibri"/></font></fonts>
-  <fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0B0244"/><bgColor indexed="64"/></patternFill></fill></fills>
+  <fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF${BRAND_COLORS.primary.slice(1)}"/><bgColor indexed="64"/></patternFill></fill></fills>
   <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
   <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
   <cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFill="1" applyFont="1"/><xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>
@@ -448,8 +449,18 @@ export async function buildReportsPdf(data: ReportExportData) {
   const document = await PDFDocument.create();
   const regular = await document.embedFont(StandardFonts.Helvetica);
   const bold = await document.embedFont(StandardFonts.HelveticaBold);
-  const navy = rgb(0.043, 0.008, 0.267);
-  const gold = rgb(0.859, 0.573, 0.122);
+  const primaryHex = BRAND_COLORS.primary.slice(1);
+  const accentHex = BRAND_COLORS.accent.slice(1);
+  const primary = rgb(
+    parseInt(primaryHex.slice(0, 2), 16) / 255,
+    parseInt(primaryHex.slice(2, 4), 16) / 255,
+    parseInt(primaryHex.slice(4, 6), 16) / 255
+  );
+  const accent = rgb(
+    parseInt(accentHex.slice(0, 2), 16) / 255,
+    parseInt(accentHex.slice(2, 4), 16) / 255,
+    parseInt(accentHex.slice(4, 6), 16) / 255
+  );
   const gray = rgb(0.42, 0.45, 0.41);
   const light = rgb(0.96, 0.96, 0.94);
   const green = rgb(0.18, 0.49, 0.27);
@@ -457,9 +468,9 @@ export async function buildReportsPdf(data: ReportExportData) {
 
   function addPage(title: string) {
     const page = document.addPage([595.28, 841.89]);
-    page.drawRectangle({ x: 0, y: 790, width: 595.28, height: 51.89, color: navy });
-    page.drawText("AXIS HOTEL", { x: 40, y: 812, size: 16, font: bold, color: rgb(1, 1, 1) });
-    page.drawText(safePdfText(title), { x: 40, y: 765, size: 18, font: bold, color: navy });
+    page.drawRectangle({ x: 0, y: 790, width: 595.28, height: 51.89, color: primary });
+    page.drawText(PRODUCT_NAME.toUpperCase(), { x: 40, y: 812, size: 16, font: bold, color: rgb(1, 1, 1) });
+    page.drawText(safePdfText(title), { x: 40, y: 765, size: 18, font: bold, color: primary });
     page.drawText(`${data.range.startDate} to ${data.range.endDate}`, {
       x: 40,
       y: 746,
@@ -491,7 +502,7 @@ export async function buildReportsPdf(data: ReportExportData) {
       const y = top - row * 66;
       page.drawRectangle({ x, y, width, height, color: light, borderColor: rgb(0.88, 0.87, 0.84), borderWidth: 0.5 });
       page.drawText(safePdfText(item.label), { x: x + 12, y: y + 34, size: 8, font: regular, color: gray });
-      page.drawText(safePdfText(item.value), { x: x + 12, y: y + 14, size: 14, font: bold, color: item.color ?? navy });
+      page.drawText(safePdfText(item.value), { x: x + 12, y: y + 14, size: 14, font: bold, color: item.color ?? primary });
     });
   }
 
@@ -502,7 +513,7 @@ export async function buildReportsPdf(data: ReportExportData) {
     top: number,
     height = 150
   ) {
-    page.drawText(safePdfText(title), { x: 40, y: top, size: 12, font: bold, color: navy });
+    page.drawText(safePdfText(title), { x: 40, y: top, size: 12, font: bold, color: primary });
     const rows = values.filter((item) => item.value > 0).slice(0, 8);
     if (rows.length === 0) {
       page.drawText("No data for this period.", { x: 40, y: top - 22, size: 9, font: regular, color: gray });
@@ -515,8 +526,8 @@ export async function buildReportsPdf(data: ReportExportData) {
       const label = safePdfText(item.label).slice(0, 27);
       page.drawText(label, { x: 40, y, size: 8, font: regular, color: gray });
       const barWidth = (item.value / max) * 255;
-      page.drawRectangle({ x: 190, y: y - 1, width: barWidth, height: 8, color: index % 2 ? gold : navy });
-      page.drawText(pdfMoney(item.value), { x: 455, y, size: 8, font: regular, color: navy });
+      page.drawRectangle({ x: 190, y: y - 1, width: barWidth, height: 8, color: index % 2 ? accent : primary });
+      page.drawText(pdfMoney(item.value), { x: 455, y, size: 8, font: regular, color: primary });
     });
   }
 
@@ -528,10 +539,10 @@ export async function buildReportsPdf(data: ReportExportData) {
     widths: number[],
     top: number
   ) {
-    page.drawText(safePdfText(title), { x: 40, y: top, size: 12, font: bold, color: navy });
+    page.drawText(safePdfText(title), { x: 40, y: top, size: 12, font: bold, color: primary });
     let x = 40;
     const headerY = top - 24;
-    page.drawRectangle({ x: 40, y: headerY - 5, width: widths.reduce((sum, width) => sum + width, 0), height: 18, color: navy });
+    page.drawRectangle({ x: 40, y: headerY - 5, width: widths.reduce((sum, width) => sum + width, 0), height: 18, color: primary });
     headers.forEach((header, index) => {
       page.drawText(safePdfText(header), { x: x + 3, y: headerY, size: 7, font: bold, color: rgb(1, 1, 1) });
       x += widths[index];
@@ -654,8 +665,8 @@ export async function buildReportsPdf(data: ReportExportData) {
     265
   );
 
-  document.setTitle("Axis Hotel Management Report");
-  document.setAuthor("Axis Hotel HMS");
+  document.setTitle(`${PRODUCT_NAME} Management Report`);
+  document.setAuthor(PRODUCT_NAME);
   document.setSubject(`${data.range.startDate} to ${data.range.endDate}`);
   return document.save();
 }
@@ -678,7 +689,7 @@ export function downloadReportsExcel(data: ReportExportData) {
     new Blob([buffer], {
       type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     }),
-    `axis-hotel-report-${data.range.startDate}-to-${data.range.endDate}.xlsx`
+    `hotelflow-report-${data.range.startDate}-to-${data.range.endDate}.xlsx`
   );
 }
 
@@ -687,6 +698,6 @@ export async function downloadReportsPdf(data: ReportExportData) {
   const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
   downloadBlob(
     new Blob([buffer], { type: "application/pdf" }),
-    `axis-hotel-report-${data.range.startDate}-to-${data.range.endDate}.pdf`
+    `hotelflow-report-${data.range.startDate}-to-${data.range.endDate}.pdf`
   );
 }

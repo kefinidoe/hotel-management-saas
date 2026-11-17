@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
+import { inventoryRequest } from "@/lib/inventory-idempotency";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { getStockStatus } from "@/lib/inventory";
 
@@ -36,6 +38,7 @@ export async function GET(req: Request) {
         category: i.category,
         unit: i.unit,
         currentStock,
+        stockVersion: i.stockVersion,
         reorderLevel,
         costPerUnit,
         supplier: i.supplier,
@@ -57,7 +60,9 @@ export async function POST(req: Request) {
   const blocked = await requireModule(tenant.hotelId, "INVENTORY");
   if (blocked) return blocked;
 
-  const body = await req.json();
+  let body: any;
+  try { body = await req.json(); } catch { return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 }); }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return NextResponse.json({ error: "Invalid request." }, { status: 400 });
   const { sku, name, category, unit, currentStock, reorderLevel, costPerUnit, supplier } = body;
 
   if (!sku || !name || !category || !unit) {
@@ -66,14 +71,25 @@ export async function POST(req: Request) {
       { status: 400 }
     );
   }
+  if (![sku, name, category].every((value) => typeof value === "string" && value.trim())) return NextResponse.json({ error: "SKU, name, and category must be valid strings." }, { status: 400 });
   if (!["g", "ml", "pcs"].includes(unit)) {
     return NextResponse.json({ error: "Unit must be g, ml, or pcs." }, { status: 400 });
   }
 
-  const opening = Number(currentStock) || 0;
+  const opening = currentStock == null || currentStock === "" ? 0 : Number(currentStock);
+  if (!Number.isFinite(opening) || opening < 0 || !new Prisma.Decimal(opening).mul(100).isInteger()) {
+    return NextResponse.json({ error: "Opening stock must be non-negative with at most two decimal places." }, { status: 400 });
+  }
+
+  const reorder = reorderLevel == null || reorderLevel === "" ? 0 : Number(reorderLevel);
+  const cost = costPerUnit == null || costPerUnit === "" ? 0 : Number(costPerUnit);
+  if (!Number.isFinite(reorder) || reorder < 0 || !new Prisma.Decimal(reorder).mul(100).isInteger() ||
+      !Number.isFinite(cost) || cost < 0 || !new Prisma.Decimal(cost).mul(10000).isInteger()) {
+    return NextResponse.json({ error: "Reorder level or unit cost is invalid." }, { status: 400 });
+  }
 
   try {
-    const item = await prisma.$transaction(async (tx) => {
+    return await inventoryRequest(req, tenant.hotelId, tenant.userId, "OPENING_BALANCE", body, async (tx) => {
       const created = await tx.inventoryItem.create({
         data: {
           hotelId: tenant.hotelId,
@@ -82,8 +98,8 @@ export async function POST(req: Request) {
           category,
           unit,
           currentStock: opening,
-          reorderLevel: reorderLevel ?? 0,
-          costPerUnit: costPerUnit ?? 0,
+          reorderLevel: reorder,
+          costPerUnit: cost,
           supplier: supplier || null,
         },
       });
@@ -103,11 +119,10 @@ export async function POST(req: Request) {
         });
       }
 
-      return created;
+      return { status: 201, body: created };
     });
-
-    return NextResponse.json(item, { status: 201 });
-  } catch {
-    return NextResponse.json({ error: "An item with that SKU already exists." }, { status: 400 });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return NextResponse.json({ error: "An item with that SKU already exists." }, { status: 409 });
+    throw error;
   }
 }

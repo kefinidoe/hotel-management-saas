@@ -4,6 +4,16 @@ import type { PGlite } from "@electric-sql/pglite";
 
 export const MIGRATIONS_DIR = "prisma/migrations";
 
+/**
+ * Timeout for tests and hooks that apply the full migration chain to PGlite.
+ *
+ * This is a WASM Postgres running ~22 migration files; it is legitimately slow,
+ * and markedly slower on Windows (typically 5-7s versus ~2s on Linux), which the
+ * default 5s per-test budget does not cover. The budget is raised only where this
+ * work happens, so a genuine hang anywhere else still fails fast.
+ */
+export const PGLITE_MIGRATION_TIMEOUT_MS = 120_000;
+
 export function migrationDirectories(): string[] {
   return fs
     .readdirSync(MIGRATIONS_DIR)
@@ -12,10 +22,11 @@ export function migrationDirectories(): string[] {
 }
 
 /**
- * Executes the repository's real migration SQL in timestamp order against the
- * supplied isolated PGlite database. This small ledger mirrors deploy's
- * once-only behavior: completed migrations are skipped on a later invocation.
- * SQL itself is not mocked. Each migration and its ledger row commit together.
+ * Executes repository migration SQL in timestamp order against an in-memory
+ * PGlite database. This test-only, name-only ledger checks only skip-on-repeat
+ * behavior; it does not model Prisma's checksum, failure, rollback, or recovery
+ * semantics. SQL itself is not mocked. Each file and this test ledger row are
+ * wrapped in a PGlite transaction; this is not evidence of Prisma deploy atomicity.
  */
 export async function applyPendingMigrations(
   db: PGlite,

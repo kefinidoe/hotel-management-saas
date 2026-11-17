@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { RoomStatus } from "@prisma/client";
 import { X } from "lucide-react";
 import { roundMoney } from "@/lib/billing";
+import { apiErrorMessage, requestJson } from "@/lib/client-api";
 import {
   blocksGuestPlacement,
   isBookableToday,
@@ -28,6 +29,9 @@ type CheckInReservation = {
   roomId: string;
   roomNumbers: string;
   requiredAmount: number;
+  paidAmount?: number;
+  pricingLines?: { label: string; amount: number }[];
+  hasFolio?: boolean;
 };
 
 function money(value: number) {
@@ -51,29 +55,30 @@ export default function CheckInModal({
   const [newRoomId, setNewRoomId] = useState("");
   const [methods, setMethods] = useState<PaymentMethod[]>([]);
   const [methodId, setMethodId] = useState("");
-  const [amountPaid, setAmountPaid] = useState(String(reservation.requiredAmount));
+  const remaining = roundMoney(Math.max(0, reservation.requiredAmount - (reservation.paidAmount ?? 0)));
+  const [amountPaid, setAmountPaid] = useState(String(remaining));
   const [reference, setReference] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loadingMethods, setLoadingMethods] = useState(true);
+  const [methodLoadAttempt, setMethodLoadAttempt] = useState(0);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
+    setLoadingMethods(true);
+    setError(null);
 
     async function loadMethods() {
       try {
-        const response = await fetch("/api/payment-methods");
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Could not load payment methods.");
+        const data = await requestJson<PaymentMethod[]>("/api/payment-methods");
+        if (!Array.isArray(data)) throw new Error("The server returned an invalid payment-method list.");
         if (!cancelled) {
           setMethods(data);
           setMethodId(data[0]?.id ?? "");
         }
       } catch (loadError) {
         if (!cancelled) {
-          setError(
-            loadError instanceof Error ? loadError.message : "Could not load payment methods."
-          );
+          setError(apiErrorMessage(loadError, "Could not load payment methods."));
         }
       } finally {
         if (!cancelled) setLoadingMethods(false);
@@ -84,7 +89,7 @@ export default function CheckInModal({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [methodLoadAttempt]);
 
   // The room the guest is actually given: the reserved one unless the
   // receptionist moves them because it is not ready.
@@ -103,7 +108,7 @@ export default function CheckInModal({
 
   const numericPaid = Number(amountPaid);
   const previewPaid = Number.isFinite(numericPaid) && numericPaid >= 0 ? numericPaid : 0;
-  const balance = roundMoney(Math.max(0, reservation.requiredAmount - previewPaid));
+  const balance = roundMoney(Math.max(0, remaining - previewPaid));
   const paymentRequired = previewPaid > 0;
 
   async function submit(event: React.FormEvent) {
@@ -114,8 +119,8 @@ export default function CheckInModal({
       setError("Enter a valid amount paid.");
       return;
     }
-    if (numericPaid > reservation.requiredAmount) {
-      setError("Amount paid cannot exceed the required amount.");
+    if (numericPaid > remaining) {
+      setError("Amount paid cannot exceed the remaining amount.");
       return;
     }
     if (numericPaid > 0 && !methodId) {
@@ -125,7 +130,7 @@ export default function CheckInModal({
 
     setSubmitting(true);
     try {
-      const response = await fetch("/api/check-in", {
+      const data = await requestJson<{ ok: true; folioId: string }>("/api/check-in", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -136,14 +141,10 @@ export default function CheckInModal({
           reference,
         }),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Could not check in the guest.");
       onCheckedIn(data.folioId);
       onClose();
     } catch (submitError) {
-      setError(
-        submitError instanceof Error ? submitError.message : "Could not check in the guest."
-      );
+      setError(apiErrorMessage(submitError, "Could not check in the guest."));
     } finally {
       setSubmitting(false);
     }
@@ -225,11 +226,28 @@ export default function CheckInModal({
             </div>
           )}
 
+          {reservation.pricingLines && reservation.pricingLines.length > 0 && (
+            <div aria-label="Price breakdown" className="border border-border rounded-control divide-y divide-border">
+              {reservation.pricingLines.map((line, index) => (
+                <div key={index} className="flex justify-between gap-3 px-3 py-2 text-sm">
+                  <span>{line.label}</span>
+                  <span className="font-medium whitespace-nowrap">{money(line.amount)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="rounded-control border border-border bg-bg px-3 py-3 text-sm space-y-2">
             <div className="flex justify-between">
               <span className="text-text-secondary">Amount required</span>
               <span className="font-medium">{money(reservation.requiredAmount)}</span>
             </div>
+            {(reservation.paidAmount ?? 0) > 0 && (
+              <div className="flex justify-between">
+                <span className="text-text-secondary">Previously paid</span>
+                <span>{money(reservation.paidAmount ?? 0)}</span>
+              </div>
+            )}
             <div className="flex justify-between">
               <span className="text-text-secondary">Amount paid at check-in</span>
               <span>{money(previewPaid)}</span>
@@ -243,11 +261,12 @@ export default function CheckInModal({
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-1.5">Amount paid now (KSh)</label>
+            <label htmlFor="check-in-amount-paid" className="block text-sm font-medium mb-1.5">Amount paid now (KSh)</label>
             <input
+              id="check-in-amount-paid"
               type="number"
               min="0"
-              max={reservation.requiredAmount}
+              max={remaining}
               step="0.01"
               value={amountPaid}
               onChange={(event) => setAmountPaid(event.target.value)}
@@ -292,10 +311,26 @@ export default function CheckInModal({
             </>
           )}
 
+          {reservation.hasFolio && (
+            <p role="alert" className="text-sm text-danger">This reservation already has a folio and cannot be checked in again. Review the folio first.</p>
+          )}
+
           {error && (
-            <p className="text-sm text-danger bg-danger/5 border border-danger/20 rounded-control px-3 py-2">
-              {error}
-            </p>
+            <div role="alert" className="flex items-center justify-between gap-3 text-sm text-danger bg-danger/5 border border-danger/20 rounded-control px-3 py-2">
+              <span>{error}</span>
+              {!methods.length && !loadingMethods && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoadingMethods(true);
+                    setMethodLoadAttempt((attempt) => attempt + 1);
+                  }}
+                  className="underline"
+                >
+                  Retry
+                </button>
+              )}
+            </div>
           )}
 
           <div className="flex justify-end gap-2 pt-1">
@@ -305,7 +340,7 @@ export default function CheckInModal({
             <button
               type="submit"
               disabled={
-                submitting ||
+                submitting || reservation.hasFolio ||
                 (paymentRequired && (loadingMethods || !methodId)) ||
                 (!reservedRoomReady && !newRoomId)
               }

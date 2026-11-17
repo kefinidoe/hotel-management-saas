@@ -1,7 +1,10 @@
+import { readMutationBody, validateMutation, staffCreateSchema, initialPasswordSchema } from "@/lib/staff-settings-validation";
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
+import { recordAudit } from "@/lib/audit";
+import { pendingInvitationIds, recordInvitationCreated } from "@/lib/invitations";
 import { HotelRole, MembershipStatus } from "@prisma/client";
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -38,7 +41,6 @@ export async function GET() {
             name: true,
             email: true,
             phone: true,
-            department: true,
             isActive: true,
             lastLoginAt: true,
             createdAt: true,
@@ -50,6 +52,8 @@ export async function GET() {
       },
     });
 
+    const pending = await pendingInvitationIds(memberships.map((m) => m.id));
+
     const result = memberships.map((m) => ({
       id: m.id,
       userId: m.user.id,
@@ -57,8 +61,9 @@ export async function GET() {
       email: isManagement ? m.user.email : undefined,
       phone: isManagement ? m.user.phone : undefined,
       role: m.role,
-      department: isManagement ? m.user.department : undefined,
+      department: isManagement ? m.department : undefined,
       status: m.status,
+      invitationPending: pending.has(m.id),
       isActive: m.user.isActive && m.status === MembershipStatus.ACTIVE,
       lastLoginAt: isManagement && m.user.lastLoginAt ? m.user.lastLoginAt.toISOString() : null,
       createdAt: m.createdAt.toISOString(),
@@ -85,12 +90,8 @@ export async function POST(req: Request) {
   const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
   if (blocked) return blocked;
 
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
-  }
+  // Parse only to identify the rate-limit bucket; invalid attempts are still counted.
+  const body: any = await readMutationBody(req);
 
   const name = typeof body?.name === "string" ? body.name.trim() : "";
   const email = typeof body?.email === "string" ? body.email.trim().toLowerCase() : "";
@@ -98,6 +99,19 @@ export async function POST(req: Request) {
   const requestedRole = typeof body?.role === "string" ? body.role.trim() : "";
   const department = typeof body?.department === "string" ? body.department.trim() : null;
   const phone = typeof body?.phone === "string" ? body.phone.trim() : null;
+
+  // This endpoint creates invitations for existing accounts. Bound both the
+  // target email and the inviting actor before looking up the target account.
+  const { limitAuthRequest } = await import("@/lib/auth-rate-limit");
+  const limited = await limitAuthRequest(req, "invitationCreate", email, tenant.userId);
+  if (limited) return limited;
+
+  // Authorization for owner grants must precede request validation.
+  if (requestedRole === HotelRole.HOTEL_OWNER && tenant.role !== HotelRole.HOTEL_OWNER) {
+    return NextResponse.json({ error: "Only hotel owners can grant the HOTEL_OWNER role." }, { status: 403 });
+  }
+  const validation = validateMutation(req, staffCreateSchema, body);
+  if (validation.response) return validation.response;
 
   if (!name || name.length < 2 || name.length > 100) {
     return NextResponse.json(
@@ -110,11 +124,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "A valid email address is required." }, { status: 400 });
   }
 
-  if (!password || password.length < 8) {
-    return NextResponse.json(
-      { error: "Initial password must be at least 8 characters long." },
-      { status: 400 }
-    );
+  if (department && department.length > 100) {
+    return NextResponse.json({ error: "Department name must be 100 characters or fewer." }, { status: 400 });
   }
 
   // Role validation: Must be a legitimate HotelRole (never a platform role)
@@ -140,9 +151,19 @@ export async function POST(req: Request) {
     // Check if user account already exists globally
     const existingUser = await prisma.user.findFirst({
       where: { email: { equals: email, mode: "insensitive" } },
+      select: { id: true, name: true, email: true, phone: true, isActive: true },
     });
 
     if (existingUser) {
+      if (!existingUser.isActive) {
+        return NextResponse.json(
+          { error: "This account is inactive and cannot be added to the hotel." },
+          { status: 403 }
+        );
+      }
+
+      // Existing account credentials and global profile are never changed by
+      // adding a hotel membership. Only the new membership receives hotel data.
       // Check if user is already a member of this hotel
       const existingMembership = await prisma.hotelMembership.findUnique({
         where: {
@@ -160,24 +181,27 @@ export async function POST(req: Request) {
         );
       }
 
-      // Serialize the count and membership insertion under one hotel-scoped lock.
-      const { withUsageLimitLock } = await import("@/lib/entitlements");
-      const quotaResult = await withUsageLimitLock(tenant.hotelId, "maxStaff", 1, (tx) => tx.hotelMembership.create({
-        data: {
-          userId: existingUser.id,
-          hotelId: tenant.hotelId,
-          role: requestedRole as HotelRole,
-          status: MembershipStatus.ACTIVE,
-        },
-        include: { user: { select: { id: true, name: true, email: true } } },
-      }));
-      if (!quotaResult.allowed) {
-        return NextResponse.json(
-          { error: quotaResult.limit.code || "PLAN_LIMIT_EXCEEDED", message: quotaResult.limit.reason },
-          { status: quotaResult.limit.code === "SUBSCRIPTION_STATUS_UNAVAILABLE" || quotaResult.limit.code === "USAGE_LIMIT_UNAVAILABLE" ? 503 : 403 }
-        );
-      }
-      const newMembership = quotaResult.value;
+      // The account belongs to somebody who already works somewhere else, so an
+      // administrator may only *invite* it. The membership is created SUSPENDED
+      // (no access) and becomes ACTIVE when the invitee accepts — see
+      // lib/invitations.ts. Seat limits are enforced at acceptance, because an
+      // invitation does not occupy a seat.
+      const newMembership = await prisma.$transaction(async (tx) => {
+        const membership = await tx.hotelMembership.create({
+          data: {
+            userId: existingUser.id, hotelId: tenant.hotelId,
+            role: requestedRole as HotelRole, department: department || null,
+            status: MembershipStatus.SUSPENDED,
+          },
+          include: { user: { select: { id: true, name: true, email: true, phone: true } } },
+        });
+        await recordInvitationCreated({
+          hotelId: tenant.hotelId, membershipId: membership.id,
+          invitedUserId: existingUser.id, role: membership.role,
+          invitedByUserId: tenant.userId, client: tx,
+        });
+        return membership;
+      });
 
       return NextResponse.json(
         {
@@ -185,13 +209,23 @@ export async function POST(req: Request) {
           userId: newMembership.user.id,
           name: newMembership.user.name,
           email: newMembership.user.email,
+          phone: newMembership.user.phone,
           role: newMembership.role,
+          department: newMembership.department,
           status: newMembership.status,
-          message: "Existing user added to hotel workspace.",
+          invitationPending: true,
+          message:
+            "Invitation sent. The account holder must accept it before this hotel appears in their workspace.",
         },
-        { status: 201 }
+        { status: 202 }
       );
     }
+
+    // A brand-new account needs an initial password. An existing account is only
+    // invited, so this field is ignored for it — requiring it would push one
+    // administrator into choosing a password for somebody else's account.
+    const passwordValidation = validateMutation(req, initialPasswordSchema, { password });
+    if (passwordValidation.response) return passwordValidation.response;
 
     // Create new User and HotelMembership atomically
     const passwordHash = await bcrypt.hash(password, 10);
@@ -199,13 +233,14 @@ export async function POST(req: Request) {
     const { withUsageLimitLock } = await import("@/lib/entitlements");
     const quotaResult = await withUsageLimitLock(tenant.hotelId, "maxStaff", 1, async (tx) => {
       const newUser = await tx.user.create({
-        data: { name, email, phone, department, passwordHash, isActive: true },
+        data: { name, email, phone, passwordHash, isActive: true },
       });
       const newMembership = await tx.hotelMembership.create({
         data: {
           userId: newUser.id,
           hotelId: tenant.hotelId,
           role: requestedRole as HotelRole,
+          department: department || null,
           status: MembershipStatus.ACTIVE,
         },
       });
@@ -219,13 +254,28 @@ export async function POST(req: Request) {
     }
     const result = quotaResult.value;
 
+    await recordAudit({
+      hotelId: tenant.hotelId,
+      userId: tenant.userId,
+      action: "STAFF_MEMBER_ADDED",
+      entity: "HOTEL_MEMBERSHIP",
+      entityId: result.membership.id,
+      metadata: {
+        targetUserId: result.user.id,
+        role: result.membership.role,
+        existingAccount: false,
+      },
+    });
+
     return NextResponse.json(
       {
         id: result.membership.id,
         userId: result.user.id,
         name: result.user.name,
         email: result.user.email,
+        phone: result.user.phone,
         role: result.membership.role,
+        department: result.membership.department,
         status: result.membership.status,
         message: "Staff member created and assigned to hotel.",
       },

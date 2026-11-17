@@ -2,7 +2,9 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import { requirePlatformRole, TenantAuthError } from "@/lib/tenant-context";
 import { PlatformRole } from "@prisma/client";
-import { Shield, Building2, LogOut, ArrowLeft, AlertTriangle } from "lucide-react";
+import { Building2, LogOut, ArrowLeft, AlertTriangle } from "lucide-react";
+import HotelFlowBrand from "@/components/HotelFlowBrand";
+import { PRODUCT_NAME } from "@/lib/brand";
 
 export const dynamic = "force-dynamic";
 
@@ -83,12 +85,10 @@ export default async function PlatformLayout({
       <header className="h-16 border-b border-border bg-surface sticky top-0 z-20 px-6 flex items-center justify-between">
         <div className="flex items-center gap-4">
           <Link href="/platform" className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-control bg-primary-500 text-white flex items-center justify-center font-bold">
-              <Shield size={18} />
-            </div>
+            <HotelFlowBrand iconOnly iconClassName="h-8 w-8 rounded-control" />
             <div>
               <span className="font-bold text-base text-text-primary tracking-tight">
-                Axis SaaS Platform
+                {PRODUCT_NAME} Platform
               </span>
               <span className="text-xs text-text-secondary ml-2 font-mono uppercase">
                 Admin Console

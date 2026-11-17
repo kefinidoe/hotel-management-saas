@@ -1,0 +1,108 @@
+{
+  "base": "http://127.0.0.1:3000",
+  "generatedAt": "2026-10-31T16:11:12.837Z",
+  "hotel": "Riverside Grand Hotel",
+  "currency": "KES",
+  "passed": 13,
+  "failed": 0,
+  "screenshots": [
+    "/home/user/hotel-management-saas/docs/evidence/reservations/browser-01-rate-populated.png",
+    "/home/user/hotel-management-saas/docs/evidence/reservations/browser-02-button-guarded.png",
+    "/home/user/hotel-management-saas/docs/evidence/reservations/browser-03-ready-to-submit.png",
+    "/home/user/hotel-management-saas/docs/evidence/reservations/browser-04-created.png",
+    "/home/user/hotel-management-saas/docs/evidence/reservations/browser-05-after-reload.png"
+  ],
+  "results": [
+    {
+      "id": "api-receptionist-create",
+      "description": "receptionist creates a reservation on a 'Standard' room type",
+      "status": "PASS",
+      "ms": 0,
+      "detail": "RES-2026-00011"
+    },
+    {
+      "id": "api-rate-persisted",
+      "description": "stored nightly rate is the room type's configured rate",
+      "status": "PASS",
+      "ms": 14,
+      "detail": "4500.00 in a6d83259-5db1-4b30-bf82-631b408e0ce1"
+    },
+    {
+      "id": "api-no-double-booking",
+      "description": "the same room and dates cannot be sold twice",
+      "status": "PASS",
+      "ms": 0,
+      "detail": "409 Room is already booked for part of that date range (RES-2026-00011)."
+    },
+    {
+      "id": "api-tenant-isolation",
+      "description": "a room in another hotel is refused",
+      "status": "PASS",
+      "ms": 0,
+      "detail": "404 Room not found in this hotel."
+    },
+    {
+      "id": "api-no-price-swap",
+      "description": "another type's cheaper tariff cannot price this room",
+      "status": "PASS",
+      "ms": 0,
+      "detail": "400 The selected tariff does not match the occupancy and meal plan."
+    },
+    {
+      "id": "api-persisted",
+      "description": "the new reservation is returned by the list endpoint",
+      "status": "PASS",
+      "ms": 0,
+      "detail": "RES-2026-00011"
+    },
+    {
+      "id": "api-owner-hotel-selected",
+      "description": "owner selects the Riverside workspace explicitly",
+      "status": "PASS",
+      "ms": 0,
+      "detail": "active hotel set"
+    },
+    {
+      "id": "api-owner-create",
+      "description": "the owner can create a reservation too",
+      "status": "PASS",
+      "ms": 0,
+      "detail": "RES-2026-00012"
+    },
+    {
+      "id": "browser-rate-populated",
+      "description": "form shows a rate for room 901 (Standard)",
+      "status": "PASS",
+      "ms": 0,
+      "detail": "Ksh 4,500.00"
+    },
+    {
+      "id": "browser-rate-updates",
+      "description": "choosing another room re-prices the stay",
+      "status": "PASS",
+      "ms": 0,
+      "detail": "Ksh 4,500.00 -> Ksh 8,500.00"
+    },
+    {
+      "id": "browser-button-guarded",
+      "description": "submit stays disabled until the guest is entered",
+      "status": "PASS",
+      "ms": 0,
+      "detail": "disabled"
+    },
+    {
+      "id": "browser-created",
+      "description": "reservation created from the form",
+      "status": "PASS",
+      "ms": 10,
+      "detail": "RES-2026-00013 @ 8500.00"
+    },
+    {
+      "id": "browser-persisted",
+      "description": "reservation is still on the calendar after a reload",
+      "status": "PASS",
+      "ms": 1,
+      "detail": "visible"
+    }
+  ]
+}

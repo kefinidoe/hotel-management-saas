@@ -23,6 +23,11 @@ export const PlatformRole = {
 
 vi.doMock("server-only", () => ({}));
 
+// This suite mocks persistence; exercise staff behavior with an allowed limiter
+// unless a test explicitly supplies a limiter response.
+const mockLimitAuthRequest = vi.fn();
+vi.doMock("@/lib/auth-rate-limit", () => ({ limitAuthRequest: mockLimitAuthRequest }));
+
 vi.doMock("bcryptjs", () => ({
   default: {
     hash: async (pw: string) => `hashed-${pw}`,
@@ -130,6 +135,7 @@ function resetDB(): DBState {
     userId: "user-a-owner",
     hotelId: "hotel-a",
     role: HotelRole.HOTEL_OWNER,
+    department: "Executive",
     status: MembershipStatus.ACTIVE,
     createdAt: new Date(),
   });
@@ -146,6 +152,7 @@ function resetDB(): DBState {
     userId: "user-a-recep",
     hotelId: "hotel-a",
     role: HotelRole.RECEPTIONIST,
+    department: "Front Desk",
     status: MembershipStatus.ACTIVE,
     createdAt: new Date(),
   });
@@ -156,6 +163,7 @@ function resetDB(): DBState {
     name: "Bob Owner",
     email: "bob@hotelb.com",
     department: "Executive",
+    passwordHash: "hashed-bobs-original-password",
     isActive: true,
   });
   memberships.set("mem-b-owner", {
@@ -163,6 +171,7 @@ function resetDB(): DBState {
     userId: "user-b-owner",
     hotelId: "hotel-b",
     role: HotelRole.HOTEL_OWNER,
+    department: "Executive",
     status: MembershipStatus.ACTIVE,
     createdAt: new Date(),
   });
@@ -330,6 +339,7 @@ vi.doMock("@/lib/prisma", () => ({
         // The test double cannot exercise PostgreSQL advisory locks, but it does
         // execute the real quota check and its writes through this transaction client.
         $queryRaw: async () => [],
+        auditLog: { create: async ({ data }: any) => ({ ...data }) },
         user: {
           create: async ({ data }: any) => {
             const id = data.id || `user-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -379,6 +389,7 @@ let deleteStaffRoute: any = null;
 
 describe("Phase 5: Multi-Tenant Staff Management", () => {
   beforeEach(async () => {
+    mockLimitAuthRequest.mockReset().mockResolvedValue(null);
     db = resetDB();
     mockTenantContext = {
       hotelId: "hotel-a",
@@ -411,6 +422,35 @@ describe("Phase 5: Multi-Tenant Staff Management", () => {
   });
 
   describe("2. POST /api/staff (Adding Staff & Role Privilege Checks)", () => {
+    it("returns 503 without changing staff when the limiter is unavailable", async () => {
+      mockLimitAuthRequest.mockResolvedValueOnce(CustomNextResponse.json({ error: "RATE_LIMIT_UNAVAILABLE" }, { status: 503 }));
+      const before = { users: db.users.size, memberships: db.memberships.size };
+      const req = new Request("http://localhost:3000/api/staff", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Test Staff", email: "staff@example.test", role: "WAITER" }),
+      });
+      const res = await postStaffRoute(req);
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: "RATE_LIMIT_UNAVAILABLE" });
+      expect(mockLimitAuthRequest).toHaveBeenCalledWith(req, "invitationCreate", "staff@example.test", "user-a-owner");
+      expect({ users: db.users.size, memberships: db.memberships.size }).toEqual(before);
+    });
+
+    it("returns 429 with Retry-After without changing staff when limited", async () => {
+      mockLimitAuthRequest.mockResolvedValueOnce(CustomNextResponse.json({ error: "RATE_LIMITED" }, { status: 429, headers: { "Retry-After": "60" } }));
+      const before = { users: db.users.size, memberships: db.memberships.size };
+      const req = new Request("http://localhost:3000/api/staff", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Test Staff", email: "staff@example.test", role: "WAITER" }),
+      });
+      const res = await postStaffRoute(req);
+      expect(res.status).toBe(429);
+      expect(res.headers.get("Retry-After")).toBe("60");
+      expect(await res.json()).toEqual({ error: "RATE_LIMITED" });
+      expect(mockLimitAuthRequest).toHaveBeenCalledWith(req, "invitationCreate", "staff@example.test", "user-a-owner");
+      expect({ users: db.users.size, memberships: db.memberships.size }).toEqual(before);
+    });
+
     it("successfully creates and assigns a new staff member to active hotel", async () => {
       const req = new Request("http://localhost:3000/api/staff", {
         method: "POST",
@@ -436,6 +476,62 @@ describe("Phase 5: Multi-Tenant Staff Management", () => {
       );
       expect(membership).toBeDefined();
       expect(membership.role).toBe("WAITER");
+      expect(membership.department).toBe("Kitchen");
+      expect(db.users.get(data.userId).department).toBeUndefined();
+    });
+
+    it("invites a shared existing account without changing global credentials or Hotel B membership", async () => {
+      mockTenantContext.role = HotelRole.HOTEL_ADMIN;
+      const userBefore = { ...db.users.get("user-b-owner") };
+      const hotelBMembershipBefore = { ...db.memberships.get("mem-b-owner") };
+      const req = new Request("http://localhost:3000/api/staff", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "Bob Owner",
+          email: "bob@hotelb.com",
+          password: "MaliciousResetPassword123!",
+          role: "WAITER",
+          department: "Kitchen",
+        }),
+      });
+
+      const res = await postStaffRoute(req);
+      // An existing account is invited, not granted access: the membership is
+      // created SUSPENDED and only the account holder can accept it.
+      expect(res.status).toBe(202);
+      const data = await res.json();
+      expect(data.invitationPending).toBe(true);
+      const hotelAMembership = db.memberships.get(data.id);
+      expect(hotelAMembership).toMatchObject({
+        userId: "user-b-owner",
+        hotelId: "hotel-a",
+        role: "WAITER",
+        department: "Kitchen",
+        status: "SUSPENDED",
+      });
+      expect(db.users.get("user-b-owner")).toEqual(userBefore);
+      expect(db.memberships.get("mem-b-owner")).toEqual(hotelBMembershipBefore);
+
+      const passwordReset = new Request(`http://localhost:3000/api/staff/${data.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ newPassword: "AnotherAdminChosenPassword123!" }),
+      });
+      const passwordResetRes = await patchStaffRoute(passwordReset, { params: Promise.resolve({ id: data.id }) });
+      expect(passwordResetRes.status).toBe(403);
+      expect(db.users.get("user-b-owner").passwordHash).toBe(userBefore.passwordHash);
+
+      const membershipEdit = new Request(`http://localhost:3000/api/staff/${data.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role: "MANAGER", department: "Service" }),
+      });
+      const membershipEditRes = await patchStaffRoute(membershipEdit, { params: Promise.resolve({ id: data.id }) });
+      expect(membershipEditRes.status).toBe(200);
+      expect(db.memberships.get(data.id)).toMatchObject({ role: "MANAGER", department: "Service" });
+      expect(db.users.get("user-b-owner")).toEqual(userBefore);
+      expect(db.memberships.get("mem-b-owner")).toEqual(hotelBMembershipBefore);
     });
 
     it("fails closed when subscription storage is unavailable", async () => {

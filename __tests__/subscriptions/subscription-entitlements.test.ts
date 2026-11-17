@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest";
+import { pricingModelStubs } from "../fixtures/pricing-prisma-double";
 
 vi.mock("@prisma/client", () => ({
   HotelRole: {
@@ -19,6 +20,7 @@ vi.mock("@prisma/client", () => ({
     PLATFORM_SUPPORT: "PLATFORM_SUPPORT",
     PLATFORM_BILLING: "PLATFORM_BILLING",
   },
+  RoomStatus: { AVAILABLE: "AVAILABLE", RESERVED: "RESERVED", OCCUPIED: "OCCUPIED", DIRTY: "DIRTY", CLEANING: "CLEANING", READY: "READY", MAINTENANCE: "MAINTENANCE", OUT_OF_ORDER: "OUT_OF_ORDER" },
   Prisma: {
     TransactionIsolationLevel: { Serializable: "Serializable" },
     PrismaClientKnownRequestError: class PrismaClientKnownRequestError extends Error {
@@ -288,6 +290,10 @@ vi.doMock("@/lib/auth", () => ({
 
 vi.doMock("@/lib/prisma", () => ({
   prisma: {
+    // Pricing models a real client always exposes. The doubles below that define
+    // their own `hotel` / `roomType` override these entries; the rest stay empty,
+    // which is a hotel with no configured pricing rules (LEGACY_BASE_RATE).
+    ...pricingModelStubs(),
     user: {
       findUnique: async ({ where }: any) => {
         if (where?.id) return db.users.get(where.id) || null;
@@ -621,6 +627,13 @@ vi.doMock("@/lib/prisma", () => ({
         folioItem: {
           create: async ({ data }: any) => ({ id: "folio-item-1", ...data }),
         },
+        order: {
+          findUnique: async () => null,
+          create: async ({ data }: any) => ({ id: "room-charge-order-1", ...data }),
+        },
+        orderItem: {
+          create: async ({ data }: any) => ({ id: "room-charge-order-item-1", ...data }),
+        },
         recipe: {
           findMany: async () => [],
         },
@@ -842,11 +855,26 @@ describe("Phase 7: SaaS Subscription Foundation and Plan Enforcement", () => {
       expect(json.policy.pastDueGracePeriodDays).toBe(7);
     });
 
+    it("restricts detailed hotel subscription data to owners and administrators", async () => {
+      mockCurrentSession = { user: { id: "user-a-owner" } };
+      mockActiveCookie = "hotel-a";
+      db.memberships.set("mem-a-owner", {
+        ...db.memberships.get("mem-a-owner"),
+        role: HotelRole.RECEPTIONIST,
+      });
+      const { GET } = await import("@/app/api/hotel/subscription/route");
+
+      const response = await GET();
+
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({ error: "You don't have permission to do that." });
+    });
+
     it("retains every core module across all active room bands", () => {
       const coreModules = ["RESERVATIONS", "FOLIOS", "HOUSEKEEPING", "RESTAURANT_POS", "INVENTORY", "EXPENSES", "MAINTENANCE", "REPORTS"];
       for (const plan of getAllPlans(true)) {
-        for (const module of coreModules) {
-          expect(plan.modules, `${plan.id} includes ${module}`).toContain(module);
+        for (const moduleName of coreModules) {
+          expect(plan.modules, `${plan.id} includes ${moduleName}`).toContain(moduleName);
         }
       }
     });
@@ -1123,7 +1151,10 @@ describe("Phase 7: SaaS Subscription Foundation and Plan Enforcement", () => {
 
       const req = new Request("http://localhost/api/restaurant/charge-to-room", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": "subscription-test-charge-room-001",
+        },
         body: JSON.stringify({ folioId: "fol-1", items: [{ menuItemId: "mi-1", quantity: 1, price: 100 }] }),
       });
 

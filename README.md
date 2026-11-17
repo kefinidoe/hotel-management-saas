@@ -1,4 +1,36 @@
-# Hotel Management System — Step 1: Scaffold + Design System + Database Schema
+# Hotel Management SaaS
+
+## Safe local frontend-only preview (no database)
+
+The login screen and unauthenticated homepage can be previewed without a database. In PowerShell, from the project folder, run:
+
+```powershell
+$env:DATABASE_URL = ''
+$env:DIRECT_URL = ''
+$env:NEXTAUTH_URL = 'http://localhost:3000'
+$bytes = New-Object byte[] 32
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+$rng.GetBytes($bytes)
+$env:NEXTAUTH_SECRET = [Convert]::ToBase64String($bytes)
+$rng.Dispose()
+npm run dev
+```
+
+The empty database URL values take precedence over any `.env*` values for this process. Prisma's safety guard remains enabled: with no database URL it does not validate or connect to a database. The random NextAuth secret is local-only and does not create a user or authenticate anyone. Do not expect dashboard/business data in this mode; protected pages return to login, and database-backed API actions return an unavailable response rather than claiming persistence. The login, registration, and onboarding screens can still be inspected, but their database actions cannot succeed offline.
+
+Stop the dev server with `Ctrl+C`. To clear these process-scoped values afterward, run:
+
+```powershell
+'DATABASE_URL', 'DIRECT_URL', 'NEXTAUTH_URL', 'NEXTAUTH_SECRET' | ForEach-Object {
+  Remove-Item "Env:$_" -ErrorAction SilentlyContinue
+}
+```
+
+## Database-backed local development
+
+Only use a separately provisioned local PostgreSQL database and credentials. Never point this project at the live Axis Hotel system or any unverified SaaS/Supabase database. `SAAS_ENVIRONMENT` must be exactly `saas`; `SAAS_DATABASE_IDENTIFIER` must be the Supabase **project reference** (20 lowercase characters, for this project `jhablmqphfcjwealyxxr`) and must match the configured target as enforced by `lib/db-safety-guard.ts`. A database name is not accepted as identity — every Supabase project's database is called `postgres`, so it would match any project. Identifier matching is only a guardrail, not proof of ownership, environment, or migration history. Do not satisfy the guard by copying an unknown or production URL into the environment.
+
+The migration history has been reviewed and the deployment path is documented in `docs/migration-strategy.md`, with the rehearsal evidence in `docs/saas-migration-rehearsal.md`. The deployed database has **no Prisma ledger**, so it must be adopted before it is deployed to: run `npm run migration:adopt` (dry run, read-only) first and follow the runbook. Never run `prisma migrate deploy` against it before that. All Prisma commands that can reach a database run through `scripts/prisma-safe.mjs` (`npm run prisma:deploy`, `npm run prisma:migrate`, `npm run prisma:studio`), which loads `.env`, binds both URLs to the project reference, and refuses `migrate dev`, `migrate reset`, `db push`, and destructive flags against a remote database. Do not run `prisma migrate dev`, `prisma db push`, `migrate reset`, seed, cleanup, backup, restore, or password-reset operations against any target that has not been verified and authorized. **A hand-typed `npx prisma ...` does not pass through the wrapper** — Prisma 5.x has no hook for that — so use the npm scripts and read [`docs/database-operation-policy.md`](docs/database-operation-policy.md) before any remote operation. The CLI cleanup tool now requires a verified database guard plus matching `--hotel-id` and `--confirm-hotel-id`; it scopes changes to that hotel and wraps them in one transaction. Backup/restore additionally match the declared target identifier, and restore requires an exact `--confirm-target`. These are guardrails only, not proof a target is safe. Database-backed authentication, APIs, and dashboard routes are not available in the frontend-only preview above.
 
 ## What's in this step
 - Next.js + TypeScript project scaffold
@@ -8,43 +40,50 @@
   reservations, folios, folio items, payments, housekeeping, maintenance,
   restaurant menu, inventory, expenses, notifications, audit log
 
-## How to run this in VS Code
+## Run locally
 
-1. **Install Node.js** (v18+) if you don't have it: https://nodejs.org
+1. Install Node.js (v18+) if needed: https://nodejs.org.
+2. Open this folder in VS Code and install dependencies using the repository's lockfile.
+3. For an offline frontend preview, follow **Safe local frontend-only preview (no database)** above. Do not copy a database URL from another environment.
+4. Database-backed testing requires a separately provisioned local PostgreSQL instance. Apply the reviewed chain in `prisma/migrations` in order, or run `prisma migrate deploy` against a *fresh* local database. Do not run `prisma migrate dev`, `prisma db push`, or seed scripts against an existing or shared database; for a database that already has a schema but no ledger, use the adoption runbook in `docs/migration-strategy.md`.
 
-2. **Open this folder in VS Code**, then open a terminal (`` Ctrl+` ``) and run:
-   ```bash
-   npm install
-   ```
+## Trying the product end to end
 
-3. **Set up PostgreSQL.** Easiest options:
-   - Install Postgres locally, or
-   - Use a free hosted instance (e.g. Neon.tech or Supabase) — copy the
-     connection string they give you.
+Two complete demo hotels (18 staff accounts across every role) can be created on a separate, disposable
+database — nothing to do with production or any live system:
 
-4. **Create your `.env` file:**
-   ```bash
-   cp .env.example .env
-   ```
-   Then paste your real database URL into `DATABASE_URL`.
+```bash
+node scripts/owner-test-env.mjs setup    # PostgreSQL + migrations + demo data (once)
+node scripts/owner-test-env.mjs app      # build if needed, then start on http://localhost:3000
+node scripts/owner-test-env.mjs reset    # wipe the demo data and re-seed
+```
 
-5. **Create the database tables from the schema:**
-   ```bash
-   npx prisma migrate dev --name init
-   ```
-   This reads `prisma/schema.prisma` and creates all the tables in Postgres.
+Credentials are written to `.owner-test/CREDENTIALS.md` (Git-ignored, mode 600), and the testing script
+is [docs/OWNER-ACCEPTANCE-TESTING.md](docs/OWNER-ACCEPTANCE-TESTING.md).
 
-6. **Run the app:**
-   ```bash
-   npm run dev
-   ```
-   Open http://localhost:3000 — you should see a card confirming the design
-   system is wired up correctly.
+## Verifying a change
 
-7. **(Optional) Browse your database visually:**
-   ```bash
-   npx prisma studio
-   ```
+```bash
+npx tsc --noEmit && npm run lint          # types and lint
+env -u DATABASE_URL -u SAAS_ENVIRONMENT -u SAAS_DATABASE_IDENTIFIER -u DIRECT_URL \
+  npm run test:run                        # unit + integration (vitest)
+npm run build                             # production build
+node scripts/e2e-smoke.mjs --base http://127.0.0.1:3000 --json          # 46 HTTP checks
+npm run test:browser -- --base http://127.0.0.1:3000 \
+  --out docs/evidence/browser --json docs/evidence/browser-results.json # 25 browser steps
+npm run db:integrity -- --json            # 49 database checks after a migration
+npm run native-engine:verify -- --json    # native Prisma engine: PASS/FAIL/BLOCKED
+```
+
+The browser suite needs a Chromium: it uses `@sparticuz/chromium` (bundled, unpacked from its own
+archives) through `puppeteer-core`, so it runs without a system Chrome. Every step writes a screenshot,
+and a failure writes the screenshot, the page HTML and the network log. What the round-13 run found —
+and how to read the PASS/FAIL/BLOCKED verdicts — is in
+[docs/production-readiness-report-round13.md](docs/production-readiness-report-round13.md); the two
+checks that need access this environment does not have are in
+[docs/handoff-production-verification.md](docs/handoff-production-verification.md).
+
+The login screen can be inspected without a database. Authentication, registration, dashboard data, and operational modules require a configured local database and are intentionally unavailable in frontend-only mode. No successful sign-in or business data is fabricated.
 
 ## What's next (Step 2)
 - Authentication (NextAuth) + role-based access

@@ -12,5 +12,8 @@ export async function GET() {
   const blocked = await requireModule(tenant.hotelId, "RESTAURANT_POS");
   if (blocked) return blocked;
 
-  return NextResponse.json(await getRestaurantOpenFolios(tenant.hotelId));
+  const response = NextResponse.json(await getRestaurantOpenFolios(tenant.hotelId));
+  response.headers.set("X-Active-Hotel-Id", tenant.hotelId);
+  response.headers.set("Cache-Control", "no-store");
+  return response;
 }

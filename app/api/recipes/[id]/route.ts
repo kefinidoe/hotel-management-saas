@@ -111,6 +111,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
         await tx.recipeIngredient.createMany({
           data: ingredients.map((ingredient) => ({
             recipeId: id,
+            hotelId,
             inventoryItemId: ingredient.inventoryItemId,
             quantity: ingredient.quantity,
           })),

@@ -1,5 +1,9 @@
+import { validateIdempotencyKey, validateFinancialMutation, expenseSchema, checkInventoryContext } from "@/lib/financial-mutation-validation";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { inventoryRequest } from "@/lib/inventory-idempotency";
+import { parseMoney } from "@/lib/billing";
+import { hasRole } from "@/lib/permissions";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 
 export async function GET() {
@@ -12,8 +16,8 @@ export async function GET() {
   if (blocked) return blocked;
 
   const expenses = await prisma.expense.findMany({
-    where: { hotelId: tenant.hotelId },
-    include: { requestedBy: true },
+    where: { hotelId: tenant.hotelId, ...(hasRole(tenant.role, ROLE_GROUPS.FINANCIAL_REPORTS) ? {} : { requestedById: tenant.userId }) },
+    include: { requestedBy: { select: { name: true, memberships: { where: { hotelId: tenant.hotelId }, select: { id: true }, take: 1 } } } },
     orderBy: { createdAt: "desc" },
     take: 200,
   });
@@ -28,7 +32,7 @@ export async function GET() {
       supplier: e.supplier,
       reference: e.reference,
       status: e.status,
-      requestedByName: e.requestedBy.name,
+      requestedByName: e.requestedBy.memberships.length ? e.requestedBy.name : "Former staff",
       createdAt: e.createdAt,
     }))
   );
@@ -47,7 +51,15 @@ export async function POST(req: Request) {
   const blocked = await requireModule(tenant.hotelId, "EXPENSES");
   if (blocked) return blocked;
 
-  const body = await req.json();
+  const contextMismatch = checkInventoryContext(req, tenant.hotelId, tenant.userId);
+  if (contextMismatch) return contextMismatch;
+
+  const validation = await validateFinancialMutation(req, expenseSchema, {});
+  if (validation.response) return validation.response;
+  const body = validation.data;
+  const invalidKey = validateIdempotencyKey(req.headers.get("idempotency-key") || req.headers.get("x-idempotency-key"), "inventory");
+  if (invalidKey) return invalidKey;
+
   const { category, description, amount, paymentMethod, supplier, reference } = body as {
     category: string;
     description: string;
@@ -57,19 +69,23 @@ export async function POST(req: Request) {
     reference?: string;
   };
 
-  if (!category || !description || !amount || amount <= 0 || !paymentMethod) {
+  let validAmount: number;
+  try { validAmount = parseMoney(amount, "Expense amount"); } catch { return NextResponse.json({ error: "Expense amount is invalid." }, { status: 400 }); }
+  if (![category, description, paymentMethod].every((value) => typeof value === "string" && value.trim()) ||
+      (supplier != null && typeof supplier !== "string") || (reference != null && typeof reference !== "string")) {
     return NextResponse.json(
       { error: "Category, description, amount, and payment method are required." },
       { status: 400 }
     );
   }
 
-  const expense = await prisma.expense.create({
+  return inventoryRequest(req, tenant.hotelId, tenant.userId, "EXPENSE_CREATE", body, async (tx) => {
+  const expense = await tx.expense.create({
     data: {
       hotelId: tenant.hotelId,
       category,
       description,
-      amount,
+      amount: validAmount,
       paymentMethod,
       supplier: supplier || null,
       reference: reference || null,
@@ -78,5 +94,6 @@ export async function POST(req: Request) {
     },
   });
 
-  return NextResponse.json(expense, { status: 201 });
+  return { status: 201, body: expense };
+  });
 }

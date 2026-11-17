@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { pricingModelStubs } from "../fixtures/pricing-prisma-double";
 
 export const HotelRole = {
   HOTEL_OWNER: "HOTEL_OWNER",
@@ -223,8 +224,15 @@ let db: TestDB;
 
 vi.doMock("@/lib/prisma", () => ({
   prisma: {
+    // A real client always exposes the pricing models. Without them the pricing
+    // reader now fails closed (503) instead of pricing from base rates silently,
+    // so the double has to look like a real client: an empty configuration is a
+    // hotel that never opened the Pricing page.
+    ...pricingModelStubs(),
     $transaction: async (fn: any) => {
       const tx = {
+        ...pricingModelStubs(),
+        hotel: { findUnique: async ({ where }: any) => db.hotels.has(where.id) ? { useModularPricing: false } : null },
         $queryRaw: async (query: any, ...values: any[]) => {
           const parts = Array.isArray(query) ? query : [query];
           const rendered = parts.map((p: any, i: number) => `${p}${values[i] !== undefined ? values[i] : ""}`).join("");
@@ -271,7 +279,13 @@ vi.doMock("@/lib/prisma", () => ({
             if (data.rooms?.create) {
               for (const r of data.rooms.create) {
                 const rrId = `rr-${Date.now()}`;
-                db.reservationRooms.set(rrId, { id: rrId, reservationId: id, roomId: r.roomId, rate: r.rate });
+                db.reservationRooms.set(rrId, {
+                  id: rrId,
+                  reservationId: id,
+                  roomId: r.roomId,
+                  hotelId: created.hotelId,
+                  rate: r.rate,
+                });
               }
             }
             return created;
@@ -343,6 +357,8 @@ vi.doMock("@/lib/prisma", () => ({
               if (!res) return false;
               if (where?.reservation?.hotelId && res.hotelId !== where.reservation.hotelId) return false;
               if (where?.reservation?.status?.notIn && where.reservation.status.notIn.includes(res.status)) return false;
+              if (where?.reservation?.status?.in && !where.reservation.status.in.includes(res.status)) return false;
+              if (where?.reservation?.id?.not && res.id === where.reservation.id.not) return false;
               return true;
             }).map((rr) => ({ ...rr, reservation: db.reservations.get(rr.reservationId) }));
           },
@@ -594,6 +610,9 @@ describe("Phase 4: Multi-Tenant Reservation & Stay Security Hardening", () => {
       const saved = db.reservations.get(data.id);
       expect(saved).toBeDefined();
       expect(saved.hotelId).toBe("hotel-a"); // Strictly bound to tenant.hotelId
+      expect(saved.rooms.create[0]).not.toHaveProperty("hotelId");
+      const createdRoom = Array.from(db.reservationRooms.values()).find((room) => room.reservationId === data.id);
+      expect(createdRoom).toMatchObject({ reservationId: data.id, roomId: "room-a-101", hotelId: "hotel-a" });
     });
   });
 
@@ -682,6 +701,17 @@ describe("Phase 4: Multi-Tenant Reservation & Stay Security Hardening", () => {
       ).rejects.toThrow("The room you selected was not found in this hotel.");
     });
 
+    it("permits reassigning check-in to a cleaned room with an overlapping checked-out stay", async () => {
+      db.reservations.set("prior", { id: "prior", hotelId: "hotel-a", code: "PRIOR", status: "CHECKED_OUT", checkInDate: new Date("2026-11-17"), checkOutDate: new Date("2026-11-18") });
+      db.reservationRooms.set("prior-room", { id: "prior-room", reservationId: "prior", roomId: "room-a-101", rate: 3500 });
+      db.rooms.set("room-a-102", { ...db.rooms.get("room-a-101"), id: "room-a-102", number: "102" });
+      db.reservations.set("incoming", { id: "incoming", hotelId: "hotel-a", guestId: "guest-a-1", status: "CONFIRMED", checkInDate: new Date("2026-11-17"), checkOutDate: new Date("2026-11-18") });
+      db.reservationRooms.set("incoming-room", { id: "incoming-room", reservationId: "incoming", roomId: "room-a-102", rate: 3500 });
+      await executeCheckIn(mockCurrentTenant, { reservationId: "incoming", newRoomId: "room-a-101" });
+      expect(db.reservationRooms.get("incoming-room").roomId).toBe("room-a-101");
+      expect(db.reservations.get("incoming").status).toBe("CHECKED_IN");
+    });
+
     it("successfully checks in same-hotel reservation and creates hotel-scoped folio", async () => {
       const resA = {
         id: "res-a-valid",
@@ -723,6 +753,36 @@ describe("Phase 4: Multi-Tenant Reservation & Stay Security Hardening", () => {
           reservationId: "res-b-999",
         })
       ).rejects.toThrow("Reservation not found.");
+    });
+
+    it("allows a new walk-in for the same date after early checkout and room readiness", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-11-17T15:00:00Z"));
+      try {
+        const prior = { id: "early-stay", code: "EARLY", hotelId: "hotel-a", guestId: "guest-a-1", checkInDate: new Date("2026-11-17T00:00:00Z"), checkOutDate: new Date("2026-11-18T00:00:00Z"), status: "CHECKED_IN" };
+        db.reservations.set(prior.id, prior);
+        db.rooms.get("room-a-101").status = "OCCUPIED";
+        db.reservationRooms.set("rr-early", { id: "rr-early", reservationId: prior.id, roomId: "room-a-101", rate: 3500 });
+        db.folios.set("folio-early", { id: "folio-early", hotelId: "hotel-a", reservationId: prior.id, isClosed: false });
+        db.folioItems.set("item-early", { id: "item-early", folioId: "folio-early", total: 3500 });
+        db.payments.set("payment-early", { id: "payment-early", folioId: "folio-early", hotelId: "hotel-a", amount: 3500, status: "COMPLETED" });
+        await executeCheckOut(mockCurrentTenant, { reservationId: prior.id });
+        expect(db.reservations.get(prior.id).status).toBe("CHECKED_OUT");
+        expect(db.rooms.get("room-a-101").status).toBe("DIRTY");
+        // Model housekeeping finishing; this fix must not bypass the cleaning guard.
+        db.rooms.get("room-a-101").status = "AVAILABLE";
+        const response = await createReservation(new Request("http://localhost:3000/api/reservations", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+            guestName: "New guest", checkInDate: "2026-11-17T00:00:00Z", checkOutDate: "2026-11-18T00:00:00Z",
+            roomId: "room-a-101", tariffId: "rt-a-standard", occupancy: "SINGLE", mealPlan: "BED_ONLY", source: "WALK_IN",
+          }),
+        }));
+        expect(response.status).toBe(201);
+        const newStay = await response.json();
+        await executeCheckIn(mockCurrentTenant, { reservationId: newStay.id });
+        expect(db.reservations.get(newStay.id).status).toBe("CHECKED_IN");
+        expect(db.reservations.get(prior.id).status).toBe("CHECKED_OUT");
+      } finally { vi.useRealTimers(); }
     });
 
     it("blocks checkout when balance is outstanding without manager override", async () => {
@@ -779,6 +839,121 @@ describe("Phase 4: Multi-Tenant Reservation & Stay Security Hardening", () => {
       expect(tasks.length).toBeGreaterThan(0);
       expect(tasks[0].hotelId).toBe("hotel-a");
       expect(tasks[0].status).toBe("NEEDS_CLEANING");
+    });
+  });
+
+  describe("Approved rate resolution (non-occupancy room-type names)", () => {
+    // The owner test hotel names its types "Standard"/"Deluxe", so no tariff is
+    // called "Single …"/"Double …". That used to make creation impossible.
+    beforeEach(() => {
+      db.roomTypes.set("rt-a-plain", {
+        id: "rt-a-plain",
+        hotelId: "hotel-a",
+        name: "Standard",
+        baseRate: 4500,
+        mealPlan: null,
+      });
+      db.rooms.set("room-a-102", {
+        id: "room-a-102",
+        hotelId: "hotel-a",
+        number: "102",
+        status: "AVAILABLE",
+        isActive: true,
+        roomTypeId: "rt-a-plain",
+      });
+      db.roomTypes.set("rt-a-deluxe", {
+        id: "rt-a-deluxe",
+        hotelId: "hotel-a",
+        name: "Deluxe Garden",
+        baseRate: 8500,
+        mealPlan: null,
+      });
+      db.roomTypes.set("rt-a-free", {
+        id: "rt-a-free",
+        hotelId: "hotel-a",
+        name: "Unpriced",
+        baseRate: 0,
+        mealPlan: null,
+      });
+      db.rooms.set("room-a-103", {
+        id: "room-a-103",
+        hotelId: "hotel-a",
+        number: "103",
+        status: "AVAILABLE",
+        isActive: true,
+        roomTypeId: "rt-a-free",
+      });
+    });
+
+    function createFor(payload: Record<string, unknown>) {
+      return createReservation(
+        new Request("http://localhost:3000/api/reservations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        })
+      );
+    }
+
+    it("creates the reservation at the room's own rate and persists it", async () => {
+      const res = await createFor({
+        guestName: "Grace Njeri",
+        guestPhone: "+254700000001",
+        checkInDate: "2026-12-01",
+        checkOutDate: "2026-12-03",
+        roomId: "room-a-102",
+        tariffId: "rt-a-plain",
+        occupancy: "DOUBLE",
+        mealPlan: "BED_ONLY",
+      });
+
+      expect(res.status).toBe(201);
+      const data = await res.json();
+      const saved = db.reservations.get(data.id);
+      expect(saved.hotelId).toBe("hotel-a");
+      // Stored rate is the room type's configured rate, not 0/undefined.
+      const link = saved.rooms.create[0];
+      expect(Number(link.rate)).toBe(4500);
+      const persisted = Array.from(db.reservationRooms.values()).find(
+        (room) => room.reservationId === data.id
+      );
+      expect(persisted).toMatchObject({ roomId: "room-a-102", hotelId: "hotel-a" });
+    });
+
+    it("refuses to sell a room whose rate was never configured", async () => {
+      const res = await createFor({
+        guestName: "Zero Rate",
+        checkInDate: "2026-12-01",
+        checkOutDate: "2026-12-03",
+        roomId: "room-a-103",
+        tariffId: "rt-a-free",
+        occupancy: "SINGLE",
+        mealPlan: "BED_ONLY",
+      });
+
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.error).toContain("no nightly rate configured");
+      // Nothing was written.
+      expect(
+        Array.from(db.reservations.values()).filter((r) => r.hotelId === "hotel-a").length
+      ).toBe(0);
+    });
+
+    it("refuses a same-hotel tariff that belongs to a different room type", async () => {
+      const res = await createFor({
+        guestName: "Cheap Rate",
+        checkInDate: "2026-12-01",
+        checkOutDate: "2026-12-03",
+        roomId: "room-a-102",
+        tariffId: "rt-a-deluxe",
+        occupancy: "SINGLE",
+        mealPlan: "BED_ONLY",
+      });
+
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.error).toContain("does not match the occupancy and meal plan");
     });
   });
 

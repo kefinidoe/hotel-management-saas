@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { KeyRound, Plus, Trash2, X, Shield, AlertCircle, Check } from "lucide-react";
+import { Plus, Trash2, X, Shield, AlertCircle, Check } from "lucide-react";
 
 export type StaffRow = {
   id: string; // membership ID
@@ -13,6 +13,8 @@ export type StaffRow = {
   department: string | null;
   status: string;
   isActive: boolean;
+  /** True while the account holder has not yet accepted the invitation. */
+  invitationPending?: boolean;
   lastLoginAt: string | null;
   createdAt: string;
 };
@@ -40,7 +42,6 @@ export default function StaffClient({
 }) {
   const [staff, setStaff] = useState<StaffRow[]>(initialStaff);
   const [addOpen, setAddOpen] = useState(false);
-  const [passwordTarget, setPasswordTarget] = useState<StaffRow | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<StaffRow | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -90,21 +91,17 @@ export default function StaffClient({
       const res = await fetch(`/api/staff/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: newStatus }),
+        body: JSON.stringify(newStatus === "ACTIVE" ? { reinvite: true } : { status: newStatus }),
       });
       const data = await res.json();
       if (!res.ok) {
         setActionError(data.error || "Could not update staff status.");
         return;
       }
-      setStaff((prev) =>
-        prev.map((s) =>
-          s.id === id
-            ? { ...s, status: newStatus, isActive: newStatus === "ACTIVE" }
-            : s
-        )
-      );
-      setActionMessage(`Staff member ${newStatus === "ACTIVE" ? "reactivated" : "suspended"}.`);
+      setStaff((prev) => prev.map((s) => s.id === id
+        ? { ...s, status: "SUSPENDED", isActive: false, invitationPending: newStatus === "ACTIVE" }
+        : s));
+      setActionMessage(newStatus === "ACTIVE" ? "Invitation sent; the account holder must accept before access is restored." : "Staff member suspended.");
     } catch {
       setActionError("Network error while updating status.");
     } finally {
@@ -233,7 +230,11 @@ export default function StaffClient({
                   </td>
                   <td className="px-4 py-3 text-text-secondary">{s.department || "—"}</td>
                   <td className="px-4 py-3">
-                    {canEditThisMember ? (
+                    {s.invitationPending ? (
+                      <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-amber-50 text-amber-700">
+                        Invitation pending
+                      </span>
+                    ) : canEditThisMember ? (
                       <button
                         onClick={() => toggleStatus(s.id, s.status)}
                         disabled={busyId === s.id}
@@ -263,14 +264,6 @@ export default function StaffClient({
                   {canManageStaff && (
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-3 whitespace-nowrap">
-                        <button
-                          onClick={() => setPasswordTarget(s)}
-                          disabled={busyId === s.id}
-                          title={`Set password for ${s.name}`}
-                          className="inline-flex items-center gap-1 text-text-secondary text-xs font-medium hover:text-primary-600 hover:underline disabled:opacity-40"
-                        >
-                          <KeyRound size={14} /> Password
-                        </button>
                         {canEditThisMember && (
                           <button
                             onClick={() => setDeleteTarget(s)}
@@ -299,22 +292,11 @@ export default function StaffClient({
           onCreated={(newMember) => {
             setAddOpen(false);
             setStaff((prev) => [...prev, newMember].sort((a, b) => a.name.localeCompare(b.name)));
-            setActionMessage(`Added ${newMember.name} to hotel staff.`);
-          }}
-        />
-      )}
-
-      {/* Set Password Modal */}
-      {passwordTarget && (
-        <SetPasswordModal
-          member={passwordTarget}
-          onClose={() => setPasswordTarget(null)}
-          onDone={() => {
-            const member = passwordTarget;
-            setPasswordTarget(null);
-            if (member) {
-              setActionMessage(`New password successfully set for ${member.name}.`);
-            }
+            setActionMessage(
+              newMember.invitationPending
+                ? `Invitation sent to ${newMember.name}. They must accept it before they can access this hotel.`
+                : `Added ${newMember.name} to hotel staff.`
+            );
           }}
         />
       )}
@@ -350,128 +332,6 @@ export default function StaffClient({
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function SetPasswordModal({
-  member,
-  onClose,
-  onDone,
-}: {
-  member: StaffRow;
-  onClose: () => void;
-  onDone: () => void;
-}) {
-  const [newPassword, setNewPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  function generate() {
-    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#%^*_=+";
-    let out = "";
-    const bytes = new Uint32Array(16);
-    crypto.getRandomValues(bytes);
-    for (let i = 0; i < 16; i++) out += alphabet[bytes[i] % alphabet.length];
-    setNewPassword(out);
-    setConfirmPassword(out);
-    setError(null);
-  }
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-
-    if (newPassword !== confirmPassword) {
-      setError("The two passwords do not match.");
-      return;
-    }
-    if (newPassword.length < 8) {
-      setError("Password must be at least 8 characters.");
-      return;
-    }
-
-    setLoading(true);
-    const res = await fetch(`/api/staff/${member.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ newPassword }),
-    });
-    setLoading(false);
-
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      setError(data.error || "Could not set the password.");
-      return;
-    }
-    onDone();
-  }
-
-  return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/40 p-4">
-      <div className="card w-full max-w-md shadow-xl border border-border">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-base font-bold">Set Password for {member.name}</h2>
-          <button onClick={onClose} className="text-text-secondary hover:text-text-primary">
-            <X size={18} />
-          </button>
-        </div>
-
-        {error && (
-          <p className="text-sm text-danger bg-danger/10 border border-danger/20 rounded-control px-3 py-2 mb-3">
-            {error}
-          </p>
-        )}
-
-        <form onSubmit={submit} className="space-y-4">
-          <div>
-            <div className="flex justify-between items-center mb-1">
-              <label className="text-xs font-medium text-text-secondary">New Password</label>
-              <button
-                type="button"
-                onClick={generate}
-                className="text-xs text-primary-600 hover:underline font-medium"
-              >
-                Generate random
-              </button>
-            </div>
-            <input
-              type="text"
-              required
-              minLength={8}
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              className="w-full rounded-control border border-border px-3 py-2 text-sm font-mono"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-text-secondary mb-1">Confirm Password</label>
-            <input
-              type="text"
-              required
-              minLength={8}
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              className="w-full rounded-control border border-border px-3 py-2 text-sm font-mono"
-            />
-          </div>
-
-          <p className="text-xs text-text-muted">
-            Note: Since external email services are not configured in this environment, provide the generated credentials directly to the staff member.
-          </p>
-
-          <div className="flex gap-2 pt-2">
-            <button type="button" onClick={onClose} className="btn-secondary flex-1">
-              Cancel
-            </button>
-            <button type="submit" disabled={loading} className="btn-primary flex-1">
-              {loading ? "Saving..." : "Save Password"}
-            </button>
-          </div>
-        </form>
-      </div>
     </div>
   );
 }
@@ -519,16 +379,21 @@ function AddStaffModal({
       return;
     }
 
+    // An existing account is invited, not added: the API answers 202 with a
+    // SUSPENDED membership. Showing it as active would tell the administrator the
+    // person has access when they do not.
+    const invitationPending = data.invitationPending === true;
     onCreated({
       id: data.id,
       userId: data.userId,
       name: data.name || name,
       email: data.email || email,
-      phone: phone || null,
+      phone: data.phone ?? (phone || null),
       role: data.role || role,
-      department: department || null,
-      status: "ACTIVE",
-      isActive: true,
+      department: data.department ?? (department || null),
+      status: invitationPending ? "SUSPENDED" : "ACTIVE",
+      isActive: !invitationPending,
+      invitationPending,
       lastLoginAt: null,
       createdAt: new Date().toISOString(),
     });
@@ -586,12 +451,14 @@ function AddStaffModal({
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-text-secondary mb-1">Initial Password</label>
+            <label className="block text-xs font-medium text-text-secondary mb-1">
+              Initial Password (new accounts only — leave blank when inviting an existing account)
+            </label>
             <input
-              type="text"
+              type="password"
+              autoComplete="new-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              required
               minLength={8}
               placeholder="At least 8 characters"
               className="w-full rounded-control border border-border px-3 py-2 text-sm font-mono"
@@ -626,7 +493,7 @@ function AddStaffModal({
           </div>
 
           <p className="text-xs text-text-muted pt-1">
-            The staff member will be granted membership in this hotel workspace with the selected role.
+            If the email already has an account, that person is <strong>invited</strong>: their password and global profile are untouched, and they get access only after they accept from their own workspace list. A new email becomes a staff account immediately, with the password you set here.
           </p>
 
           <div className="flex gap-2 pt-2">

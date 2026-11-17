@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import { getBillingTenantFromRoute } from "@/lib/authz";
+import { getBillingTenantFromRoute, requireRole } from "@/lib/authz";
+import { ROLE_GROUPS } from "@/lib/permissions";
 import { getHotelUsageAndSubscription, SubscriptionStatusUnavailableError, PAST_DUE_GRACE_PERIOD_DAYS } from "@/lib/entitlements";
-import { ORDERED_ROOM_BANDS, PRICING_CONFIG, calculateBandPricing, BillingInterval } from "@/lib/plans";
+import { ORDERED_ROOM_BANDS, PRICING_CONFIG, calculateBandPricing, normaliseBillingCurrency, BillingInterval } from "@/lib/plans";
 
 export const dynamic = "force-dynamic";
 
@@ -9,21 +10,28 @@ export async function GET() {
   const tenant = await getBillingTenantFromRoute();
   if (tenant instanceof NextResponse) return tenant;
 
+  const forbidden = requireRole(tenant.role, ROLE_GROUPS.STAFF_ADMIN);
+  if (forbidden) return forbidden;
+
   try {
     const details = await getHotelUsageAndSubscription(tenant.hotelId);
-    const currency = tenant.hotel.currency || "KES";
+    const hotelCurrency = tenant.hotel.currency || "KES";
+    // The price schedule exists in KES and USD only. Quote the options in the
+    // currency the subscription is actually billed in, not in whatever
+    // operation currency the property happens to record payments with.
+    const billingCurrency = details.subscription.currency || normaliseBillingCurrency(hotelCurrency);
 
     // Pre-calculate monthly and yearly options for this hotel's billable room count
     const monthlyCalculation = calculateBandPricing({
       roomCount: details.breakdown.billableActiveRooms,
       billingInterval: BillingInterval.MONTHLY,
-      currency,
+      currency: billingCurrency,
     });
 
     const yearlyCalculation = calculateBandPricing({
       roomCount: details.breakdown.billableActiveRooms,
       billingInterval: BillingInterval.YEARLY,
-      currency,
+      currency: billingCurrency,
     });
 
     return NextResponse.json({
@@ -31,7 +39,7 @@ export async function GET() {
         id: tenant.hotelId,
         name: tenant.hotel.name,
         slug: tenant.hotel.slug,
-        currency,
+        currency: hotelCurrency,
         status: tenant.hotel.status,
       },
       subscription: {
@@ -51,7 +59,8 @@ export async function GET() {
         currentPeriodEndsAt: details.subscription.currentPeriodEndsAt ? details.subscription.currentPeriodEndsAt.toISOString() : null,
         billingInterval: details.subscription.billingInterval,
         amount: details.subscription.amount,
-        currency: details.subscription.currency,
+        currency: billingCurrency,
+        matchesHotelCurrency: normaliseBillingCurrency(hotelCurrency) === billingCurrency,
         modules: details.subscription.plan.modules,
         limits: details.subscription.plan.limits,
       },

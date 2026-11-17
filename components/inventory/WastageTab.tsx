@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Plus, X } from "lucide-react";
+import { useDurableMutation } from "@/components/recovery/DurableMutationProvider";
 import type { InventoryItemRow } from "./InventoryClient";
 import { formatDisplayDate } from "@/lib/dates";
 
@@ -18,8 +19,15 @@ type WastageRow = {
   value: number;
 };
 
+/**
+ * A row from GET /api/staff. `id` is the membership id and `userId` is the
+ * person: the accountability API takes the person, so the select must submit
+ * `userId`. Sending the membership id is rejected by the server, which is how
+ * "choose an active staff member" appeared even after choosing one.
+ */
 type StaffOption = {
   id: string;
+  userId: string;
   name: string;
   role: string;
   department?: string | null;
@@ -137,6 +145,7 @@ function RecordWastageModal({
   const [manualAccountableName, setManualAccountableName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const { submit: submitDurable } = useDurableMutation();
 
   const item = inventoryItems.find((i) => i.id === inventoryItemId);
 
@@ -160,10 +169,8 @@ function RecordWastageModal({
     e.preventDefault();
     setLoading(true);
     setError(null);
-    const res = await fetch("/api/wastage", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    try {
+    const res = await submitDurable("WASTAGE", "/api/wastage", "POST", {
         inventoryItemId,
         quantity: Number(quantity),
         reason,
@@ -176,8 +183,7 @@ function RecordWastageModal({
           accountableSelection === MANUAL_ACCOUNTABILITY
             ? manualAccountableName
             : undefined,
-      }),
-    });
+      });
     setLoading(false);
     const data = await res.json();
     if (!res.ok) {
@@ -185,6 +191,10 @@ function RecordWastageModal({
       return;
     }
     onSaved();
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Network error. Retry the saved request to check its outcome.");
+      setLoading(false);
+    }
   }
 
   return (
@@ -238,7 +248,7 @@ function RecordWastageModal({
                 {staffLoading ? "Loading staff..." : "Select staff member..."}
               </option>
               {staff.map((person) => (
-                <option key={person.id} value={person.id}>
+                <option key={person.id} value={person.userId}>
                   {person.name} — {person.department || person.role.replaceAll("_", " ")}
                 </option>
               ))}

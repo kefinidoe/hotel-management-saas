@@ -53,19 +53,76 @@ trailing slash.
 **URL-encode the password** if it contains `@`, `#`, `/` or a space — `@` → `%40`, `#` → `%23`,
 space → `%20`. This is the single most common cause of "can't reach database server".
 
-## 4. Apply the schema and seed
+## 4. Generate the client; keep migrations and demo seeding isolated
 
 ```bash
-npm run prisma:generate      # generates the client from schema.prisma
-npx prisma migrate deploy    # applies the 5 migrations (use `migrate dev` if you're editing schema.prisma)
-npm run seed                 # admin login, 6 tariffs, 26 rooms, payment methods, menu, 15 inventory items, 3 recipes
+npm run prisma:generate
 ```
 
-`npm run seed` prints the login it creates: `admin@hotel.com` / `Admin123!`.
-**Change that password before anyone else can reach the app.**
+## 4b. Migrations
 
-If `migrate deploy` reports drift, `npx prisma migrate status` will tell you what it thinks
-is out of sync — don't reach for `migrate reset`, it drops all data.
+There are 19 reviewed migrations, checksum-pinned in `prisma/migration-release-manifest.json`.
+`npm run migration:manifest` verifies the files still match that manifest.
+
+- **Fresh local database:** `npx prisma migrate deploy` (or apply `prisma/migrations/*` in order).
+- **A database that already has a schema but no `_prisma_migrations` table** (this includes the
+  deployed Supabase project): do **not** run `migrate deploy` first — it would replay migration 1
+  against live tables. Run the read-only dry run, then the documented baseline:
+  ```bash
+  SAAS_ENVIRONMENT=saas SAAS_DATABASE_IDENTIFIER=<id> DIRECT_URL='postgresql://...' \
+    npm run migration:adopt
+  ```
+  The full runbook is `docs/migration-strategy.md`; the rehearsal evidence is
+  `docs/saas-migration-rehearsal.md`; restoring the owner's Supabase backup is
+  `docs/rehearsal-supabase-archive.md`. A rehearsal needs an explicitly approved, disposable local
+  target (`npm run migration:rehearse`, loopback only).
+- **Against the real Prisma migration engine:** `npm run migration:verify-engine` deploys,
+  baselines, detects drift and recovers using Prisma's own migrate implementation. It needs a
+  verification-only tool stack outside the repository (`docs/migration-strategy.md` §7.2) and a
+  disposable PostgreSQL server; it never touches the app's pinned `prisma@5.17.0` dependency.
+- **What is still missing, in one command:** `npm run migration:readiness` reports the three external
+  prerequisites — the owner's archive (hashed against its recorded digest), the read-only target
+  credentials, and the pinned 5.17.0 engine artifacts (hashed against the official digests) — using four
+  states: **PASS** (demonstrated), **BLOCKED** (external input missing), **FAIL** (a check ran and
+  failed), **PENDING APPROVAL** (owner decision). A green test suite never produces PASS. Add
+  `--check-target` to run the read-only target check as well.
+- **Pinned Prisma 5.17.0 engine:** `npm run migration:verify-pin -- --schema-engine <path>
+  --query-engine-library <path>` checks both files against the official digests recorded in
+  `scripts/prisma-engine-pins.mjs`, requires `schema-engine --version` to name commit `393aa359…`, and
+  (with `--prisma node_modules/prisma/build/index.js`) requires `prisma -v` to report 5.17.0 with that
+  commit. It downloads nothing and fails closed; obtaining the artifacts is §7.1.2 of
+  `docs/migration-strategy.md`.
+- **Read-only checkpoint and fingerprint of a target:** `npm run migration:target-check` has no write
+  path at all (the session runs with `default_transaction_read_only = on`, enforced by the server) and
+  reports the detected schema checkpoint, the ledger against the release manifest, and an md5
+  fingerprint of the public schema:
+  ```bash
+  SAAS_ENVIRONMENT=saas SAAS_DATABASE_IDENTIFIER=<id> DIRECT_URL='postgresql://…' \
+    npm run migration:target-check -- --expect-ledger absent
+  ```
+  For a disposable local database only, `SAAS_ENVIRONMENT=rehearsal` is accepted and requires a
+  loopback host.
+- **Restore rehearsal:** `npm run migration:restore-rehearsal -- --dump <archive> --expect-sha256 <hex>`
+  checks the archive's digest *before* connecting, parses its table of contents with `pg_restore --list`
+  before creating anything, restores into a scratch database it creates, fingerprints the result
+  read-only, and drops the database again (`--keep` keeps it). The archive is real guest data: keep it
+  outside the repository (`*.dump` is ignored, so it cannot be committed by accident). It refuses a
+  non-loopback `--base-url` unless `--allow-remote-target` is passed. Never point it at the live
+  database.
+
+Never run `migrate dev`, `db push`, `migrate resolve`, or reset against Supabase or any
+populated/shared database. `npm run prisma:deploy` is the only approved remote migration command;
+`prisma:migrate` (migrate dev) is refused for a remote target because Prisma would create and drop a
+shadow database on the server, and `migrate reset` is refused for any remote database. These rules
+are enforced by `scripts/prisma-safe.mjs`; the full policy, including what a hand-typed
+`npx prisma ...` does *not* go through, is in [`docs/database-operation-policy.md`](database-operation-policy.md).
+
+`npm run seed` inserts fictional demo hotels and users. It is refused unless both database URLs
+point to the same loopback database named `hotel_saas_demo_<suffix>`,
+`SAAS_ENVIRONMENT=local`, and `SAAS_ALLOW_LOCAL_DEMO_SEED=true`. Set
+`SAAS_DEMO_INITIAL_PASSWORD` only in the local process environment to a unique password of at
+least 16 characters; the seed does not print it. Never seed Supabase, a shared database, or the
+Axis Hotel system. Existing user passwords are not changed by rerunning the seed.
 
 ## 5. Run it
 
@@ -78,7 +135,7 @@ npm run dev
 ## 6. Verify — run these and tell me what they say
 
 ```bash
-npm run test:run             # expect 133 passed / 6 files
+npm run test:run             # expect 678 passed / 46 files
 npm run lint                 # expect "No ESLint warnings or errors"
 npx tsc --noEmit             # expect NO output. This is the one check still unproven.
 npx prisma migrate status    # expect "Database schema is up to date!"

@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Image from "next/image";
 import Link from "next/link";
+import HotelFlowBrand from "@/components/HotelFlowBrand";
 import { useRouter } from "next/navigation";
 import { signOut } from "next-auth/react";
 import { Building2, Plus, LogOut, ArrowRight, ShieldCheck } from "lucide-react";
@@ -16,9 +16,20 @@ type MembershipItem = {
   status: string;
 };
 
+type InvitationItem = {
+  id: string;
+  hotelId: string;
+  hotelName: string;
+  hotelSlug: string;
+  role: string;
+  invitedAt: string;
+};
+
 export default function SelectHotelPage() {
   const router = useRouter();
   const [memberships, setMemberships] = useState<MembershipItem[]>([]);
+  const [invitations, setInvitations] = useState<InvitationItem[]>([]);
+  const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -33,6 +44,7 @@ export default function SelectHotelPage() {
         }
         const data = await res.json();
         setMemberships(data.memberships || []);
+        setInvitations(data.pendingInvitations || []);
       } catch {
         setError("Failed to load your hotel workspaces.");
       } finally {
@@ -41,6 +53,35 @@ export default function SelectHotelPage() {
     }
     loadMemberships();
   }, [router]);
+
+  async function resolveInvitation(id: string, action: "accept" | "decline") {
+    setError(null);
+    setResolvingId(id);
+    try {
+      const res = await fetch(`/api/auth/invitations/${id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data.message || data.error || "Could not resolve the invitation.");
+        return;
+      }
+      setInvitations((current) => current.filter((invitation) => invitation.id !== id));
+      if (action === "accept") {
+        const refreshed = await fetch("/api/auth/memberships");
+        if (refreshed.ok) {
+          const payload = await refreshed.json();
+          setMemberships(payload.memberships || []);
+        }
+      }
+    } catch {
+      setError("Network error while resolving the invitation.");
+    } finally {
+      setResolvingId(null);
+    }
+  }
 
   async function handleSelect(hotelId: string) {
     setError(null);
@@ -72,13 +113,7 @@ export default function SelectHotelPage() {
       <div className="card w-full max-w-lg shadow-lg border border-border">
         <div className="flex items-center justify-between pb-4 mb-4 border-b border-border">
           <div className="flex items-center gap-3">
-            <Image
-              src="/axis-hotel-mark.png"
-              alt="Hotel Management"
-              width={40}
-              height={40}
-              className="w-10 h-10 object-contain rounded-lg"
-            />
+            <HotelFlowBrand iconOnly iconClassName="h-10 w-10 rounded-lg" />
             <div>
               <h1 className="text-xl font-bold text-text-primary">Select Hotel Workspace</h1>
               <p className="text-text-secondary text-xs">
@@ -98,6 +133,46 @@ export default function SelectHotelPage() {
         {error && (
           <div className="mb-4 p-3 rounded-control bg-danger/10 border border-danger/20 text-danger text-sm">
             {error}
+          </div>
+        )}
+
+        {!loading && invitations.length > 0 && (
+          <div className="mb-5 space-y-2">
+            <h2 className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+              Pending invitations
+            </h2>
+            {invitations.map((invitation) => (
+              <div
+                key={invitation.id}
+                className="p-3 rounded-lg border border-primary-200 bg-primary-50/60"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-text-primary">{invitation.hotelName}</p>
+                    <p className="text-xs text-text-secondary">
+                      Invited as {invitation.role.replace("_", " ").toLowerCase()} · you will only
+                      get access if you accept
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => resolveInvitation(invitation.id, "accept")}
+                      disabled={resolvingId === invitation.id}
+                      className="btn-primary text-xs font-semibold px-3 py-1.5 disabled:opacity-60"
+                    >
+                      Accept
+                    </button>
+                    <button
+                      onClick={() => resolveInvitation(invitation.id, "decline")}
+                      disabled={resolvingId === invitation.id}
+                      className="text-xs font-semibold px-3 py-1.5 rounded-control border border-border text-text-secondary disabled:opacity-60"
+                    >
+                      Decline
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
