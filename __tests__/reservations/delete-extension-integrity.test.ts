@@ -33,6 +33,7 @@ vi.doMock("next/server", () => {
 });
 
 vi.doMock("@prisma/client", () => ({
+  RoomStatus: { AVAILABLE: "AVAILABLE", RESERVED: "RESERVED", OCCUPIED: "OCCUPIED", DIRTY: "DIRTY", CLEANING: "CLEANING", READY: "READY", MAINTENANCE: "MAINTENANCE", OUT_OF_ORDER: "OUT_OF_ORDER" },
   Prisma: {
     TransactionIsolationLevel: { Serializable: "Serializable", ReadCommitted: "ReadCommitted" },
     PrismaClientKnownRequestError: class extends Error {

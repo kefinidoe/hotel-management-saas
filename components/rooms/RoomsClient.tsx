@@ -25,6 +25,9 @@ type RoomType = {
   description: string | null;
   baseRate: number;
   capacity: number;
+  maxAdults?: number;
+  maxChildren?: number;
+  extraAdultFee?: number;
   /**
    * The meal plan a room type is sold on. Reservations pick a tariff by
    * occupancy + meal plan, so a room type without one cannot be booked — the
@@ -43,10 +46,12 @@ export default function RoomsClient({
   initialRooms,
   initialRoomTypes,
   canManage,
+  useModularPricing = false,
 }: {
   initialRooms: Room[];
   initialRoomTypes: RoomType[];
   canManage: boolean;
+  useModularPricing?: boolean;
 }) {
   const router = useRouter();
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
@@ -187,6 +192,7 @@ export default function RoomsClient({
 
       {canManage && manageTypesOpen && (
         <RoomTypesModal
+          useModularPricing={useModularPricing}
           roomTypes={initialRoomTypes}
           onClose={() => setManageTypesOpen(false)}
           onSaved={refresh}
@@ -403,12 +409,14 @@ function RoomDetailModal({
 }
 
 function RoomTypesModal({
+  useModularPricing,
   roomTypes,
   onClose,
   onSaved,
   onError,
 }: {
   roomTypes: RoomType[];
+  useModularPricing: boolean;
   onClose: () => void;
   onSaved: () => void;
   onError: (e: string | null) => void;
@@ -416,6 +424,8 @@ function RoomTypesModal({
   const [name, setName] = useState("");
   const [baseRate, setBaseRate] = useState("");
   const [capacity, setCapacity] = useState("2");
+  const [maxChildren, setMaxChildren] = useState("0");
+  const [extraAdultFee, setExtraAdultFee] = useState("0");
   const [mealPlan, setMealPlan] = useState<MealPlanCode>("BED_ONLY");
   const [editingType, setEditingType] = useState<RoomType | null>(null);
   const [loading, setLoading] = useState(false);
@@ -425,7 +435,9 @@ function RoomTypesModal({
     setEditingType(roomType);
     setName(roomType.name);
     setBaseRate(String(roomType.baseRate));
-    setCapacity(String(roomType.capacity));
+    setCapacity(String(useModularPricing ? roomType.maxAdults ?? roomType.capacity : roomType.capacity));
+    setMaxChildren(String(roomType.maxChildren ?? 0));
+    setExtraAdultFee(String(roomType.extraAdultFee ?? 0));
     setMealPlan(MEAL_PLANS.includes(roomType.mealPlan as MealPlanCode) ? (roomType.mealPlan as MealPlanCode) : "BED_ONLY");
     onError(null);
   }
@@ -435,6 +447,8 @@ function RoomTypesModal({
     setName("");
     setBaseRate("");
     setCapacity("2");
+    setMaxChildren("0");
+    setExtraAdultFee("0");
     setMealPlan("BED_ONLY");
     onError(null);
   }
@@ -452,9 +466,17 @@ function RoomTypesModal({
       return;
     }
 
+    const childrenValue = Number(maxChildren);
+    const fee = Number(extraAdultFee);
+    if (useModularPricing && (!Number.isInteger(childrenValue) || childrenValue < 0 || childrenValue > 1000 || numericCapacity + childrenValue > 1000 || !Number.isFinite(fee) || fee < 0)) {
+      onError("Enter a valid child capacity and extra adult fee (total capacity at most 1000).");
+      return;
+    }
     setLoading(true);
     onError(null);
-    const payload = { name: name.trim(), baseRate: numericRate, capacity: numericCapacity, mealPlan };
+    const payload = useModularPricing
+      ? { name: name.trim(), baseRate: numericRate, capacity: numericCapacity + childrenValue, maxAdults: numericCapacity, maxChildren: childrenValue, extraAdultFee: fee }
+      : { name: name.trim(), baseRate: numericRate, capacity: numericCapacity, mealPlan };
     try {
       if (editingType) {
         await requestJson<RoomType>(`/api/room-types/${editingType.id}`, {
@@ -501,7 +523,7 @@ function RoomTypesModal({
             <div>
               <p className="text-sm font-medium">{rt.name}</p>
               <p className="text-xs text-text-secondary">
-                KSh {rt.baseRate.toLocaleString()} · sleeps {rt.capacity} · {rt.mealPlan ? MEAL_PLAN_LABELS[rt.mealPlan as MealPlanCode] : "no meal plan"}
+                KSh {rt.baseRate.toLocaleString()} · {useModularPricing ? `up to ${rt.maxAdults ?? rt.capacity} adults, ${rt.maxChildren ?? 0} children` : `sleeps ${rt.capacity} · ${rt.mealPlan ? MEAL_PLAN_LABELS[rt.mealPlan as MealPlanCode] : "no meal plan"}`}
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -545,7 +567,8 @@ function RoomTypesModal({
             className={inputClass()}
           />
           <input
-            placeholder="Capacity"
+            placeholder={useModularPricing ? "Max adults" : "Capacity"}
+            aria-label={useModularPricing ? "Max adults" : "Capacity"}
             type="number"
             min="1"
             step="1"
@@ -555,7 +578,12 @@ function RoomTypesModal({
             className={inputClass()}
           />
         </div>
-        <div>
+        {useModularPricing ? (
+          <div className="grid grid-cols-2 gap-2">
+            <label className="text-sm">Max children<input aria-label="Max children" type="number" min="0" step="1" value={maxChildren} onChange={(e) => setMaxChildren(e.target.value)} required className={inputClass()} /></label>
+            <label className="text-sm">Extra adult fee per night<input aria-label="Extra adult fee per night" type="number" min="0" step="0.01" value={extraAdultFee} onChange={(e) => setExtraAdultFee(e.target.value)} required className={inputClass()} /></label>
+          </div>
+        ) : <div>
           <label className="block text-sm font-medium mb-1.5">Meal Plan</label>
           <select
             value={mealPlan}
@@ -571,7 +599,7 @@ function RoomTypesModal({
           <p className="text-xs text-text-muted mt-1">
             Reservations match a room type by occupancy and meal plan, so this is required to book it.
           </p>
-        </div>
+        </div>}
         <div className="flex gap-2">
           {editingType && (
             <button type="button" onClick={cancelEditing} disabled={loading} className="btn-secondary flex-1">

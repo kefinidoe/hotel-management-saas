@@ -1,3 +1,4 @@
+import { validateRoomStayMutation, roomTypeUpdateSchema, emptyMutationSchema } from "@/lib/room-stay-mutation-validation";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
@@ -38,6 +39,10 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
   if (blocked) return blocked;
 
+  const validation = await validateRoomStayMutation(req, roomTypeUpdateSchema, { id });
+  if (validation.response) return validation.response;
+  const body = validation.data;
+
   const hotelId = tenant.hotelId;
 
   const existing = await prisma.roomType.findUnique({
@@ -47,12 +52,6 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
     return NextResponse.json({ error: "Room type not found." }, { status: 404 });
   }
 
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
-  }
 
   const name = typeof body?.name === "string" ? body.name.trim() : existing.name;
   const baseRate = body?.baseRate !== undefined ? Number(body.baseRate) : Number(existing.baseRate);
@@ -72,13 +71,16 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
       description: body.description !== undefined ? (body.description ? String(body.description).trim() : null) : existing.description,
       baseRate,
       capacity: typeof body.capacity === "number" && body.capacity > 0 ? body.capacity : existing.capacity,
+      ...(body.maxAdults !== undefined && { maxAdults: body.maxAdults }),
+      ...(body.maxChildren !== undefined && { maxChildren: body.maxChildren }),
+      ...(body.extraAdultFee !== undefined && { extraAdultFee: body.extraAdultFee }),
       mealPlan,
     },
   });
   return NextResponse.json({ ...roomType, baseRate: Number(roomType.baseRate) });
 }
 
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const tenant = await getTenantFromRoute();
   if (tenant instanceof NextResponse) return tenant;
@@ -88,6 +90,9 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
 
   const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
   if (blocked) return blocked;
+
+  const validation = await validateRoomStayMutation(req, emptyMutationSchema, { id, emptyBody: true });
+  if (validation.response) return validation.response;
 
   const hotelId = tenant.hotelId;
 

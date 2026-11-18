@@ -4,6 +4,7 @@ import { listPricingBundle } from "@/lib/pricing/admin";
 import { isPricingUnavailable } from "@/lib/pricing/errors";
 import { logPricingFailure } from "@/lib/pricing/delegates";
 import PricingClient from "@/components/pricing/PricingClient";
+import DynamicPricingRules from "@/components/settings/DynamicPricingRules";
 
 export const dynamic = "force-dynamic";
 
@@ -53,11 +54,13 @@ export default async function PricingSettingsPage() {
   }
 
   return (
+    <div className="space-y-6">
+    <DynamicPricingRules />
     <PricingClient
       initialBundle={{
         ...bundle,
         settings: {
-          pricingModel: bundle.settings.pricingModel,
+          pricingModel: bundle.settings.pricingModel === "ROOM_TYPE_OCCUPANCY" ? "ROOM_TYPE_OCCUPANCY" : "LEGACY_BASE_RATE",
           useOccupancyRates: bundle.settings.useOccupancyRates,
           useMealPlans: bundle.settings.useMealPlans,
           useSeasonalPricing: bundle.settings.useSeasonalPricing,
@@ -69,5 +72,6 @@ export default async function PricingSettingsPage() {
         },
       }}
     />
+    </div>
   );
 }

@@ -1,6 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import BrandingSettings from "./BrandingSettings";
+import ModularPricingSettings from "./ModularPricingSettings";
 import { Building2, Save, Globe, DollarSign, Clock, Mail, Phone, MapPin, Check, AlertCircle } from "lucide-react";
 
 type HotelData = {
@@ -50,7 +53,9 @@ export default function HotelSettingsClient({
   initialHotel: HotelData;
   userRole: string;
 }) {
+  const router = useRouter();
   const [name, setName] = useState(initialHotel.name);
+  useEffect(() => { setName(initialHotel.name); }, [initialHotel.name]);
   const [email, setEmail] = useState(initialHotel.email || "");
   const [phone, setPhone] = useState(initialHotel.phone || "");
   const [address, setAddress] = useState(initialHotel.address || "");
@@ -89,6 +94,7 @@ export default function HotelSettingsClient({
       }
 
       setMessage("Hotel settings updated successfully.");
+      router.refresh();
     } catch {
       setError("Network error while saving settings.");
     } finally {
@@ -285,6 +291,7 @@ export default function HotelSettingsClient({
           </button>
         </div>
       </form>
+      {["HOTEL_OWNER", "HOTEL_ADMIN", "MANAGER"].includes(userRole) && <><BrandingSettings initialName={initialHotel.name} /><ModularPricingSettings currency={currency} /></>}
     </div>
   );
 }

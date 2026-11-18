@@ -42,30 +42,39 @@ export function tariffCategory(occupancy: Occupancy): string {
   return OCCUPANCY_LABELS[occupancy];
 }
 
-/**
- * Does this tariff belong to the chosen occupancy and meal plan?
- *
- * This is the rule the API enforces, so a tampered request cannot price a Twin
- * booking at the Single rate. It is deliberately name-based because the tariff
- * names are what the hotel maintains.
+/** Recognize explicitly labelled legacy tariffs anywhere in a name. A custom
+ * name carries no occupancy restriction; capacity, when supplied, is the limit.
  */
+function namedOccupancies(name: string): Occupancy[] {
+  return OCCUPANCIES.filter((value) =>
+    new RegExp(`\\b${OCCUPANCY_LABELS[value]}\\b`, "i").test(name)
+  );
+}
+
 export function tariffMatches(
   tariffName: string,
   tariffMealPlan: string | null,
   occupancy: Occupancy,
-  mealPlan: MealPlanCode
+  mealPlan: MealPlanCode,
+  capacity?: number | null
 ): boolean {
-  const category = tariffCategory(occupancy).toLowerCase();
-  return tariffName.trim().toLowerCase().startsWith(category) && tariffMealPlan === mealPlan;
+  if (tariffMealPlan !== mealPlan) return false;
+  const labels = namedOccupancies(tariffName);
+  if (labels.length && !labels.includes(occupancy)) return false;
+  const guests = occupancy === "SINGLE" ? 1 : 2;
+  return capacity == null || (Number.isInteger(capacity) && capacity >= guests);
 }
 
-/** Find the tariff for a booking, or undefined when the hotel has not set one up. */
-export function findTariff<T extends { name: string; mealPlan: string | null }>(
-  tariffs: T[],
+/** Prefer an explicitly labelled tariff; custom names are valid too. */
+export function findTariff<T extends { name: string; mealPlan: string | null; capacity?: number | null }>(
+  tariffs: readonly T[],
   occupancy: Occupancy,
   mealPlan: MealPlanCode
 ): T | undefined {
-  return tariffs.find((tariff) => tariffMatches(tariff.name, tariff.mealPlan, occupancy, mealPlan));
+  const matches = tariffs.filter((tariff) =>
+    tariffMatches(tariff.name, tariff.mealPlan, occupancy, mealPlan, tariff.capacity)
+  );
+  return matches.find((tariff) => namedOccupancies(tariff.name).includes(occupancy)) ?? matches[0];
 }
 
 /**
@@ -91,6 +100,7 @@ export type TariffPricing = {
   name: string;
   baseRate: number | string;
   mealPlan: string | null;
+  capacity?: number | null;
 };
 
 export type ApprovedRate<T extends TariffPricing> =
@@ -132,7 +142,8 @@ export function resolveApprovedRate<T extends TariffPricing>(input: {
 
   const candidates: Array<{ tariff: T; source: "OCCUPANCY_TARIFF" | "ROOM_TYPE" }> = [];
   if (roomType) candidates.push({ tariff: roomType, source: "ROOM_TYPE" });
-  if (matched && matched.id !== roomType?.id) {
+  if (matched && matched.id !== roomType?.id &&
+      tariffPricesStay(matched, input.roomTypeId ?? null, input.occupancy, input.mealPlan)) {
     candidates.push({ tariff: matched, source: "OCCUPANCY_TARIFF" });
   }
 
@@ -161,6 +172,10 @@ export function tariffPricesStay(
   occupancy: Occupancy,
   mealPlan: MealPlanCode
 ): boolean {
-  if (tariffMatches(tariff.name, tariff.mealPlan, occupancy, mealPlan)) return true;
+  // Do not widen the server-side authorization of unrelated room types merely
+  // because a custom name has the same meal plan. Legacy labelled tariffs are
+  // the only cross-type exception; a custom type must be the selected room type.
+  if (tariff.name.trim().toLowerCase().startsWith(tariffCategory(occupancy).toLowerCase()) &&
+      tariff.mealPlan === mealPlan) return true;
   return Boolean(roomTypeId) && tariff.id === roomTypeId;
 }

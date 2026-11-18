@@ -61,9 +61,9 @@ describe("migration release manifest", () => {
     expect(manifest).not.toBeNull();
     const names = manifest.migrations.map((entry: { name: string }) => entry.name);
     expect(names).toEqual(migrations.map((migration) => migration.name));
-    expect(names).toHaveLength(24);
+    expect(names).toHaveLength(29);
     expect(names[0]).toBe("20260915161717_init");
-    expect(names[names.length - 1]).toBe("20261107120000_auth_rate_limit");
+    expect(names[names.length - 1]).toBe("20261112120000_custom_rate_rules");
     expect(names).toContain("20261029120000_add_pos_charge_to_room_idempotency");
     expect(names).toContain("20261029130000_add_tenant_composite_join_fks");
   });
@@ -213,6 +213,11 @@ describe("adoption planning", () => {
       "20261101120000_add_reservation_extension_history",
       "20261104120000_inventory_request_ledger",
       "20261107120000_auth_rate_limit",
+      "20261108120000_universal_meal_pricing",
+      "20261109120000_modular_pricing_opt_in",
+      "20261110120000_modular_pricing_snapshot",
+      "20261111120000_hotel_branding_logo_url",
+      "20261112120000_custom_rate_rules",
     ]);
     expect(plan.problems).toEqual([]);
   });
@@ -227,6 +232,11 @@ describe("adoption planning", () => {
       "20261101120000_add_reservation_extension_history",
       "20261104120000_inventory_request_ledger",
       "20261107120000_auth_rate_limit",
+      "20261108120000_universal_meal_pricing",
+      "20261109120000_modular_pricing_opt_in",
+      "20261110120000_modular_pricing_snapshot",
+      "20261111120000_hotel_branding_logo_url",
+      "20261112120000_custom_rate_rules",
     ]);
     expect(plan.problems).toEqual([]);
   });
@@ -240,20 +250,25 @@ describe("adoption planning", () => {
       "20261101120000_add_reservation_extension_history",
       "20261104120000_inventory_request_ledger",
       "20261107120000_auth_rate_limit",
+      "20261108120000_universal_meal_pricing",
+      "20261109120000_modular_pricing_opt_in",
+      "20261110120000_modular_pricing_snapshot",
+      "20261111120000_hotel_branding_logo_url",
+      "20261112120000_custom_rate_rules",
     ]);
     expect(plan.problems).toEqual([]);
   });
 
   it("keeps inventory migration pending for a pre-ledger database", () => {
     const plan = buildAdoptionPlan({ migrations, features: featuresFor("saas_through_22"), ledgerRows: [] });
-    expect(plan.pending).toEqual(["20261104120000_inventory_request_ledger", "20261107120000_auth_rate_limit"]);
+    expect(plan.pending).toEqual(["20261104120000_inventory_request_ledger", "20261107120000_auth_rate_limit", "20261108120000_universal_meal_pricing", "20261109120000_modular_pricing_opt_in", "20261110120000_modular_pricing_snapshot", "20261111120000_hotel_branding_logo_url", "20261112120000_custom_rate_rules"]);
     expect(plan.problems).toEqual([]);
   });
 
   it("leaves the rate-limit migration pending after adopting the prior current schema", () => {
     const plan = buildAdoptionPlan({ migrations, features: featuresFor("saas_current"), ledgerRows: [] });
     expect(plan.baseline).toEqual(names.slice(0, 23));
-    expect(plan.pending).toEqual(["20261107120000_auth_rate_limit"]);
+    expect(plan.pending).toEqual(["20261107120000_auth_rate_limit", "20261108120000_universal_meal_pricing", "20261109120000_modular_pricing_opt_in", "20261110120000_modular_pricing_snapshot", "20261111120000_hotel_branding_logo_url", "20261112120000_custom_rate_rules"]);
     expect(plan.problems).toEqual([]);
   });
 

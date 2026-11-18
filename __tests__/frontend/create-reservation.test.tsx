@@ -1,14 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import CreateReservationModal from "@/components/reservations/CreateReservationModal";
 import { addDays, isoDay } from "@/lib/dates";
 
 /**
- * The reservation form no longer calculates a price. It asks the server
- * (`POST /api/reservations/quote`) and renders whatever breakdown comes back, so
- * these tests drive the form the same way: by controlling what the quote
- * endpoint answers and asserting the display and the submitted payload.
+ * The modal displays a provisional local estimate until the server supplies an
+ * authoritative quote. Only the server determines the reservation price.
  */
 
 const today = isoDay(new Date());
@@ -110,6 +108,7 @@ beforeEach(() => {
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url === "/api/settings/hotel") return jsonResponse({ useModularPricing: false });
       if (url === "/api/reservations/quote") {
         const body = JSON.parse(String(init?.body ?? "{}"));
         quoteCalls.push(body);
@@ -161,7 +160,7 @@ function typeGuestName(value = "Amina Wanjiru") {
 
 async function waitForQuote() {
   await waitFor(() => expect(quoteCalls.length).toBeGreaterThan(0));
-  await waitFor(() => expect(rateBox().textContent).not.toBe("--"));
+  await waitFor(() => expect(screen.getByText(/Approved rate per night/)).toBeTruthy());
 }
 
 describe("CreateReservationModal pricing", () => {
@@ -189,8 +188,9 @@ describe("CreateReservationModal pricing", () => {
     expect(rateBox().textContent).toContain("4,500");
 
     fireEvent.click(screen.getByRole("button", { name: /Room 201/ }));
-    await waitFor(() => expect(rateBox().textContent).toContain("8,500"));
-    expect(quoteCalls.at(-1)).toMatchObject({ roomId: "room-201" });
+    await waitFor(() => expect(quoteCalls.at(-1)).toMatchObject({ roomId: "room-201" }));
+    await waitFor(() => expect(screen.getByText(/Approved rate per night/)).toBeTruthy());
+    expect(rateBox().textContent).toContain("8,500");
   });
 
   it("re-quotes when the meal plan changes and shows the meal charge", async () => {
@@ -278,6 +278,121 @@ describe("CreateReservationModal pricing", () => {
   });
 });
 
+describe("CreateReservationModal provisional pricing", () => {
+  it("shows an estimate and allows a valid submission while the quote is pending, without sending a price", async () => {
+    const pending = new Promise<Response>(() => {});
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/settings/hotel") return jsonResponse({ useModularPricing: false });
+      if (String(input) === "/api/reservations/quote") return pending;
+      submitCalls.push(JSON.parse(String(init?.body ?? "{}")));
+      return jsonResponse({ id: "res-new", code: "RES-1" }, 201);
+    }));
+    renderModal();
+    typeGuestName();
+    await waitFor(() => expect(submitButton().disabled).toBe(false));
+    expect(screen.getByText(/Estimated rate per night/)).toBeTruthy();
+    expect(screen.getByText(/Estimate only; the server determines the final price/)).toBeTruthy();
+    expect(screen.queryByText(/Approved rate per night/)).toBeNull();
+    expect(rateBox().textContent).toContain("4,500");
+    expect(submitButton().disabled).toBe(false);
+    fireEvent.click(submitButton());
+    await waitFor(() => expect(submitCalls).toHaveLength(1));
+    expect(submitCalls[0]).toMatchObject({ roomId: "room-101", tariffId: "rt-standard" });
+    expect(submitCalls[0]).not.toHaveProperty("rate");
+    expect(submitCalls[0]).not.toHaveProperty("total");
+    await waitFor(() => expect(created).toEqual(["res-new"]));
+  });
+
+  it("immediately switches the estimate to the selected room's base rate without tariff rows", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => String(input) === "/api/settings/hotel" ? Promise.resolve(jsonResponse({ useModularPricing: false })) : new Promise<Response>(() => {})));
+    renderModal({ roomTypes: [] });
+    typeGuestName();
+    await waitFor(() => expect(submitButton().disabled).toBe(false));
+    expect(rateBox().textContent).toContain("4,500");
+    fireEvent.click(screen.getByRole("button", { name: /Room 201/ }));
+    expect(rateBox().textContent).toContain("8,500");
+    expect(screen.getByText(/Estimated rate per night/)).toBeTruthy();
+    expect(submitButton().disabled).toBe(false);
+  });
+
+  it("does not use a different room type's matching tariff in place of the selected room's base rate", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/settings/hotel") return jsonResponse({ useModularPricing: false });
+      if (String(input) === "/api/reservations/quote") return new Promise<Response>(() => {});
+      submitCalls.push(JSON.parse(String(init?.body ?? "{}")));
+      return jsonResponse({ id: "res-new", code: "RES-1" }, 201);
+    }));
+    renderModal({ roomTypes: [{ id: "other", name: "Single — Bed Only", mealPlan: "BED_ONLY", baseRate: 1000 }] });
+    typeGuestName();
+    await waitFor(() => expect(submitButton().disabled).toBe(false));
+    expect(rateBox().textContent).toContain("4,500");
+    fireEvent.click(submitButton());
+    await waitFor(() => expect(submitCalls).toHaveLength(1));
+    expect(submitCalls[0].tariffId).toBe("rt-standard");
+  });
+
+  it("surfaces a server rejection after a provisional attempt", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === "/api/settings/hotel" ? jsonResponse({ useModularPricing: false }) : String(input) === "/api/reservations/quote"
+        ? jsonResponse({ error: "Choose an occupancy for this room." }, 400)
+        : jsonResponse({ error: "Configure occupancy rates before booking." }, 400)
+    ));
+    renderModal({ roomTypes: [] });
+    typeGuestName();
+    await waitFor(() => expect(screen.getByText(/Choose an occupancy for this room/)).toBeTruthy());
+    expect(submitButton().disabled).toBe(false);
+    fireEvent.click(submitButton());
+    await waitFor(() => expect(errors).toContain("Configure occupancy rates before booking."));
+    expect(created).toEqual([]);
+  });
+
+  it("keeps the fallback provisional and permits retry when quoting is unavailable", async () => {
+    quoteError = { status: 503, body: { error: "unavailable" } };
+    renderModal();
+    typeGuestName();
+    await waitFor(() => expect(screen.getByText(/server encountered an error/i)).toBeTruthy());
+    expect(screen.getByText(/Estimated rate per night/)).toBeTruthy();
+    expect(screen.queryByText(/Approved rate per night/)).toBeNull();
+    expect(submitButton().disabled).toBe(false);
+    fireEvent.click(submitButton());
+    await waitFor(() => expect(submitCalls).toHaveLength(1));
+    expect(submitCalls[0]).not.toHaveProperty("rate");
+    expect(submitCalls[0]).not.toHaveProperty("total");
+  });
+
+  it("does not enable submission when neither the quote nor the room has a usable rate", () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
+    renderModal({
+      rooms: [{ ...rooms[0], baseRate: Number.NaN }],
+      roomTypes: [{ ...roomTypes[0], baseRate: 0 }],
+    });
+    typeGuestName();
+    expect(rateBox().textContent).not.toMatch(/NaN|--/);
+    expect(screen.getByText(/Set a valid room rate/)).toBeTruthy();
+    expect(submitButton().disabled).toBe(true);
+  });
+
+  it("ignores a delayed quote for a room that is no longer selected", async () => {
+    let resolveFirst!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => { resolveFirst = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(_input) === "/api/settings/hotel") return jsonResponse({ useModularPricing: false });
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      quoteCalls.push(body);
+      if (body.roomId === "room-101") return pending;
+      return jsonResponse(quoteFor({ roomId: "room-201", roomTypeName: "Deluxe Garden", nightlyRate: 8500 }));
+    }));
+    renderModal();
+    await waitFor(() => expect(quoteCalls).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", { name: /Room 201/ }));
+    await waitFor(() => expect(screen.getByText(/Approved rate per night/)).toBeTruthy());
+    expect(rateBox().textContent).toContain("8,500");
+    await act(async () => { resolveFirst(jsonResponse(quoteFor({ nightlyRate: 1200 }))); });
+    expect(rateBox().textContent).toContain("8,500");
+    expect(rateBox().textContent).not.toContain("1,200");
+  });
+});
+
 describe("CreateReservationModal submit state", () => {
   it("stays disabled until the guest name is entered", async () => {
     renderModal();
@@ -299,13 +414,33 @@ describe("CreateReservationModal submit state", () => {
     expect(screen.getByText("Check-out must be at least one night after check-in.")).toBeTruthy();
   });
 
-  it("surfaces a server refusal to price the stay and keeps the button disabled", async () => {
+  it("shows a provisional room rate and allows an attempt when an occupancy rate is missing", async () => {
     quoteError = { status: 400, body: { error: "This room has no nightly rate configured. Set one on the Pricing page." } };
-    renderModal();
-    await waitFor(() =>
-      expect(screen.getByText(/no nightly rate configured/)).toBeTruthy()
-    );
+    renderModal({ roomTypes: [] });
     typeGuestName();
+    await waitFor(() => expect(screen.getByText(/no nightly rate configured/)).toBeTruthy());
+    expect(screen.getByText(/Estimated rate per night/)).toBeTruthy();
+    expect(rateBox().textContent).toContain("4,500");
+    expect(submitButton().disabled).toBe(false);
+    fireEvent.click(submitButton());
+    await waitFor(() => expect(submitCalls).toHaveLength(1));
+    expect(submitCalls[0]).not.toHaveProperty("rate");
+    expect(submitCalls[0]).not.toHaveProperty("total");
+  });
+
+  it("retains a capacity refusal as a validation error", async () => {
+    quoteError = { status: 400, body: { error: "Standard sleeps 2. Reduce the guests or the extra beds." } };
+    renderModal();
+    typeGuestName();
+    await waitFor(() => expect(screen.getByText(/sleeps 2/)).toBeTruthy());
+    expect(submitButton().disabled).toBe(true);
+  });
+
+  it("still blocks an authorization refusal even when its text mentions a missing rate", async () => {
+    quoteError = { status: 403, body: { error: "no nightly rate configured" } };
+    renderModal();
+    typeGuestName();
+    await waitFor(() => expect(screen.getByText(/do not have permission/)).toBeTruthy());
     expect(submitButton().disabled).toBe(true);
   });
 
@@ -372,4 +507,92 @@ describe("CreateReservationModal submit state", () => {
     expect(screen.queryByText(/Discount \(/)).toBeNull();
     expect(screen.getByText(/Only an owner, admin or manager can apply a discount/)).toBeTruthy();
   });
+});
+
+describe("modular pricing in CreateReservationModal", () => {
+  const modularTypes = [
+    { ...roomTypes[0], maxAdults: 3, maxChildren: 2, extraAdultFee: 500 },
+    { ...roomTypes[1], maxAdults: 2, maxChildren: 1, extraAdultFee: 1000 },
+  ];
+  const plans = [
+    { mealPlan: "ROOM_ONLY", adultSurcharge: 0, childSurcharge: 0, isActive: true },
+    { mealPlan: "HALF_BOARD", adultSurcharge: 1000, childSurcharge: 500, isActive: true },
+    { mealPlan: "ALL_INCLUSIVE", adultSurcharge: 5000, childSurcharge: 2000, isActive: false },
+  ];
+  it("calculates a provisional price and sends only the selected meal code, not a browser price", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/settings/hotel") return jsonResponse({ useModularPricing: true });
+      if (String(input) === "/api/settings/meals") return jsonResponse(plans);
+      if (String(input) === "/api/reservations/quote") return new Promise<Response>(() => {});
+      submitCalls.push(JSON.parse(String(init?.body ?? "{}")));
+      return jsonResponse({ id: "res-new", code: "RES-1" }, 201);
+    }));
+    renderModal({ roomTypes: modularTypes });
+    typeGuestName();
+    const select = await screen.findByTestId("modular-meal-plan") as HTMLSelectElement;
+    expect(select.textContent).toContain("Half Board");
+    expect(select.textContent).not.toContain("All-Inclusive");
+    fireEvent.change(select, { target: { value: "HALF_BOARD" } });
+    fireEvent.change(screen.getByTestId("adults"), { target: { value: "2" } });
+    fireEvent.change(screen.getByTestId("children"), { target: { value: "1" } });
+    expect(rateBox().textContent).toContain("7,500");
+    expect(screen.getByTestId("estimated-stay-total").textContent).toContain("7,500");
+    expect(screen.getByText(/Estimated rate per night/)).toBeTruthy();
+    expect(submitButton().disabled).toBe(false);
+    fireEvent.click(submitButton());
+    await waitFor(() => expect(submitCalls).toHaveLength(1));
+    expect(submitCalls[0]).toMatchObject({ roomId: "room-101", mealPlanCode: "HALF_BOARD", adults: 2, children: 1 });
+    expect(submitCalls[0]).not.toHaveProperty("rate");
+    expect(submitCalls[0]).not.toHaveProperty("total");
+    expect(submitCalls[0]).not.toHaveProperty("tariffId");
+  });
+  it("requests and displays the authoritative modular quote with the selected meal code", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/settings/hotel") return jsonResponse({ useModularPricing: true });
+      if (String(input) === "/api/settings/meals") return jsonResponse(plans);
+      if (String(input) === "/api/reservations/quote") {
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        quoteCalls.push(body);
+        return jsonResponse(quoteFor({ pricingModel: "MODULAR_PRICING", occupancyTypeId: null, occupancyName: null, nightlyRate: body.mealPlanCode === "HALF_BOARD" ? 6500 : 4500 }));
+      }
+      return jsonResponse({ id: "res-new", code: "RES-1" }, 201);
+    }));
+    renderModal({ roomTypes: modularTypes });
+    const select = await screen.findByTestId("modular-meal-plan");
+    fireEvent.change(select, { target: { value: "HALF_BOARD" } });
+    await waitFor(() => expect(quoteCalls.at(-1)).toMatchObject({ mealPlanCode: "HALF_BOARD" }));
+    await waitFor(() => expect(screen.getByText(/Approved rate per night/)).toBeTruthy());
+    expect(rateBox().textContent).toContain("6,500");
+  });
+  it("blocks submission if pricing mode cannot be determined", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ error: "unavailable" }, 503)));
+    renderModal({ roomTypes: modularTypes });
+    typeGuestName();
+    await waitFor(() => expect(screen.getByText(/server encountered an error/i)).toBeTruthy());
+    expect(submitButton().disabled).toBe(true);
+  });
+  it("requires a valid room capacity and an active meal plan", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/settings/hotel") return jsonResponse({ useModularPricing: true });
+      if (String(input) === "/api/settings/meals") return jsonResponse(plans);
+      return new Promise<Response>(() => {});
+    }));
+    renderModal({ roomTypes: modularTypes });
+    typeGuestName();
+    await screen.findByTestId("modular-meal-plan");
+    fireEvent.change(screen.getByTestId("adults"), { target: { value: "4" } });
+    expect(screen.getByText(/exceed this room type's capacity/)).toBeTruthy();
+    expect(submitButton().disabled).toBe(true);
+  });
+});
+
+it("offers a room again after housekeeping changes its post-checkout status to available", async () => {
+  const dirtyRooms = rooms.map((room) => room.id === "room-101" ? { ...room, status: "DIRTY" as const } : room);
+  const { rerender } = renderModal({ rooms: dirtyRooms });
+  expect((screen.getByRole("button", { name: /Room 101/ }) as HTMLButtonElement).disabled).toBe(true);
+  rerender(<CreateReservationModal rooms={rooms} roomTypes={roomTypes} defaultRoomId="room-101" defaultDate={new Date()} currency="KES" canApplyDiscount={false} onClose={() => {}} onCreated={() => {}} onError={() => {}} />);
+  expect((screen.getByRole("button", { name: /Room 101/ }) as HTMLButtonElement).disabled).toBe(false);
+  await waitForQuote();
+  typeGuestName();
+  expect(submitButton().disabled).toBe(false);
 });

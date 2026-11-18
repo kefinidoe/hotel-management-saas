@@ -18,7 +18,7 @@ export default async function ReservationsPage() {
     prisma.roomType.findMany({
       where: { hotelId: tenant.hotelId },
       orderBy: { name: "asc" },
-      select: { id: true, name: true, baseRate: true, mealPlan: true },
+      select: { id: true, name: true, baseRate: true, mealPlan: true, maxAdults: true, maxChildren: true, extraAdultFee: true },
     }),
   ]);
 
@@ -34,7 +34,7 @@ export default async function ReservationsPage() {
   return (
     <ReservationsClient
       rooms={initialRooms}
-      roomTypes={roomTypes.map((type) => ({ ...type, baseRate: Number(type.baseRate) }))}
+      roomTypes={roomTypes.map((type) => ({ ...type, baseRate: Number(type.baseRate), extraAdultFee: Number(type.extraAdultFee) }))}
       currency={tenant.hotel.currency}
       currentUserRole={tenant.role}
     />

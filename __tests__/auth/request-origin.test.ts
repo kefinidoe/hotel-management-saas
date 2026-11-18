@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, afterAll } from "vitest";
+import { describe, expect, it, beforeEach, afterAll, vi } from "vitest";
 import { isSameOriginRequest } from "@/lib/request-origin";
 
 /**
@@ -91,6 +91,20 @@ describe("isSameOriginRequest", () => {
       delete process.env.SAAS_ALLOW_REQUEST_HOST_ORIGIN;
       process.env.NEXTAUTH_URL = BASE;
     }
+  });
+
+  it("permits a matching loopback fallback port only in development", () => {
+    vi.stubEnv("NODE_ENV", "development");
+    try {
+      const local = new Request("http://127.0.0.1:3101/api/auth/switch-hotel", {
+        method: "POST", headers: { origin: "http://127.0.0.1:3101", host: "127.0.0.1:3101" },
+      });
+      expect(isSameOriginRequest(local)).toBe(true);
+      expect(isSameOriginRequest(new Request("http://127.0.0.1:3101/api/auth/switch-hotel", { method: "POST", headers: { host: "127.0.0.1:3101" } }))).toBe(true);
+      expect(isSameOriginRequest(request({ origin: "http://127.0.0.1:3101", host: "127.0.0.1:3100" }))).toBe(false);
+      vi.stubEnv("NODE_ENV", "production");
+      expect(isSameOriginRequest(local)).toBe(false);
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it("fails closed on a malformed Origin", () => {

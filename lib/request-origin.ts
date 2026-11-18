@@ -50,6 +50,17 @@ function requestHostIsAcceptableOrigin(originHost: string, request: Request): bo
   return originHost === host;
 }
 
+// Development may run on a fallback port when 3000 is occupied. Only accept
+// the actual loopback Host, and only if the configured origin is loopback too.
+function localDevelopmentOrigin(parsed: URL, expected: URL, request: Request): boolean {
+  if (process.env.NODE_ENV !== "development") return false;
+  const loopback = new Set(["localhost", "127.0.0.1", "[::1]"]);
+  return parsed.protocol === "http:" && expected.protocol === "http:" &&
+    loopback.has(parsed.hostname) && parsed.hostname === expected.hostname &&
+    parsed.host === request.headers.get("host") &&
+    parsed.host === new URL(request.url).host;
+}
+
 export function isSameOriginRequest(request: Request): boolean {
   const origin = request.headers.get("origin");
   const fetchSite = request.headers.get("sec-fetch-site");
@@ -69,7 +80,7 @@ export function isSameOriginRequest(request: Request): boolean {
       parsed.protocol === expected.protocol &&
       parsed.hostname === expected.hostname &&
       parsed.port === expected.port;
-    return matchesConfigured || requestHostIsAcceptableOrigin(parsed.host, request);
+    return matchesConfigured || localDevelopmentOrigin(parsed, expected, request) || requestHostIsAcceptableOrigin(parsed.host, request);
   }
 
   if (fetchSite) return fetchSite === "same-origin";
@@ -81,7 +92,8 @@ export function isSameOriginRequest(request: Request): boolean {
   const host = request.headers.get("host");
   if (!host) return false;
   try {
-    return new URL(process.env.NEXTAUTH_URL || "http://localhost:3000").host === host;
+    const expected = new URL(process.env.NEXTAUTH_URL || "http://localhost:3000");
+    return expected.host === host || localDevelopmentOrigin(new URL(request.url), expected, request);
   } catch {
     return false;
   }

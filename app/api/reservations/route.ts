@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { ROOM_BLOCKING_RESERVATION_STATUSES } from "@/lib/reservation-status";
 import { rangesOverlap } from "@/lib/dates";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { accommodationRequired, parseMoney, roundMoney, stayNights } from "@/lib/billing";
@@ -12,6 +13,10 @@ import { loadPricingConfig } from "@/lib/pricing/config";
 import { priceStay } from "@/lib/pricing/engine";
 import { pricingUnavailableResponse } from "@/lib/pricing/http";
 import type { PriceBreakdown } from "@/lib/pricing/types";
+import { z } from "zod";
+import { priceCustomReservation, CustomPricingError } from "@/lib/pricing/custom-server";
+import { priceModularStay } from "@/lib/pricing/modular";
+import { UNIVERSAL_MEAL_PLANS, type UniversalMealPlan } from "@/lib/pricing";
 
 const BOOKING_SOURCES = ["WALK_IN", "PHONE", "WEBSITE", "OTA", "CORPORATE", "OTHER"] as const;
 
@@ -114,19 +119,27 @@ export async function POST(req: Request) {
   // read the request stops here with a 503: creating the reservation without it
   // would price the stay from room type base rates and ignore every configured
   // rule, i.e. store a charge nobody agreed to.
-  let pricingConfig: Awaited<ReturnType<typeof loadPricingConfig>>;
+  const custom = tenant.hotel.useCustomRateRules === true;
+  const modular = !custom && tenant.hotel.useModularPricing === true;
+  if (custom) {
+    const query = z.strictObject({}).safeParse(Object.fromEntries(new URL(req.url).searchParams));
+    if (!query.success) return NextResponse.json({ error: "Invalid request.", issues: query.error.issues }, { status: 400 });
+    const validated = z.object({ occupancyTypeId: z.string().trim().min(1).max(200), mealPlanId: z.string().trim().min(1).max(200), approvedRate: z.number().finite().positive().max(99999999.99), adults: z.number().int().min(1).max(100), children: z.number().int().min(0).max(100) }).safeParse(body);
+    if (!validated.success) return NextResponse.json({ error: "Invalid pricing selection.", issues: validated.error.issues }, { status: 400 });
+  }
+  let pricingConfig: Awaited<ReturnType<typeof loadPricingConfig>> | null = null;
   try {
-    pricingConfig = await loadPricingConfig(hotelId, tenant.hotel.currency);
+    if (!modular && !custom) pricingConfig = await loadPricingConfig(hotelId, tenant.hotel.currency);
   } catch (error) {
     const unavailable = pricingUnavailableResponse(error, "POST /api/reservations (pricing configuration)");
     if (unavailable) return unavailable;
     throw error;
   }
   const usesConfiguredPricing =
-    pricingConfig.settings.pricingModel === "ROOM_TYPE_OCCUPANCY" &&
+    pricingConfig?.settings.pricingModel === "ROOM_TYPE_OCCUPANCY" &&
     pricingConfig.settings.useOccupancyRates;
 
-  const missingPricingFields = usesConfiguredPricing
+  const missingPricingFields = custom || modular || usesConfiguredPricing
     ? []
     : !tariffId || !occupancy || !mealPlan
       ? ["tariffId", "occupancy", "mealPlan"]
@@ -183,6 +196,14 @@ export async function POST(req: Request) {
     );
   }
 
+  const modularMealPlan = typeof body.mealPlanCode === "string" ? body.mealPlanCode : "";
+  if (modular && !UNIVERSAL_MEAL_PLANS.includes(modularMealPlan as UniversalMealPlan)) {
+    return NextResponse.json({ error: "Invalid meal plan." }, { status: 400 });
+  }
+  if ((modular || custom) && (discountPercent !== undefined || Number(body.extraBeds ?? 0) !== 0)) {
+    return NextResponse.json({ error: "Percentage discounts and extra beds are not supported by modular pricing." }, { status: 400 });
+  }
+
   const source = BOOKING_SOURCES.find((value) => value === body.source) ?? "WALK_IN";
 
   try {
@@ -193,6 +214,14 @@ export async function POST(req: Request) {
         await tx.$queryRaw<Array<{ locked: string }>>`
           SELECT pg_advisory_xact_lock(hashtext(${lockKey}))::text AS locked
         `;
+
+        // The mode can change after tenant resolution. Compare under the same
+        // lock used by the mode update, rather than charging with stale policy.
+        const currentHotel = await tx.hotel.findUnique({ where: { id: hotelId }, select: { useModularPricing: true, useCustomRateRules: true } });
+        if (!currentHotel) throw new ReservationError("Hotel not found.", 404);
+        if ((currentHotel.useCustomRateRules === true) !== custom || (!custom && currentHotel.useModularPricing !== modular)) {
+          throw new ReservationError("Pricing mode changed. Please retry the reservation.", 409);
+        }
 
         // Validate that the room belongs to THIS tenant hotel.
         const room = await tx.room.findUnique({
@@ -220,7 +249,35 @@ export async function POST(req: Request) {
         let rate: number; // nightly room rate, stored on ReservationRoom
         let priceSnapshot: PriceBreakdown | null = null;
 
-        if (usesConfiguredPricing) {
+        if (custom) {
+          try {
+            priceSnapshot = await priceCustomReservation(tx, { hotelId, currency: tenant.hotel.currency, roomTypeId: room.roomTypeId, mealId: mealPlanId!, occupancyId: occupancyTypeId!, adults, children, checkIn, checkOut, discount });
+          } catch (error) {
+            if (error instanceof CustomPricingError) throw new ReservationError(error.message);
+            throw error;
+          }
+          if (Math.abs(priceSnapshot.effectiveNightlyRate - body.approvedRate) > 0.000001) throw new ReservationError("The approved price changed. Refresh the quote and try again.", 409);
+          rate = priceSnapshot.nightlyRate;
+        } else if (modular) {
+          const roomType = await tx.roomType.findUnique({
+            where: { id_hotelId: { id: room.roomTypeId, hotelId } },
+            select: { id: true, name: true, baseRate: true, extraAdultFee: true, maxAdults: true, maxChildren: true },
+          });
+          if (!roomType) throw new ReservationError("Room type not found.", 404);
+          const mealRows = await tx.hotelMealPricing.findMany({ where: { hotelId } });
+          try {
+            priceSnapshot = priceModularStay({
+              currency: tenant.hotel.currency,
+              roomType: { ...roomType, baseRate: String(roomType.baseRate), extraAdultFee: String(roomType.extraAdultFee) },
+              mealPlan: modularMealPlan as UniversalMealPlan,
+              mealRates: mealRows.map((row) => ({ ...row, adultSurcharge: String(row.adultSurcharge), childSurcharge: String(row.childSurcharge) })),
+              checkIn, checkOut, adults, children, discount,
+            });
+          } catch (error) {
+            throw new ReservationError(error instanceof Error ? error.message : "Could not price this reservation.");
+          }
+          rate = priceSnapshot.nightlyRate;
+        } else if (usesConfiguredPricing && pricingConfig) {
           const priced = priceStay(pricingConfig, {
             roomTypeId: room.roomTypeId,
             occupancyTypeId,
@@ -288,7 +345,7 @@ export async function POST(req: Request) {
             roomId,
             reservation: {
               hotelId,
-              status: { notIn: ["CANCELLED", "NO_SHOW"] },
+              status: { in: [...ROOM_BLOCKING_RESERVATION_STATUSES] },
             },
           },
           include: { reservation: true },
@@ -379,14 +436,14 @@ export async function POST(req: Request) {
             reservationId: reservation.id,
             breakdown: priceSnapshot,
             createdById: tenant.userId,
-            required: usesConfiguredPricing,
+            required: custom || modular || usesConfiguredPricing,
           });
         }
 
         return {
           id: reservation.id,
           code: reservation.code,
-          currency: pricingConfig.currency,
+          currency: pricingConfig?.currency ?? tenant.hotel.currency,
           total: priceSnapshot ? priceSnapshot.totals.grandTotal : roundMoney(rate * nights - discount),
           nightlyRate: rate,
           nights,

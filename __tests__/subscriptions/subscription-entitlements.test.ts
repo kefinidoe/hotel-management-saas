@@ -20,6 +20,7 @@ vi.mock("@prisma/client", () => ({
     PLATFORM_SUPPORT: "PLATFORM_SUPPORT",
     PLATFORM_BILLING: "PLATFORM_BILLING",
   },
+  RoomStatus: { AVAILABLE: "AVAILABLE", RESERVED: "RESERVED", OCCUPIED: "OCCUPIED", DIRTY: "DIRTY", CLEANING: "CLEANING", READY: "READY", MAINTENANCE: "MAINTENANCE", OUT_OF_ORDER: "OUT_OF_ORDER" },
   Prisma: {
     TransactionIsolationLevel: { Serializable: "Serializable" },
     PrismaClientKnownRequestError: class PrismaClientKnownRequestError extends Error {

@@ -1,3 +1,6 @@
+import { ROOM_BLOCKING_RESERVATION_STATUSES } from "@/lib/reservation-status";
+import { validateRoomStayMutation } from "@/lib/room-stay-mutation-validation";
+import { reservationExtensionSchema } from "@/lib/reservation-extension-validation";
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
@@ -57,12 +60,9 @@ export async function POST(
 
   const hotelId = tenant.hotelId;
 
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
-  }
+  const validation = await validateRoomStayMutation(req, reservationExtensionSchema, { id });
+  if (validation.response) return validation.response;
+  const body = validation.data;
 
   const newCheckOut = new Date(body?.checkOutDate);
   if (!Number.isFinite(newCheckOut.getTime())) {
@@ -150,7 +150,7 @@ export async function POST(
             reservation: {
               hotelId,
               id: { not: reservation.id },
-              status: { in: ["PENDING", "CONFIRMED", "CHECKED_IN"] },
+              status: { in: [...ROOM_BLOCKING_RESERVATION_STATUSES] },
               checkInDate: { lt: newCheckOut },
               checkOutDate: { gt: reservation.checkOutDate },
             },
@@ -178,8 +178,11 @@ export async function POST(
         const bookingVersion = await tx.reservationPriceSnapshot.findFirst({
           where: { reservationId: reservation.id, hotelId },
           orderBy: { version: "desc" },
-          select: { version: true, currency: true, nights: true, grandTotal: true },
+          select: { version: true, currency: true, nights: true, grandTotal: true, pricingModel: true },
         });
+        if (bookingVersion?.pricingModel === "MODULAR_PRICING" || bookingVersion?.pricingModel === "CUSTOM_RATE_RULES") {
+          throw new ExtensionError("Modular and dynamic-rule reservations cannot yet be extended automatically; please contact a manager.", 400, "MODULAR_EXTENSION_UNAVAILABLE");
+        }
         const currency = bookingVersion?.currency ?? tenant.hotel.currency;
 
         const rooms: Array<{

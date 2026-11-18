@@ -98,6 +98,26 @@
     {
       "name": "20261107120000_auth_rate_limit",
       "sha256": "dc24bc2f9a5833a8511936e9869b3b0c3728f027e9d94da3f44d9ed60dd3afcd"
+    },
+    {
+      "name": "20261108120000_universal_meal_pricing",
+      "sha256": "c855fc562af5a30ce892f734a6686796ce0b57cfb53b7c777e92e8a065711ce7"
+    },
+    {
+      "name": "20261109120000_modular_pricing_opt_in",
+      "sha256": "153c6dfa8c4d57dd43df8d4aff62ef9f20ca85a5fb87e800168079672aadca7d"
+    },
+    {
+      "name": "20261110120000_modular_pricing_snapshot",
+      "sha256": "944a8414906272413824cff3bbf25b44f13f0962acfa9f53743de0e2c0b25fce"
+    },
+    {
+      "name": "20261111120000_hotel_branding_logo_url",
+      "sha256": "7250f642ba0dac807d49cc5e3cdf52044bce711326049b4ecd7369c25585ed91"
+    },
+    {
+      "name": "20261112120000_custom_rate_rules",
+      "sha256": "b3ef5e3143d37024dad9374664537f7ba4189892ae370341eab14e79b175c4aa"
     }
   ]
 }

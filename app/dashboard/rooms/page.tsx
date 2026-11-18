@@ -36,6 +36,9 @@ export default async function RoomsPage() {
     description: rt.description,
     baseRate: Number(rt.baseRate),
     capacity: rt.capacity,
+    maxAdults: rt.maxAdults,
+    maxChildren: rt.maxChildren,
+    extraAdultFee: Number(rt.extraAdultFee),
     mealPlan: rt.mealPlan,
   }));
 
@@ -44,6 +47,7 @@ export default async function RoomsPage() {
       initialRooms={initialRooms}
       initialRoomTypes={initialRoomTypes}
       canManage={hasRole(tenant.role, ROLE_GROUPS.MANAGEMENT)}
+      useModularPricing={tenant.hotel.useModularPricing}
     />
   );
 }

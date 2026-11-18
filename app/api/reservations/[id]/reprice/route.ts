@@ -55,7 +55,7 @@ type LockedReservation = {
   children: number;
   discount: unknown;
   rooms: Array<{ id: string; roomId: string; room: { id: string; roomTypeId: string } }>;
-  priceSnapshots: Array<{ version: number; occupancyName: string | null; mealPlanName: string | null; grandTotal: unknown }>;
+  priceSnapshots: Array<{ version: number; pricingModel?: string; occupancyName: string | null; mealPlanName: string | null; grandTotal: unknown }>;
   folios: Array<{ id: string; items: unknown[]; payments: Array<{ id: string; status: string }> }>;
 };
 
@@ -188,6 +188,9 @@ export async function POST(
 
         const room = reservation.rooms[0].room;
         const current = currentPriceVersion(reservation.priceSnapshots);
+        if (current?.pricingModel === "MODULAR_PRICING" || current?.pricingModel === "CUSTOM_RATE_RULES") {
+          throw new RepriceError("Modular and dynamic-rule reservations cannot yet be repriced. The agreed price remains unchanged.", 400, "MODULAR_REPRICE_UNAVAILABLE");
+        }
         const config = await loadPricingConfig(hotelId, tenant.hotel.currency, tx);
 
         const occupancyTypeId =

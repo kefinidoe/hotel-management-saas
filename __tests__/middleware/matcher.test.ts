@@ -7,14 +7,9 @@ import { getPathMatch } from "next/dist/shared/lib/router/utils/path-match";
  * Guards the middleware matcher in `middleware.ts`.
  *
  * The matcher is the thing that decides which requests are reachable without a
- * session. It is written as a path-to-regexp pattern with a negative lookahead
- * (`/api/:path((?!auth/).*)`), which is easy to break by accident and — unlike a
- * normal route — fails *open* rather than throwing when it's wrong. Six API
- * endpoints were previously reachable anonymously this way.
- *
- * This reads the real `config.matcher` out of the file and runs it through
- * Next's own matcher, so it fails if someone edits the pattern into something
- * that no longer protects the app, or accidentally locks out signing in.
+ * session. The matcher covers all API routes, while middleware passes public
+ * auth routes through before checking origin. This uses Next's own matcher to
+ * guard against accidentally missing other paths.
  */
 
 const SOURCE = readFileSync(resolve(__dirname, "../../middleware.ts"), "utf8");
@@ -74,7 +69,7 @@ const API_ROUTES = [
   "/api/wastage",
 ];
 
-// NextAuth's own endpoints. If any of these become guarded, nobody can sign in.
+// NextAuth's endpoints must reach the origin middleware but remain public there.
 const AUTH_ROUTES = [
   "/api/auth/signin",
   "/api/auth/signin/credentials",
@@ -99,9 +94,9 @@ describe("middleware matcher", () => {
     expect(unguarded).toEqual([]);
   });
 
-  it("leaves NextAuth's own endpoints public, so sign-in still works", () => {
-    const wronglyGuarded = AUTH_ROUTES.filter(isGuarded);
-    expect(wronglyGuarded).toEqual([]);
+  it("matches NextAuth's endpoints, which middleware passes through", () => {
+    const missed = AUTH_ROUTES.filter((p) => !isGuarded(p));
+    expect(missed).toEqual([]);
   });
 
   it("guards every /dashboard page and leaves the public pages alone", () => {

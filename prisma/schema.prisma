@@ -65,13 +65,16 @@ model Hotel {
   id        String      @id @default(uuid())
   name      String
   slug      String      @unique
-  logo      String?
+  logo      String? // Legacy field retained for compatibility.
+  logoUrl   String?
   email     String?
   phone     String?
   address   String?
   currency  String      @default("KES")
   timezone  String      @default("Africa/Nairobi")
   settings  Json?
+  useModularPricing Boolean @default(false)
+  useCustomRateRules Boolean @default(false)
   status    HotelStatus @default(ACTIVE)
   createdAt DateTime    @default(now())
   updatedAt DateTime    @updatedAt
@@ -102,6 +105,9 @@ model Hotel {
   // Pricing configuration (all tenant-scoped; see docs/pricing-engine-design.md)
   occupancyTypes     OccupancyType[]
   roomTypeOccupancies RoomTypeOccupancy[]
+  hotelMealPricing   HotelMealPricing[]
+  mealPlanRates      MealPlanRate[]
+  occupancyRateRules OccupancyRateRule[]
   mealPlanConfigs    MealPlanConfig[]
   mealPlanRoomTypes  MealPlanRoomType[]
   rateAdjustments    RateAdjustment[]
@@ -213,6 +219,61 @@ enum MealPlan {
   HALF_BOARD
 }
 
+enum MealPlanCode {
+  ROOM_ONLY
+  BED_BREAKFAST
+  HALF_BOARD
+  FULL_BOARD
+  ALL_INCLUSIVE
+}
+
+// Separate, tenant-owned per-person meal surcharges for the opt-in model.
+model HotelMealPricing {
+  id             String       @id @default(uuid())
+  hotelId        String
+  hotel          Hotel        @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  mealPlan       MealPlanCode
+  adultSurcharge Decimal      @default(0) @db.Decimal(10, 2)
+  childSurcharge Decimal      @default(0) @db.Decimal(10, 2)
+  isActive       Boolean      @default(true)
+
+  @@unique([hotelId, mealPlan])
+}
+
+// Independent, opt-in rules: existing pricing models are not changed.
+model MealPlanRate {
+  id            String   @id @default(uuid())
+  hotelId       String
+  hotel         Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  code          String
+  name          String
+  pricePerNight Float
+  perGuest      Boolean  @default(true)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([hotelId, code])
+  @@index([hotelId, isActive])
+}
+
+model OccupancyRateRule {
+  id              String   @id @default(uuid())
+  hotelId         String
+  hotel           Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  occupancyType   String
+  label           String
+  includedAdults  Int
+  surchargeAmount Float
+  extraAdultRate  Float
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([hotelId, occupancyType])
+  @@index([hotelId, isActive])
+}
+
 model RoomType {
   id          String    @id @default(uuid())
   hotelId     String
@@ -220,7 +281,10 @@ model RoomType {
   name        String // e.g. "Single — Bed Only", "Double — B&B"
   description String?
   baseRate    Decimal   @db.Decimal(10, 2)
-  capacity    Int       @default(2)
+  capacity    Int       @default(2) // Retained for existing pricing and reservations.
+  maxAdults   Int       @default(2)
+  maxChildren Int       @default(0)
+  extraAdultFee Decimal @default(0) @db.Decimal(10, 2)
   mealPlan    MealPlan?
   amenities   String[]  @default([])
   createdAt   DateTime  @default(now())
@@ -879,6 +943,8 @@ enum TaxChargeBasis {
 enum PricingModel {
   ROOM_TYPE_OCCUPANCY // configured occupancy rates below
   LEGACY_BASE_RATE    // RoomType.baseRate, unchanged behaviour
+  MODULAR_PRICING
+  CUSTOM_RATE_RULES
 }
 
 /// A hotel's own occupancy options ("Single", "Double", "Twin", "Family", ...).

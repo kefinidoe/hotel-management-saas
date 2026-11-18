@@ -74,10 +74,16 @@ function serializeReservation(reservation: FrontDeskReservation) {
   const pricingLines = openFolio
     ? openFolio.items.map((item) => ({ label: item.description, amount: Number(item.total) }))
     : Array.isArray(rawLines)
-      ? rawLines.flatMap((line) => {
-          if (!line || typeof line !== "object" || Array.isArray(line) || typeof line.label !== "string" || typeof line.amount !== "number" || !Number.isFinite(line.amount)) return [];
-          return [{ label: line.label, amount: line.amount }];
-        })
+      ? [
+          ...rawLines.flatMap((line) => {
+            if (!line || typeof line !== "object" || Array.isArray(line) || typeof line.label !== "string" || typeof line.amount !== "number" || !Number.isFinite(line.amount)) return [];
+            return [{ label: line.label, amount: line.amount }];
+          }),
+          // Older custom/modular snapshots stored discountTotal but omitted its line.
+          ...(Number(snapshot?.discountTotal ?? 0) > 0 && !rawLines.some((line) =>
+            line && typeof line === "object" && !Array.isArray(line) && line.kind === "DISCOUNT"
+          ) ? [{ label: "Discount", amount: -Number(snapshot!.discountTotal) }] : []),
+        ]
       : !snapshot
         ? [
             ...reservation.rooms.map((room) => ({
@@ -140,7 +146,7 @@ export default async function FrontDeskPage() {
     prisma.roomType.findMany({
       where: { hotelId: session.hotelId },
       orderBy: { name: "asc" },
-      select: { id: true, name: true, baseRate: true, mealPlan: true },
+      select: { id: true, name: true, baseRate: true, mealPlan: true, maxAdults: true, maxChildren: true, extraAdultFee: true },
     }),
   ]);
 
@@ -173,7 +179,7 @@ export default async function FrontDeskPage() {
       departures={departures.map(serializeReservation)}
       inHouse={inHouse.map(serializeReservation)}
       availableRoomsCount={rooms.filter((room) => isBookableToday(room.status)).length}
-      roomTypes={roomTypes.map((type) => ({ ...type, baseRate: Number(type.baseRate) }))}
+      roomTypes={roomTypes.map((type) => ({ ...type, baseRate: Number(type.baseRate), extraAdultFee: Number(type.extraAdultFee) }))}
       rooms={rooms.map((room) => ({
         id: room.id,
         number: room.number,
