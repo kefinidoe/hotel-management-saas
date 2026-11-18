@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 
-const mocks = vi.hoisted(() => ({ tenant: vi.fn(), role: vi.fn(), module: vi.fn(), findMany: vi.fn(), upsert: vi.fn(), transaction: vi.fn(), audit: vi.fn() }));
+const mocks = vi.hoisted(() => ({ tenant: vi.fn(), role: vi.fn(), module: vi.fn(), findMany: vi.fn(), upsert: vi.fn(), transaction: vi.fn(), lock: vi.fn(), audit: vi.fn() }));
 vi.mock("@/lib/authz", () => ({
   getTenantFromRoute: mocks.tenant, requireRole: mocks.role, requireModule: mocks.module,
   ROLE_GROUPS: { MANAGEMENT: ["manager"], GUEST_STAYS: ["receptionist"] },
@@ -19,7 +19,7 @@ beforeEach(() => {
   mocks.role.mockReturnValue(null);
   mocks.module.mockResolvedValue(null);
   mocks.findMany.mockResolvedValue([]);
-  mocks.transaction.mockImplementation(async (fn) => fn({ hotelMealPricing: { upsert: mocks.upsert } }));
+  mocks.transaction.mockImplementation(async (fn) => fn({ $queryRaw: mocks.lock, hotelMealPricing: { upsert: mocks.upsert } }));
   mocks.upsert.mockImplementation(async ({ create }) => ({ id: "row", ...create }));
   mocks.audit.mockResolvedValue(true);
 });
@@ -30,6 +30,7 @@ describe("tenant meal pricing settings", () => {
     expect(response.status).toBe(200);
     const rows = await response.json();
     expect(rows).toHaveLength(5);
+    expect(rows[1].isActive).toBe(false);
     expect(rows[0]).toMatchObject({ mealPlan: "ROOM_ONLY", adultSurcharge: 0, childSurcharge: 0, isActive: true });
     expect(mocks.findMany).toHaveBeenCalledWith({ where: { hotelId: "hotel-a" } });
     expect(mocks.role).toHaveBeenCalledWith("MANAGER", ["receptionist"]);
@@ -38,6 +39,7 @@ describe("tenant meal pricing settings", () => {
     const response = await PUT(request(JSON.stringify(valid)));
     expect(response.status).toBe(200);
     expect(mocks.role).toHaveBeenCalledWith("MANAGER", ["manager"]);
+    expect(mocks.lock).toHaveBeenCalled();
     expect(mocks.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: { hotelId_mealPlan: { hotelId: "hotel-a", mealPlan: "BED_BREAKFAST" } },
       create: expect.objectContaining({ hotelId: "hotel-a", ...valid }),

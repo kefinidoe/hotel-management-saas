@@ -33,7 +33,7 @@ export async function GET(req: Request) {
     const rows = await prisma.hotelMealPricing.findMany({ where: { hotelId: tenant.hotelId } });
     return NextResponse.json(UNIVERSAL_MEAL_PLANS.map((mealPlan) => {
       const row = rows.find((entry) => entry.mealPlan === mealPlan);
-      return { mealPlan, adultSurcharge: Number(row?.adultSurcharge ?? 0), childSurcharge: Number(row?.childSurcharge ?? 0), isActive: row?.isActive ?? true };
+      return { mealPlan, adultSurcharge: Number(row?.adultSurcharge ?? 0), childSurcharge: Number(row?.childSurcharge ?? 0), isActive: row?.isActive ?? (mealPlan === "ROOM_ONLY") };
     }));
   } catch (error) {
     console.error("Failed to load hotel meal prices", error);
@@ -49,6 +49,8 @@ export async function PUT(req: Request) {
   const { mealPlan, adultSurcharge, childSurcharge, isActive } = validated.data;
   try {
     const saved = await prisma.$transaction(async (tx) => {
+      const lockKey = `hotel-${tenant.hotelId}-reservation-create`;
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
       const row = await tx.hotelMealPricing.upsert({
         where: { hotelId_mealPlan: { hotelId: tenant.hotelId, mealPlan } },
         create: { hotelId: tenant.hotelId, mealPlan, adultSurcharge, childSurcharge, isActive },

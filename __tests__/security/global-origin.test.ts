@@ -68,6 +68,7 @@ const reviewed = [
   "POST api/restaurant/pay-now",
   "POST api/room-types",
   "POST api/rooms",
+  "POST api/settings/branding/upload",
   "POST api/settings/meals",
   "POST api/settings/pricing/rules",
   "POST api/staff",

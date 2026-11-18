@@ -60,6 +60,7 @@ CSP: `default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style
 - `POST api/restaurant/pay-now`
 - `POST api/room-types`
 - `POST api/rooms`
+- `POST api/settings/branding/upload` — covered by the global origin check; upload-content security remains a separate review
 - `POST api/staff`
 - `POST api/wastage`
 - `PUT api/housekeeping/[id]`
