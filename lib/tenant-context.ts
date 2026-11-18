@@ -39,6 +39,7 @@ export interface TenantContext {
     slug: string;
     currency: string;
     useModularPricing: boolean;
+    useCustomRateRules: boolean;
     timezone: string;
     status: HotelStatus;
   };
@@ -128,6 +129,7 @@ export async function getTenantContext(
         slug: membership.hotel.slug,
         currency: membership.hotel.currency,
         useModularPricing: membership.hotel.useModularPricing,
+        useCustomRateRules: membership.hotel.useCustomRateRules,
         timezone: membership.hotel.timezone,
         status: membership.hotel.status,
       },
@@ -178,6 +180,7 @@ export async function getTenantContext(
         slug: sole.hotel.slug,
         currency: sole.hotel.currency,
         useModularPricing: sole.hotel.useModularPricing,
+        useCustomRateRules: sole.hotel.useCustomRateRules,
         timezone: sole.hotel.timezone,
         status: sole.hotel.status,
       },

@@ -191,7 +191,7 @@ export type NightPrice = {
 export type PriceBreakdown = {
   ok: true;
   currency: string;
-  pricingModel: PricingModel | "MODULAR_PRICING";
+  pricingModel: PricingModel | "MODULAR_PRICING" | "CUSTOM_RATE_RULES";
   nights: number;
   roomTypeId: string;
   roomTypeName: string;

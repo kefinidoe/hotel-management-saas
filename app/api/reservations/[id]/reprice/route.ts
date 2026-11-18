@@ -188,8 +188,8 @@ export async function POST(
 
         const room = reservation.rooms[0].room;
         const current = currentPriceVersion(reservation.priceSnapshots);
-        if (current?.pricingModel === "MODULAR_PRICING") {
-          throw new RepriceError("Modular reservations cannot yet be repriced. The agreed price remains unchanged.", 400, "MODULAR_REPRICE_UNAVAILABLE");
+        if (current?.pricingModel === "MODULAR_PRICING" || current?.pricingModel === "CUSTOM_RATE_RULES") {
+          throw new RepriceError("Modular and dynamic-rule reservations cannot yet be repriced. The agreed price remains unchanged.", 400, "MODULAR_REPRICE_UNAVAILABLE");
         }
         const config = await loadPricingConfig(hotelId, tenant.hotel.currency, tx);
 

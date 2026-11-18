@@ -357,6 +357,8 @@ vi.doMock("@/lib/prisma", () => ({
               if (!res) return false;
               if (where?.reservation?.hotelId && res.hotelId !== where.reservation.hotelId) return false;
               if (where?.reservation?.status?.notIn && where.reservation.status.notIn.includes(res.status)) return false;
+              if (where?.reservation?.status?.in && !where.reservation.status.in.includes(res.status)) return false;
+              if (where?.reservation?.id?.not && res.id === where.reservation.id.not) return false;
               return true;
             }).map((rr) => ({ ...rr, reservation: db.reservations.get(rr.reservationId) }));
           },
@@ -699,6 +701,17 @@ describe("Phase 4: Multi-Tenant Reservation & Stay Security Hardening", () => {
       ).rejects.toThrow("The room you selected was not found in this hotel.");
     });
 
+    it("permits reassigning check-in to a cleaned room with an overlapping checked-out stay", async () => {
+      db.reservations.set("prior", { id: "prior", hotelId: "hotel-a", code: "PRIOR", status: "CHECKED_OUT", checkInDate: new Date("2026-11-17"), checkOutDate: new Date("2026-11-18") });
+      db.reservationRooms.set("prior-room", { id: "prior-room", reservationId: "prior", roomId: "room-a-101", rate: 3500 });
+      db.rooms.set("room-a-102", { ...db.rooms.get("room-a-101"), id: "room-a-102", number: "102" });
+      db.reservations.set("incoming", { id: "incoming", hotelId: "hotel-a", guestId: "guest-a-1", status: "CONFIRMED", checkInDate: new Date("2026-11-17"), checkOutDate: new Date("2026-11-18") });
+      db.reservationRooms.set("incoming-room", { id: "incoming-room", reservationId: "incoming", roomId: "room-a-102", rate: 3500 });
+      await executeCheckIn(mockCurrentTenant, { reservationId: "incoming", newRoomId: "room-a-101" });
+      expect(db.reservationRooms.get("incoming-room").roomId).toBe("room-a-101");
+      expect(db.reservations.get("incoming").status).toBe("CHECKED_IN");
+    });
+
     it("successfully checks in same-hotel reservation and creates hotel-scoped folio", async () => {
       const resA = {
         id: "res-a-valid",
@@ -740,6 +753,36 @@ describe("Phase 4: Multi-Tenant Reservation & Stay Security Hardening", () => {
           reservationId: "res-b-999",
         })
       ).rejects.toThrow("Reservation not found.");
+    });
+
+    it("allows a new walk-in for the same date after early checkout and room readiness", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-11-17T15:00:00Z"));
+      try {
+        const prior = { id: "early-stay", code: "EARLY", hotelId: "hotel-a", guestId: "guest-a-1", checkInDate: new Date("2026-11-17T00:00:00Z"), checkOutDate: new Date("2026-11-18T00:00:00Z"), status: "CHECKED_IN" };
+        db.reservations.set(prior.id, prior);
+        db.rooms.get("room-a-101").status = "OCCUPIED";
+        db.reservationRooms.set("rr-early", { id: "rr-early", reservationId: prior.id, roomId: "room-a-101", rate: 3500 });
+        db.folios.set("folio-early", { id: "folio-early", hotelId: "hotel-a", reservationId: prior.id, isClosed: false });
+        db.folioItems.set("item-early", { id: "item-early", folioId: "folio-early", total: 3500 });
+        db.payments.set("payment-early", { id: "payment-early", folioId: "folio-early", hotelId: "hotel-a", amount: 3500, status: "COMPLETED" });
+        await executeCheckOut(mockCurrentTenant, { reservationId: prior.id });
+        expect(db.reservations.get(prior.id).status).toBe("CHECKED_OUT");
+        expect(db.rooms.get("room-a-101").status).toBe("DIRTY");
+        // Model housekeeping finishing; this fix must not bypass the cleaning guard.
+        db.rooms.get("room-a-101").status = "AVAILABLE";
+        const response = await createReservation(new Request("http://localhost:3000/api/reservations", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+            guestName: "New guest", checkInDate: "2026-11-17T00:00:00Z", checkOutDate: "2026-11-18T00:00:00Z",
+            roomId: "room-a-101", tariffId: "rt-a-standard", occupancy: "SINGLE", mealPlan: "BED_ONLY", source: "WALK_IN",
+          }),
+        }));
+        expect(response.status).toBe(201);
+        const newStay = await response.json();
+        await executeCheckIn(mockCurrentTenant, { reservationId: newStay.id });
+        expect(db.reservations.get(newStay.id).status).toBe("CHECKED_IN");
+        expect(db.reservations.get(prior.id).status).toBe("CHECKED_OUT");
+      } finally { vi.useRealTimers(); }
     });
 
     it("blocks checkout when balance is outstanding without manager override", async () => {

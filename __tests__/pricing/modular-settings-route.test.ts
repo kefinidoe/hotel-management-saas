@@ -17,7 +17,7 @@ beforeEach(() => {
 });
 it("reads the authenticated hotel's mode", async () => {
   expect(await (await GET(new Request("https://example.test/api/settings/hotel"))).json()).toEqual({ useModularPricing: false });
-  expect(m.find).toHaveBeenCalledWith({ where: { id: "a" }, select: { useModularPricing: true } });
+  expect(m.find).toHaveBeenCalledWith({ where: { id: "a" }, select: { useModularPricing: true, useCustomRateRules: true } });
 });
 it("authorizes read access for guest-stay roles while keeping updates management-only", async () => {
   m.tenant.mockResolvedValue({ hotelId: "a", userId: "u", role: "RECEPTIONIST" });

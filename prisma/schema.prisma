@@ -74,6 +74,7 @@ model Hotel {
   timezone  String      @default("Africa/Nairobi")
   settings  Json?
   useModularPricing Boolean @default(false)
+  useCustomRateRules Boolean @default(false)
   status    HotelStatus @default(ACTIVE)
   createdAt DateTime    @default(now())
   updatedAt DateTime    @updatedAt
@@ -105,6 +106,8 @@ model Hotel {
   occupancyTypes     OccupancyType[]
   roomTypeOccupancies RoomTypeOccupancy[]
   hotelMealPricing   HotelMealPricing[]
+  mealPlanRates      MealPlanRate[]
+  occupancyRateRules OccupancyRateRule[]
   mealPlanConfigs    MealPlanConfig[]
   mealPlanRoomTypes  MealPlanRoomType[]
   rateAdjustments    RateAdjustment[]
@@ -235,6 +238,40 @@ model HotelMealPricing {
   isActive       Boolean      @default(true)
 
   @@unique([hotelId, mealPlan])
+}
+
+// Independent, opt-in rules: existing pricing models are not changed.
+model MealPlanRate {
+  id            String   @id @default(uuid())
+  hotelId       String
+  hotel         Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  code          String
+  name          String
+  pricePerNight Float
+  perGuest      Boolean  @default(true)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([hotelId, code])
+  @@index([hotelId, isActive])
+}
+
+model OccupancyRateRule {
+  id              String   @id @default(uuid())
+  hotelId         String
+  hotel           Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  occupancyType   String
+  label           String
+  includedAdults  Int
+  surchargeAmount Float
+  extraAdultRate  Float
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([hotelId, occupancyType])
+  @@index([hotelId, isActive])
 }
 
 model RoomType {
@@ -907,6 +944,7 @@ enum PricingModel {
   ROOM_TYPE_OCCUPANCY // configured occupancy rates below
   LEGACY_BASE_RATE    // RoomType.baseRate, unchanged behaviour
   MODULAR_PRICING
+  CUSTOM_RATE_RULES
 }
 
 /// A hotel's own occupancy options ("Single", "Double", "Twin", "Family", ...).

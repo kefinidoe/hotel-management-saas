@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { currentPriceVersion } from "@/lib/pricing/versions";
 import { recordAudit } from "@/lib/audit";
+import { ROOM_BLOCKING_RESERVATION_STATUSES } from "@/lib/reservation-status";
 import { rangesOverlap } from "@/lib/dates";
 import { blocksGuestPlacement, isBookableToday, ROOM_STATUS_LABELS } from "@/lib/room-status";
 import { accommodationRequired, folioTotals, parseMoney, roundMoney, stayNights } from "@/lib/billing";
@@ -114,7 +115,7 @@ export async function executeCheckIn(tenant: TenantContext, options: CheckInOpti
             roomId: target.id,
             reservation: {
               hotelId,
-              status: { notIn: ["CANCELLED", "NO_SHOW"] },
+              status: { in: [...ROOM_BLOCKING_RESERVATION_STATUSES] },
               id: { not: reservation.id },
             },
           },

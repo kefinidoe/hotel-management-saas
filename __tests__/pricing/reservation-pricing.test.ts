@@ -74,6 +74,8 @@ const db: {
   roomTypeOccupancies: Row[];
   mealPlans: Row[];
   hotelMealPricing: Row[];
+  customMeals: Row[];
+  customOccupancies: Row[];
   mealPlanRoomTypes: Row[];
   adjustments: Row[];
   extraBeds: Row[];
@@ -94,6 +96,8 @@ const db: {
   roomTypeOccupancies: [],
   mealPlans: [],
   hotelMealPricing: [],
+  customMeals: [],
+  customOccupancies: [],
   mealPlanRoomTypes: [],
   adjustments: [],
   extraBeds: [],
@@ -138,6 +142,8 @@ function prismaDouble() {
     roomTypeOccupancy: { findMany: list(db.roomTypeOccupancies) },
     mealPlanConfig: { findMany: list(db.mealPlans) },
     hotelMealPricing: { findMany: list(db.hotelMealPricing) },
+    mealPlanRate: { findFirst: findUnique(db.customMeals) },
+    occupancyRateRule: { findFirst: findUnique(db.customOccupancies) },
     mealPlanRoomType: { findMany: list(db.mealPlanRoomTypes) },
     rateAdjustment: { findMany: list(db.adjustments) },
     extraBedRule: { findMany: list(db.extraBeds) },
@@ -187,6 +193,7 @@ function prismaDouble() {
           const reservation = db.reservations.find((entry) => entry.id === row.reservationId);
           if (!reservation) return false;
           if (where?.reservation?.hotelId && reservation.hotelId !== where.reservation.hotelId) return false;
+          if (where?.reservation?.status?.in && !where.reservation.status.in.includes(reservation.status)) return false;
           if (
             where?.reservation?.status?.notIn &&
             where.reservation.status.notIn.includes(reservation.status)
@@ -273,6 +280,8 @@ function seed() {
   db.roomTypeOccupancies.length = 0;
   db.mealPlans.length = 0;
   db.hotelMealPricing.length = 0;
+  db.customMeals.length = 0;
+  db.customOccupancies.length = 0;
   db.mealPlanRoomTypes.length = 0;
   db.adjustments.length = 0;
   db.extraBeds.length = 0;
@@ -571,5 +580,50 @@ describe("opt-in modular reservation pricing", () => {
     const response = await post({ mealPlanCode: "HALF_BOARD" });
     expect(response.status).toBe(409);
     expect(db.reservations).toHaveLength(0);
+  });
+});
+
+
+describe("custom rate rules reservation pricing", () => {
+  beforeEach(() => {
+    state.tenant!.hotel.useCustomRateRules = true;
+    db.hotels[0].useCustomRateRules = true;
+    db.customMeals.push({ id: "meal-custom", hotelId: "hotel-a", name: "Breakfast", pricePerNight: 500, perGuest: true, isActive: true }, { id: "meal-other", hotelId: "hotel-b", name: "Other", pricePerNight: 1, perGuest: true, isActive: true });
+    db.customOccupancies.push({ id: "occ-custom", hotelId: "hotel-a", label: "Double", includedAdults: 1, surchargeAmount: 300, extraAdultRate: 200, isActive: true });
+  });
+  const selection = { roomId: "room-a-101", checkInDate: "2026-12-01T00:00:00.000Z", checkOutDate: "2026-12-03T00:00:00.000Z", occupancyTypeId: "occ-custom", mealPlanId: "meal-custom", adults: 2, children: 1 };
+  it("quotes and freezes the authoritative tenant price, ignoring a forged rate", async () => {
+    const quoted = await quoteReservation(new Request("http://localhost:3000/api/reservations/quote", { method: "POST", body: JSON.stringify(selection) }));
+    expect(quoted.status).toBe(200); const quote = await quoted.json();
+    expect(quote.effectiveNightlyRate).toBe(8000);
+    const booked = await post({ ...selection, approvedRate: 8000, rate: 1 });
+    expect(booked.status).toBe(201);
+    expect((await booked.json()).total).toBe(16000);
+    expect(db.snapshots[0]).toMatchObject({ pricingModel: "CUSTOM_RATE_RULES", roomTotal: 13000, mealsTotal: 3000, grandTotal: 16000 });
+  });
+  it("rejects other tenant rules, inactive rules and stale or forged approved rates", async () => {
+    expect((await post({ ...selection, mealPlanId: "meal-other", approvedRate: 8000 })).status).toBe(400);
+    expect((await post({ ...selection, approvedRate: 1 })).status).toBe(409);
+    db.customMeals[0].isActive = false;
+    expect((await post({ ...selection, approvedRate: 8000 })).status).toBe(400);
+    expect(db.reservations).toHaveLength(0);
+  });
+});
+
+
+describe("reservation room availability after early departure", () => {
+  it.each(["CHECKED_OUT", "CANCELLED", "NO_SHOW"])("permits a walk-in when the overlapping prior reservation is %s", async (status) => {
+    db.reservations.push({ id: "prior", hotelId: "hotel-a", code: "OLD", status, checkInDate: new Date("2026-11-17T00:00:00Z"), checkOutDate: new Date("2026-11-18T00:00:00Z") });
+    db.reservationRooms.push({ id: "old-room", hotelId: "hotel-a", reservationId: "prior", roomId: "room-a-101" });
+    const response = await post({ checkInDate: "2026-11-17T00:00:00Z", checkOutDate: "2026-11-18T00:00:00Z", occupancyTypeId: "occ-double", mealPlanId: "mp-half", adults: 2, source: "WALK_IN" });
+    expect(response.status).toBe(201);
+    expect(db.reservationRooms).toHaveLength(2);
+  });
+  it.each(["PENDING", "CONFIRMED", "CHECKED_IN"])("continues blocking an overlapping %s reservation", async (status) => {
+    db.reservations.push({ id: "prior", hotelId: "hotel-a", code: "OLD", status, checkInDate: new Date("2026-11-17T00:00:00Z"), checkOutDate: new Date("2026-11-18T00:00:00Z") });
+    db.reservationRooms.push({ id: "old-room", hotelId: "hotel-a", reservationId: "prior", roomId: "room-a-101" });
+    const response = await post({ checkInDate: "2026-11-17T00:00:00Z", checkOutDate: "2026-11-18T00:00:00Z", occupancyTypeId: "occ-double", mealPlanId: "mp-half", adults: 2, source: "WALK_IN" });
+    expect(response.status).toBe(409);
+    expect(db.reservations).toHaveLength(1);
   });
 });

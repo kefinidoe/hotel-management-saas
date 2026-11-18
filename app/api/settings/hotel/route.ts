@@ -19,7 +19,7 @@ export async function GET(req: Request) {
   const parsed = z.strictObject({}).safeParse(Object.fromEntries(new URL(req.url).searchParams));
   if (!parsed.success) return NextResponse.json({ error: "Invalid request.", issues: parsed.error.issues }, { status: 400 });
   try {
-    const hotel = await prisma.hotel.findUnique({ where: { id: tenant.hotelId }, select: { useModularPricing: true } });
+    const hotel = await prisma.hotel.findUnique({ where: { id: tenant.hotelId }, select: { useModularPricing: true, useCustomRateRules: true } });
     return hotel ? NextResponse.json(hotel) : NextResponse.json({ error: "Hotel not found." }, { status: 404 });
   } catch (error) {
     console.error("Could not read pricing mode", error);

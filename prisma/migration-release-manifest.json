@@ -114,6 +114,10 @@
     {
       "name": "20261111120000_hotel_branding_logo_url",
       "sha256": "7250f642ba0dac807d49cc5e3cdf52044bce711326049b4ecd7369c25585ed91"
+    },
+    {
+      "name": "20261112120000_custom_rate_rules",
+      "sha256": "b3ef5e3143d37024dad9374664537f7ba4189892ae370341eab14e79b175c4aa"
     }
   ]
 }

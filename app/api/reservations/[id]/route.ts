@@ -6,6 +6,7 @@ import { rangesOverlap } from "@/lib/dates";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { stayNights } from "@/lib/billing";
 import {
+  ROOM_BLOCKING_RESERVATION_STATUSES,
   canTransitionReservation,
   isReservationStatus,
 } from "@/lib/reservation-status";
@@ -205,7 +206,7 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
               reservation: {
                 hotelId,
                 id: { not: reservation.id },
-                status: { in: ["PENDING", "CONFIRMED", "CHECKED_IN"] },
+                status: { in: [...ROOM_BLOCKING_RESERVATION_STATUSES] },
               },
             },
             include: { reservation: true },

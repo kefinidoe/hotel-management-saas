@@ -16,6 +16,7 @@ export const dynamic = "force-dynamic";
 function frontDeskInclude(hotelId: string) {
   return {
     guest: true,
+    priceSnapshots: { where: { hotelId }, orderBy: { version: "desc" }, take: 1 },
     // ReservationRoom itself has no hotelId, so constrain the related Room as
     // well as the parent Reservation to avoid serializing an invalid cross-tenant link.
     rooms: {
@@ -25,7 +26,7 @@ function frontDeskInclude(hotelId: string) {
     folios: {
       where: { hotelId },
       include: {
-        items: { select: { total: true } },
+        items: { select: { description: true, total: true } },
         payments: {
           where: { hotelId, status: "COMPLETED" },
           select: { amount: true },
@@ -53,19 +54,39 @@ function endOfToday() {
 
 function serializeReservation(reservation: FrontDeskReservation) {
   const openFolio = reservation.folios.find((folio) => !folio.isClosed);
+  const snapshot = reservation.priceSnapshots?.[0];
   const totals = openFolio
     ? folioTotals(
         openFolio.items.map((item) => Number(item.total)),
         openFolio.payments.map((payment) => Number(payment.amount))
       )
     : (() => {
-        const required = accommodationRequired(
+        const required = snapshot ? Number(snapshot.grandTotal) : accommodationRequired(
           reservation.rooms.map((room) => Number(room.rate)),
           stayNights(reservation.checkInDate, reservation.checkOutDate),
           Number(reservation.discount ?? 0)
         );
         return { required, paid: 0, balance: required };
       })();
+
+  const rawLines = snapshot?.breakdown && typeof snapshot.breakdown === "object" && !Array.isArray(snapshot.breakdown)
+    ? snapshot.breakdown.lines : null;
+  const pricingLines = openFolio
+    ? openFolio.items.map((item) => ({ label: item.description, amount: Number(item.total) }))
+    : Array.isArray(rawLines)
+      ? rawLines.flatMap((line) => {
+          if (!line || typeof line !== "object" || Array.isArray(line) || typeof line.label !== "string" || typeof line.amount !== "number" || !Number.isFinite(line.amount)) return [];
+          return [{ label: line.label, amount: line.amount }];
+        })
+      : !snapshot
+        ? [
+            ...reservation.rooms.map((room) => ({
+              label: `Room ${room.room.number} — ${stayNights(reservation.checkInDate, reservation.checkOutDate)} night(s)`,
+              amount: roundMoney(Number(room.rate) * stayNights(reservation.checkInDate, reservation.checkOutDate)),
+            })),
+            ...(Number(reservation.discount ?? 0) > 0 ? [{ label: "Discount", amount: -Number(reservation.discount) }] : []),
+          ]
+        : [];
 
   return {
     id: reservation.id,
@@ -76,6 +97,8 @@ function serializeReservation(reservation: FrontDeskReservation) {
     roomId: reservation.rooms[0]?.room.id ?? "",
     roomNumbers: reservation.rooms.map((room) => room.room.number).join(", "),
     openFolioId: openFolio?.id ?? null,
+    hasFolio: reservation.folios.length > 0,
+    pricingLines,
     requiredAmount: totals.required,
     paidAmount: totals.paid,
     balance: totals.balance,

@@ -5,6 +5,8 @@ import { hasRole } from "@/lib/permissions";
 import { loadPricingConfig } from "@/lib/pricing/config";
 import { priceStay } from "@/lib/pricing/engine";
 import { pricingUnavailableResponse } from "@/lib/pricing/http";
+import { z } from "zod";
+import { priceCustomReservation, CustomPricingError } from "@/lib/pricing/custom-server";
 import { priceModularStay } from "@/lib/pricing/modular";
 import { UNIVERSAL_MEAL_PLANS, type UniversalMealPlan } from "@/lib/pricing";
 
@@ -30,6 +32,13 @@ export async function POST(req: Request) {
     body = (await req.json()) as Record<string, unknown>;
   } catch {
     return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
+  }
+
+  if (tenant.hotel.useCustomRateRules) {
+    const query = z.strictObject({}).safeParse(Object.fromEntries(new URL(req.url).searchParams));
+    if (!query.success) return NextResponse.json({ error: "Invalid request.", issues: query.error.issues }, { status: 400 });
+    const valid = z.object({ occupancyTypeId: z.string().trim().min(1).max(200), mealPlanId: z.string().trim().min(1).max(200), adults: z.number().int().min(1).max(100), children: z.number().int().min(0).max(100) }).safeParse(body);
+    if (!valid.success) return NextResponse.json({ error: "Invalid pricing selection.", issues: valid.error.issues }, { status: 400 });
   }
 
   const text = (value: unknown) => (typeof value === "string" ? value.trim() : "");
@@ -65,6 +74,26 @@ export async function POST(req: Request) {
   });
   if (!room || !room.isActive) {
     return NextResponse.json({ error: "Room not found in this hotel." }, { status: 404 });
+  }
+
+  if (tenant.hotel.useCustomRateRules === true) {
+    if (discountPercent !== undefined || Number(body.extraBeds ?? 0) !== 0) return NextResponse.json({ error: "Percentage discounts and extra beds are not supported by dynamic pricing." }, { status: 400 });
+    try {
+      const result = await prisma.$transaction(async (tx) => {
+        const lockKey = `hotel-${tenant.hotelId}-reservation-create`;
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
+        const hotel = await tx.hotel.findUnique({ where: { id: tenant.hotelId }, select: { useCustomRateRules: true, currency: true } });
+        if (!hotel?.useCustomRateRules) throw new CustomPricingError("Pricing mode changed. Please retry.");
+        const currentRoom = await tx.room.findUnique({ where: { id_hotelId: { id: room.id, hotelId: tenant.hotelId } }, select: { roomTypeId: true, isActive: true } });
+        if (!currentRoom?.isActive) throw new CustomPricingError("Room is no longer available.");
+        return priceCustomReservation(tx, { hotelId: tenant.hotelId, currency: hotel.currency, roomTypeId: currentRoom.roomTypeId, mealId: String(body.mealPlanId), occupancyId: String(body.occupancyTypeId), adults: Number(body.adults), children: Number(body.children), checkIn, checkOut, discount });
+      });
+      return NextResponse.json({ ...result, roomId: room.id, roomNumber: room.number, availableOccupancies: [], availableMealPlans: [] });
+    } catch (error) {
+      if (error instanceof CustomPricingError) return NextResponse.json({ error: error.message }, { status: 400 });
+      console.error("Dynamic pricing quote failed", error);
+      return NextResponse.json({ error: "Could not price this stay." }, { status: 500 });
+    }
   }
 
   if (tenant.hotel.useModularPricing === true) {

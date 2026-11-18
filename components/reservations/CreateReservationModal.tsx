@@ -23,8 +23,12 @@ import {
   type MealPlanCode,
   type Occupancy,
 } from "@/lib/tariffs";
+import { calculateCustomNightlyRate } from "@/lib/pricing/custom-rate-rules";
 import type { PriceBreakdown } from "@/lib/pricing/types";
 import { calculateUniversalNightlyRate, UNIVERSAL_MEAL_PLAN_LABELS, type HotelMealRate, type UniversalMealPlan } from "@/lib/pricing";
+
+type CustomMeal = { id: string; name: string; pricePerNight: number; perGuest: boolean; isActive: boolean };
+type CustomOccupancy = { id: string; label: string; includedAdults: number; surchargeAmount: number; extraAdultRate: number; isActive: boolean };
 
 type Room = {
   id: string;
@@ -123,6 +127,9 @@ export default function CreateReservationModal({
   const [extraBeds, setExtraBeds] = useState("0");
   const [discount, setDiscount] = useState("");
   const [loading, setLoading] = useState(false);
+  const [custom, setCustom] = useState(false);
+  const [customMeals, setCustomMeals] = useState<CustomMeal[]>([]);
+  const [customOccupancies, setCustomOccupancies] = useState<CustomOccupancy[]>([]);
   const [modular, setModular] = useState<boolean | null>(null);
   const [modeError, setModeError] = useState<string | null>(null);
   const [modularMeals, setModularMeals] = useState<HotelMealRate[]>([]);
@@ -146,14 +153,24 @@ export default function CreateReservationModal({
     let cancelled = false;
     async function loadMode() {
       try {
-        const mode = await requestJson<{ useModularPricing: boolean }>("/api/settings/hotel");
+        const mode = await requestJson<{ useModularPricing: boolean; useCustomRateRules?: boolean }>("/api/settings/hotel");
         if (typeof mode.useModularPricing !== "boolean") throw new Error("Invalid pricing mode response.");
-        const meals = mode.useModularPricing ? await requestJson<HotelMealRate[]>("/api/settings/meals") : [];
+        const customEnabled = mode.useCustomRateRules === true;
+        const rules = customEnabled ? await requestJson<{ mealPlanRates: CustomMeal[]; occupancyRateRules: CustomOccupancy[] }>("/api/settings/pricing/rules") : null;
+        const meals = mode.useModularPricing && !customEnabled ? await requestJson<HotelMealRate[]>("/api/settings/meals") : [];
         if (cancelled) return;
         if (!Array.isArray(meals)) throw new Error("Invalid meal pricing response.");
+        if (rules) {
+          if (!Array.isArray(rules.mealPlanRates) || !Array.isArray(rules.occupancyRateRules)) throw new Error("Invalid pricing rules response.");
+          const activeMeals = rules.mealPlanRates.filter((row) => row.isActive);
+          const activeOccupancies = rules.occupancyRateRules.filter((row) => row.isActive);
+          setCustomMeals(activeMeals); setCustomOccupancies(activeOccupancies);
+          setMealPlanId(activeMeals[0]?.id ?? ""); setOccupancyTypeId(activeOccupancies[0]?.id ?? "");
+        }
+        setCustom(customEnabled);
         setModularMeals(meals);
         setModularMealPlan(meals.find((row) => row.isActive)?.mealPlan ?? "");
-        setModular(mode.useModularPricing);
+        setModular(mode.useModularPricing && !customEnabled);
       } catch (error) {
         if (!cancelled) setModeError(apiErrorMessage(error, "Could not load pricing settings."));
       }
@@ -190,6 +207,7 @@ export default function CreateReservationModal({
     occupancyTypeId,
     mealPlanId,
     modular,
+    custom,
     modularMealPlan,
     checkInDate,
     checkOutDate,
@@ -203,7 +221,7 @@ export default function CreateReservationModal({
 
   useEffect(() => {
     const sequence = ++quoteSequence.current;
-    if (!room || !nights || modular === null || (modular && !modularMealPlan)) {
+    if (!room || !nights || modular === null || (modular && !modularMealPlan) || (custom && (!occupancyTypeId || !mealPlanId))) {
       setQuote(null);
       setQuoteError(null);
       setQuoting(false);
@@ -243,6 +261,7 @@ export default function CreateReservationModal({
           occupancyTypeId: occupancyTypeId || data.occupancyTypeId || "",
           mealPlanId: mealPlanId || data.mealPlanId || "",
           modular,
+          custom,
           modularMealPlan,
           checkInDate, checkOutDate, adults, children, extraBeds,
           discount: canApplyDiscount ? discount : "",
@@ -257,8 +276,8 @@ export default function CreateReservationModal({
         });
         // Adopt the server's defaults on the first quote so the selects always
         // show something that is actually configured.
-        if (!occupancyTypeId && data.occupancyTypeId) setOccupancyTypeId(data.occupancyTypeId);
-        if (!mealPlanId && data.mealPlanId) setMealPlanId(data.mealPlanId);
+        if (!custom && !occupancyTypeId && data.occupancyTypeId) setOccupancyTypeId(data.occupancyTypeId);
+        if (!custom && !mealPlanId && data.mealPlanId) setMealPlanId(data.mealPlanId);
       } catch (error) {
         if (sequence !== quoteSequence.current) return;
         const message = apiErrorMessage(error, "Could not price this stay.");
@@ -267,7 +286,7 @@ export default function CreateReservationModal({
         // option rather than insisting on one it just refused. Anything that
         // still fails is reported by the next quote.
         if (
-          occupancyTypeId &&
+          !custom && occupancyTypeId &&
           /allows \d+[-–]\d+ adults|is not sold as|no nightly rate|not available in this hotel/i.test(message)
         ) {
           setOccupancyTypeId("");
@@ -305,8 +324,9 @@ export default function CreateReservationModal({
   // plans: drop the previous selection so the server's default for the new type
   // applies instead of a stale id that would be refused.
   useEffect(() => {
-    setOccupancyTypeId("");
-    setMealPlanId("");
+    if (!custom) { setOccupancyTypeId(""); setMealPlanId(""); }
+    // Custom rules belong to the hotel, not a specific room type.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomTypeId]);
 
   // Legacy pricing charges the room type's rate without occupancy or meal-plan
@@ -333,13 +353,23 @@ export default function CreateReservationModal({
       });
     } catch { /* Invalid input is explained below. */ }
   }
-  const displayedRate = quotedRate ?? (modular ? modularEstimate : fallbackRate);
+  let customEstimate: ReturnType<typeof calculateCustomNightlyRate> | null = null;
+  if (custom && room) {
+    const selectedMeal = customMeals.find((row) => row.id === mealPlanId);
+    const selectedOccupancy = customOccupancies.find((row) => row.id === occupancyTypeId);
+    if (selectedMeal && selectedOccupancy) {
+      try { customEstimate = calculateCustomNightlyRate({ baseRate: room.baseRate, adults: Number(adults), children: Number(children), meal: selectedMeal, occupancy: selectedOccupancy }); } catch { /* Invalid inputs are rejected by the quote. */ }
+    }
+  }
+  const displayedRate = quotedRate ?? (custom ? customEstimate?.nightlyRate ?? null : modular ? modularEstimate : fallbackRate);
   const estimateTotal = modular && modularEstimate !== null && nights
     ? modularEstimate * nights - (canApplyDiscount ? Number(discount || 0) : 0) : null;
 
   // Everything the button depends on, phrased so the person can act on it.
   const problems: string[] = [];
   if (modular === null) problems.push(modeError ?? "Loading pricing settings…");
+  if (custom && (!mealPlanId || !occupancyTypeId)) problems.push("Configure an active meal plan and occupancy rule.");
+  if (custom && !quote) problems.push(quoteError ?? "Waiting for an approved price.");
   if (modular && !modularMealPlan) problems.push("No active meal plan is available.");
   if (modular && modularRoomType && (Number(adults) > (modularRoomType.maxAdults ?? 0) || Number(children) > (modularRoomType.maxChildren ?? 0))) problems.push("Guest counts exceed this room type's capacity.");
   if (modular && estimateTotal !== null && (!Number.isFinite(estimateTotal) || estimateTotal < 0)) problems.push("Discount cannot exceed the estimated stay total.");
@@ -398,11 +428,12 @@ export default function CreateReservationModal({
           // Configured pricing sends the hotel's own occupancy and meal plan; a
           // hotel still on room-type rates sends the legacy fields instead.
           mealPlanCode: modular ? modularMealPlan : undefined,
-          occupancyTypeId: !modular && usesConfiguredPricing ? occupancyTypeId || undefined : undefined,
-          mealPlanId: !modular && usesConfiguredPricing ? mealPlanId || undefined : undefined,
-          tariffId: modular || usesConfiguredPricing ? undefined : fallbackTariff?.id ?? room?.roomTypeId,
-          occupancy: modular || usesConfiguredPricing ? undefined : occupancy,
-          mealPlan: modular || usesConfiguredPricing ? undefined : mealPlan,
+          approvedRate: custom ? quote?.effectiveNightlyRate : undefined,
+          occupancyTypeId: custom || (!modular && usesConfiguredPricing) ? occupancyTypeId || undefined : undefined,
+          mealPlanId: custom || (!modular && usesConfiguredPricing) ? mealPlanId || undefined : undefined,
+          tariffId: custom || modular || usesConfiguredPricing ? undefined : fallbackTariff?.id ?? room?.roomTypeId,
+          occupancy: custom || modular || usesConfiguredPricing ? undefined : occupancy,
+          mealPlan: custom || modular || usesConfiguredPricing ? undefined : mealPlan,
           adults: Number(adults) || 1,
           children: Number(children) || 0,
           extraBeds: Number(extraBeds) || 0,
@@ -476,7 +507,7 @@ export default function CreateReservationModal({
               <label className="block text-sm font-medium mb-1.5">Children</label>
               <input type="number" data-testid="children" min="0" value={children} onChange={(e) => setChildren(e.target.value)} className={inputClass()} />
             </div>
-            {!modular && <div>
+            {!modular && !custom && <div>
               <label className="block text-sm font-medium mb-1.5">Extra beds</label>
               <input type="number" data-testid="extra-beds" min="0" value={extraBeds} onChange={(e) => setExtraBeds(e.target.value)} className={inputClass()} />
             </div>}
@@ -525,7 +556,12 @@ export default function CreateReservationModal({
             )}
           </div>
 
-          {modular ? (
+          {custom ? (
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block text-sm font-medium">Occupancy<select data-testid="custom-occupancy" className={inputClass()} value={occupancyTypeId} onChange={(e) => setOccupancyTypeId(e.target.value)}><option value="">Choose…</option>{customOccupancies.map((row) => <option key={row.id} value={row.id}>{row.label}</option>)}</select></label>
+              <label className="block text-sm font-medium">Meal Plan<select data-testid="custom-meal" className={inputClass()} value={mealPlanId} onChange={(e) => setMealPlanId(e.target.value)}><option value="">Choose…</option>{customMeals.map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label>
+            </div>
+          ) : modular ? (
             <div>
               <label htmlFor="modular-meal-plan" className="block text-sm font-medium mb-1.5">Meal Plan</label>
               <select id="modular-meal-plan" data-testid="modular-meal-plan" value={modularMealPlan} onChange={(e) => setModularMealPlan(e.target.value as UniversalMealPlan)} className={inputClass()}>
@@ -644,6 +680,7 @@ export default function CreateReservationModal({
             )}
           </div>
 
+          {custom && !quote && customEstimate && <div className="rounded-control border border-border p-3 text-sm" data-testid="price-breakdown"><p className="font-medium">Estimated price breakdown</p><p>Room: {money(customEstimate.base, currency)}</p><p>Occupancy: {money(customEstimate.occupancyTotal, currency)}</p><p>Meals: {money(customEstimate.mealTotal, currency)}</p><p>Per night: {money(customEstimate.nightlyRate, currency)}</p><p className="text-xs text-text-muted">Subject to server confirmation.</p></div>}
           {modular && !quote && estimateTotal !== null && Number.isFinite(estimateTotal) && estimateTotal >= 0 && <p className="text-sm" data-testid="estimated-stay-total">Estimated stay total: {money(estimateTotal, currency)} (subject to server confirmation)</p>}
           {quote && (
             <div className="rounded-control border border-border p-3 text-sm" data-testid="price-breakdown">

@@ -1,3 +1,4 @@
+import { ROOM_BLOCKING_RESERVATION_STATUSES } from "@/lib/reservation-status";
 import { validateRoomStayMutation } from "@/lib/room-stay-mutation-validation";
 import { reservationExtensionSchema } from "@/lib/reservation-extension-validation";
 import { NextResponse } from "next/server";
@@ -149,7 +150,7 @@ export async function POST(
             reservation: {
               hotelId,
               id: { not: reservation.id },
-              status: { in: ["PENDING", "CONFIRMED", "CHECKED_IN"] },
+              status: { in: [...ROOM_BLOCKING_RESERVATION_STATUSES] },
               checkInDate: { lt: newCheckOut },
               checkOutDate: { gt: reservation.checkOutDate },
             },
@@ -179,8 +180,8 @@ export async function POST(
           orderBy: { version: "desc" },
           select: { version: true, currency: true, nights: true, grandTotal: true, pricingModel: true },
         });
-        if (bookingVersion?.pricingModel === "MODULAR_PRICING") {
-          throw new ExtensionError("Modular reservations cannot yet be extended automatically; please contact a manager.", 400, "MODULAR_EXTENSION_UNAVAILABLE");
+        if (bookingVersion?.pricingModel === "MODULAR_PRICING" || bookingVersion?.pricingModel === "CUSTOM_RATE_RULES") {
+          throw new ExtensionError("Modular and dynamic-rule reservations cannot yet be extended automatically; please contact a manager.", 400, "MODULAR_EXTENSION_UNAVAILABLE");
         }
         const currency = bookingVersion?.currency ?? tenant.hotel.currency;
 

@@ -585,3 +585,14 @@ describe("modular pricing in CreateReservationModal", () => {
     expect(submitButton().disabled).toBe(true);
   });
 });
+
+it("offers a room again after housekeeping changes its post-checkout status to available", async () => {
+  const dirtyRooms = rooms.map((room) => room.id === "room-101" ? { ...room, status: "DIRTY" as const } : room);
+  const { rerender } = renderModal({ rooms: dirtyRooms });
+  expect((screen.getByRole("button", { name: /Room 101/ }) as HTMLButtonElement).disabled).toBe(true);
+  rerender(<CreateReservationModal rooms={rooms} roomTypes={roomTypes} defaultRoomId="room-101" defaultDate={new Date()} currency="KES" canApplyDiscount={false} onClose={() => {}} onCreated={() => {}} onError={() => {}} />);
+  expect((screen.getByRole("button", { name: /Room 101/ }) as HTMLButtonElement).disabled).toBe(false);
+  await waitForQuote();
+  typeGuestName();
+  expect(submitButton().disabled).toBe(false);
+});

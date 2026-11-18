@@ -29,6 +29,9 @@ type CheckInReservation = {
   roomId: string;
   roomNumbers: string;
   requiredAmount: number;
+  paidAmount?: number;
+  pricingLines?: { label: string; amount: number }[];
+  hasFolio?: boolean;
 };
 
 function money(value: number) {
@@ -52,7 +55,8 @@ export default function CheckInModal({
   const [newRoomId, setNewRoomId] = useState("");
   const [methods, setMethods] = useState<PaymentMethod[]>([]);
   const [methodId, setMethodId] = useState("");
-  const [amountPaid, setAmountPaid] = useState(String(reservation.requiredAmount));
+  const remaining = roundMoney(Math.max(0, reservation.requiredAmount - (reservation.paidAmount ?? 0)));
+  const [amountPaid, setAmountPaid] = useState(String(remaining));
   const [reference, setReference] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loadingMethods, setLoadingMethods] = useState(true);
@@ -104,7 +108,7 @@ export default function CheckInModal({
 
   const numericPaid = Number(amountPaid);
   const previewPaid = Number.isFinite(numericPaid) && numericPaid >= 0 ? numericPaid : 0;
-  const balance = roundMoney(Math.max(0, reservation.requiredAmount - previewPaid));
+  const balance = roundMoney(Math.max(0, remaining - previewPaid));
   const paymentRequired = previewPaid > 0;
 
   async function submit(event: React.FormEvent) {
@@ -115,8 +119,8 @@ export default function CheckInModal({
       setError("Enter a valid amount paid.");
       return;
     }
-    if (numericPaid > reservation.requiredAmount) {
-      setError("Amount paid cannot exceed the required amount.");
+    if (numericPaid > remaining) {
+      setError("Amount paid cannot exceed the remaining amount.");
       return;
     }
     if (numericPaid > 0 && !methodId) {
@@ -222,11 +226,28 @@ export default function CheckInModal({
             </div>
           )}
 
+          {reservation.pricingLines && reservation.pricingLines.length > 0 && (
+            <div aria-label="Price breakdown" className="border border-border rounded-control divide-y divide-border">
+              {reservation.pricingLines.map((line, index) => (
+                <div key={index} className="flex justify-between gap-3 px-3 py-2 text-sm">
+                  <span>{line.label}</span>
+                  <span className="font-medium whitespace-nowrap">{money(line.amount)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="rounded-control border border-border bg-bg px-3 py-3 text-sm space-y-2">
             <div className="flex justify-between">
               <span className="text-text-secondary">Amount required</span>
               <span className="font-medium">{money(reservation.requiredAmount)}</span>
             </div>
+            {(reservation.paidAmount ?? 0) > 0 && (
+              <div className="flex justify-between">
+                <span className="text-text-secondary">Previously paid</span>
+                <span>{money(reservation.paidAmount ?? 0)}</span>
+              </div>
+            )}
             <div className="flex justify-between">
               <span className="text-text-secondary">Amount paid at check-in</span>
               <span>{money(previewPaid)}</span>
@@ -240,11 +261,12 @@ export default function CheckInModal({
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-1.5">Amount paid now (KSh)</label>
+            <label htmlFor="check-in-amount-paid" className="block text-sm font-medium mb-1.5">Amount paid now (KSh)</label>
             <input
+              id="check-in-amount-paid"
               type="number"
               min="0"
-              max={reservation.requiredAmount}
+              max={remaining}
               step="0.01"
               value={amountPaid}
               onChange={(event) => setAmountPaid(event.target.value)}
@@ -289,6 +311,10 @@ export default function CheckInModal({
             </>
           )}
 
+          {reservation.hasFolio && (
+            <p role="alert" className="text-sm text-danger">This reservation already has a folio and cannot be checked in again. Review the folio first.</p>
+          )}
+
           {error && (
             <div role="alert" className="flex items-center justify-between gap-3 text-sm text-danger bg-danger/5 border border-danger/20 rounded-control px-3 py-2">
               <span>{error}</span>
@@ -314,7 +340,7 @@ export default function CheckInModal({
             <button
               type="submit"
               disabled={
-                submitting ||
+                submitting || reservation.hasFolio ||
                 (paymentRequired && (loadingMethods || !methodId)) ||
                 (!reservedRoomReady && !newRoomId)
               }
