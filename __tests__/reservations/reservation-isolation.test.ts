@@ -701,6 +701,14 @@ describe("Phase 4: Multi-Tenant Reservation & Stay Security Hardening", () => {
       ).rejects.toThrow("The room you selected was not found in this hotel.");
     });
 
+    it("rejects a dirty reserved room even if its own ID is supplied as a replacement", async () => {
+      db.rooms.set("room-a-101", { ...db.rooms.get("room-a-101"), status: "DIRTY" });
+      db.reservations.set("incoming", { id: "incoming", hotelId: "hotel-a", guestId: "guest-a-1", status: "CONFIRMED", checkInDate: new Date("2026-11-17"), checkOutDate: new Date("2026-11-18") });
+      db.reservationRooms.set("incoming-room", { id: "incoming-room", reservationId: "incoming", roomId: "room-a-101", rate: 3500 });
+      await expect(executeCheckIn(mockCurrentTenant, { reservationId: "incoming", newRoomId: "room-a-101" })).rejects.toThrow(/needs cleaning/i);
+      expect(db.reservations.get("incoming").status).toBe("CONFIRMED");
+    });
+
     it("permits reassigning check-in to a cleaned room with an overlapping checked-out stay", async () => {
       db.reservations.set("prior", { id: "prior", hotelId: "hotel-a", code: "PRIOR", status: "CHECKED_OUT", checkInDate: new Date("2026-11-17"), checkOutDate: new Date("2026-11-18") });
       db.reservationRooms.set("prior-room", { id: "prior-room", reservationId: "prior", roomId: "room-a-101", rate: 3500 });

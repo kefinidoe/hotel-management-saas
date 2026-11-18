@@ -106,8 +106,10 @@ export async function POST(req: Request) {
     }
     try {
       const result = await prisma.$transaction(async (tx) => {
-        const hotel = await tx.hotel.findUnique({ where: { id: tenant.hotelId }, select: { useModularPricing: true, currency: true } });
-        if (!hotel?.useModularPricing) throw new Error("Pricing mode changed. Please retry.");
+        const lockKey = `hotel-${tenant.hotelId}-reservation-create`;
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
+        const hotel = await tx.hotel.findUnique({ where: { id: tenant.hotelId }, select: { useModularPricing: true, useCustomRateRules: true, currency: true } });
+        if (!hotel?.useModularPricing || hotel.useCustomRateRules) throw new Error("Pricing mode changed. Please retry.");
         const type = await tx.roomType.findUnique({ where: { id_hotelId: { id: room.roomTypeId, hotelId: tenant.hotelId } }, select: { id: true, name: true, baseRate: true, extraAdultFee: true, maxAdults: true, maxChildren: true } });
         if (!type) throw new Error("Room type not found.");
         const rows = await tx.hotelMealPricing.findMany({ where: { hotelId: tenant.hotelId } });
@@ -123,7 +125,7 @@ export async function POST(req: Request) {
     } catch (error) {
       // Pricing validation failures are safe to expose; unexpected persistence
       // errors must not leak database diagnostics to the client.
-      if (error instanceof Error && /^(Guest counts|Invalid |Meal plan is inactive|Discount |The reservation|Check-in|The stay|Base rate|Extra adult fee|Adult meal surcharge|Child meal surcharge|Nightly rate|Pricing mode changed|Room type not found)/.test(error.message)) {
+      if (error instanceof Error && /^(Guest counts|Invalid |Meal plan is inactive|Meal plan pricing is not configured|Discount |The reservation|Check-in|The stay|Base rate|Extra adult fee|Adult meal surcharge|Child meal surcharge|Nightly rate|Pricing mode changed|Room type not found)/.test(error.message)) {
         return NextResponse.json({ error: error.message }, { status: 400 });
       }
       console.error("Modular quote failed", error);
