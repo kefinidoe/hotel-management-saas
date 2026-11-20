@@ -24,21 +24,30 @@ export async function requireAuth() {
   return session;
 }
 
-export async function getTenantFromRoute(): Promise<TenantContext | NextResponse> {
+export async function getTenantFromRoute(access: "read" | "write" = "write"): Promise<TenantContext | NextResponse> {
   try {
-    return await getTenantContext();
+    const tenant = await getTenantContext();
+    const { getOrBootstrapSubscription } = await import("@/lib/entitlements");
+    const sub = await getOrBootstrapSubscription(tenant.hotelId);
+    if (!sub.isOperational && (access === "write" || (sub.effectiveStatus !== "TRIAL_EXPIRED" && sub.effectiveStatus !== "PAST_DUE"))) {
+      const code = sub.effectiveStatus === "SUSPENDED" ? "SUBSCRIPTION_SUSPENDED" : sub.effectiveStatus === "PAST_DUE" ? "SUBSCRIPTION_PAST_DUE" : sub.effectiveStatus === "TRIAL_EXPIRED" ? "TRIAL_EXPIRED" : "SUBSCRIPTION_CANCELLED";
+      return NextResponse.json({ error: code, message: "Subscription access is restricted. Please visit billing." }, { status: 403 });
+    }
+    return tenant;
   } catch (error) {
     if (error instanceof TenantAuthError) {
       const response = NextResponse.json(
         { error: error.code, message: error.message },
         { status: error.statusCode }
       );
-      if (error.clearCookie) {
+      // A verified suspended hotel remains selected so billing recovery works
+      // for users with multiple memberships. Invalid selections still clear.
+      if (error.clearCookie && error.code !== "HOTEL_SUSPENDED") {
         response.cookies.delete("active_hotel_id");
       }
       return response;
     }
-    return NextResponse.json({ error: "UNAUTHORIZED", message: "Authentication required" }, { status: 401 });
+    return NextResponse.json({ error: "SUBSCRIPTION_STATUS_UNAVAILABLE", message: "Subscription status is temporarily unavailable." }, { status: 503 });
   }
 }
 
@@ -110,11 +119,12 @@ export type { EvaluatedSubscriptionState, HotelSubscriptionContext } from "@/lib
 
 export async function requireModule(
   hotelId: string,
-  module: import("@/lib/plans").SaaSModule
+  module: import("@/lib/plans").SaaSModule,
+  access: "read" | "write" = "write"
 ): Promise<NextResponse | null> {
   try {
     const { checkModuleEntitlement } = await import("@/lib/entitlements");
-    const check = await checkModuleEntitlement(hotelId, module);
+    const check = await checkModuleEntitlement(hotelId, module, access);
     if (!check.allowed) {
       return NextResponse.json(
         { error: check.code || "MODULE_NOT_ENTITLED", message: check.reason },

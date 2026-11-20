@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { getBillingTenantContext, getTenantContext, requirePlatformRole, TenantAuthError, TenantContext } from "@/lib/tenant-context";
 import { hasRole } from "@/lib/permissions";
 import type { SaaSModule } from "@/lib/plans";
-import { checkModuleEntitlement } from "@/lib/entitlements";
+import { checkModuleEntitlement, getOrBootstrapSubscription } from "@/lib/entitlements";
 import { prisma } from "@/lib/prisma";
 
 // Resolve a tenant for server-rendered pages. Billing recovery deliberately
@@ -14,7 +14,16 @@ async function resolvePageTenantContext(billingRecovery = false): Promise<Tenant
   } catch (error) {
     if (error instanceof TenantAuthError) {
       if (error.code === "UNAUTHENTICATED") redirect("/login");
-      if (error.code === "NO_ACTIVE_MEMBERSHIP") redirect("/onboarding");
+      if (error.code === "NO_ACTIVE_MEMBERSHIP") {
+        // An unselected sole suspended hotel is filtered out of the normal
+        // operational context, but remains a valid billing recovery context.
+        let recovery: TenantContext | undefined;
+        try { recovery = await getBillingTenantContext(); } catch { /* no recoverable selection */ }
+        if (recovery && recovery.hotel.status !== "ACTIVE" && recovery.hotel.status !== "TRIALING") {
+          redirect("/dashboard/subscription?error=HOTEL_SUSPENDED");
+        }
+        redirect("/onboarding");
+      }
       if (error.code === "HOTEL_SELECTION_REQUIRED" || error.code === "INVALID_HOTEL_SELECTION") {
         redirect("/select-hotel");
       }
@@ -37,10 +46,20 @@ export async function requirePageRole(
   const context = await resolvePageTenantContext();
   if (!hasRole(context.role, allowed)) redirect("/dashboard");
 
+  let subscription;
+  try {
+    subscription = await getOrBootstrapSubscription(context.hotelId);
+  } catch {
+    redirect("/dashboard/subscription?error=SUBSCRIPTION_STATUS_UNAVAILABLE");
+  }
+  if (subscription.effectiveStatus === "SUSPENDED" || subscription.effectiveStatus === "CANCELLED") {
+    redirect(`/dashboard/subscription?error=SUBSCRIPTION_${subscription.effectiveStatus}`);
+  }
+
   if (module) {
     let entitlement;
     try {
-      entitlement = await checkModuleEntitlement(context.hotelId, module);
+      entitlement = await checkModuleEntitlement(context.hotelId, module, "read");
     } catch {
       redirect("/dashboard/subscription?error=SUBSCRIPTION_STATUS_UNAVAILABLE");
     }

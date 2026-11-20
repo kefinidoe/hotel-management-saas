@@ -1,3 +1,4 @@
+import { readMutationBody, validateMutation, staffCreateSchema, initialPasswordSchema } from "@/lib/staff-settings-validation";
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
@@ -13,13 +14,13 @@ export const dynamic = "force-dynamic";
 
 // List staff members belonging to the active hotel only
 export async function GET() {
-  const tenant = await getTenantFromRoute();
+  const tenant = await getTenantFromRoute("read");
   if (tenant instanceof NextResponse) return tenant;
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.STAFF_VIEW);
   if (forbidden) return forbidden;
 
-  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS", "read");
   if (blocked) return blocked;
 
   const isManagement =
@@ -89,12 +90,8 @@ export async function POST(req: Request) {
   const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
   if (blocked) return blocked;
 
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
-  }
+  // Parse only to identify the rate-limit bucket; invalid attempts are still counted.
+  const body: any = await readMutationBody(req);
 
   const name = typeof body?.name === "string" ? body.name.trim() : "";
   const email = typeof body?.email === "string" ? body.email.trim().toLowerCase() : "";
@@ -108,6 +105,13 @@ export async function POST(req: Request) {
   const { limitAuthRequest } = await import("@/lib/auth-rate-limit");
   const limited = await limitAuthRequest(req, "invitationCreate", email, tenant.userId);
   if (limited) return limited;
+
+  // Authorization for owner grants must precede request validation.
+  if (requestedRole === HotelRole.HOTEL_OWNER && tenant.role !== HotelRole.HOTEL_OWNER) {
+    return NextResponse.json({ error: "Only hotel owners can grant the HOTEL_OWNER role." }, { status: 403 });
+  }
+  const validation = validateMutation(req, staffCreateSchema, body);
+  if (validation.response) return validation.response;
 
   if (!name || name.length < 2 || name.length > 100) {
     return NextResponse.json(
@@ -220,12 +224,8 @@ export async function POST(req: Request) {
     // A brand-new account needs an initial password. An existing account is only
     // invited, so this field is ignored for it — requiring it would push one
     // administrator into choosing a password for somebody else's account.
-    if (!password || password.length < 8) {
-      return NextResponse.json(
-        { error: "Initial password must be at least 8 characters long." },
-        { status: 400 }
-      );
-    }
+    const passwordValidation = validateMutation(req, initialPasswordSchema, { password });
+    if (passwordValidation.response) return passwordValidation.response;
 
     // Create new User and HotelMembership atomically
     const passwordHash = await bcrypt.hash(password, 10);

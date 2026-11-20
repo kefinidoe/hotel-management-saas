@@ -1,18 +1,17 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
+import { getTenantFromRoute, requireRole, requireModule, ROLE_GROUPS } from "@/lib/authz";
 
 /**
  * The signed-in user's notifications in the active hotel: everything addressed
  * to them personally plus hotel-wide broadcasts.
  *
- * Deliberately not module-gated: a hotel whose subscription has lapsed still
- * needs to be told why, and every other module is closed to it at that point.
- * The membership check in getTenantFromRoute is the boundary that matters here.
+ * Reading notifications remains available to lapsed subscriptions. Marking
+ * them read is a mutation and requires an operational subscription.
  */
 
 export async function GET() {
-  const tenant = await getTenantFromRoute();
+  const tenant = await getTenantFromRoute("read");
   if (tenant instanceof NextResponse) return tenant;
 
   const hotelId = tenant.hotelId;
@@ -57,6 +56,9 @@ export async function PATCH(req: Request) {
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.ALL_STAFF);
   if (forbidden) return forbidden;
+
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  if (blocked) return blocked;
 
   let body: unknown;
   try {

@@ -1,3 +1,4 @@
+import { validateIdempotencyKey, validateFinancialMutation, chargeSchema } from "@/lib/financial-mutation-validation";
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
@@ -168,12 +169,9 @@ export async function POST(req: Request) {
   const blocked = await requireModule(tenant.hotelId, "RESTAURANT_POS");
   if (blocked) return blocked;
 
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body.", code: "INVALID_JSON_BODY", outcome: "NOT_COMMITTED" }, { status: 400 });
-  }
+  const validation = await validateFinancialMutation(req, chargeSchema, { pos: true });
+  if (validation.response) return validation.response;
+  const body = validation.data;
 
   const folioId = typeof body?.folioId === "string" ? body.folioId.trim() : "";
   const tableNumber = typeof body?.tableNumber === "string" ? body.tableNumber.trim() : "";
@@ -183,18 +181,9 @@ export async function POST(req: Request) {
     (typeof body?.idempotencyKey === "string" ? body.idempotencyKey : undefined);
   const idempotencyKey = typeof rawIdempotencyKey === "string" ? rawIdempotencyKey.trim() : "";
 
-  if (!idempotencyKey) {
-    return NextResponse.json(
-      { error: "An idempotency key is required for room charges.", code: "MISSING_IDEMPOTENCY_KEY", outcome: "NOT_COMMITTED" },
-      { status: 400 },
-    );
-  }
-  if (idempotencyKey.length < 4 || idempotencyKey.length > 128) {
-    return NextResponse.json(
-      { error: "Idempotency key must be between 4 and 128 characters.", code: "INVALID_IDEMPOTENCY_KEY_LENGTH", outcome: "NOT_COMMITTED" },
-      { status: 400 },
-    );
-  }
+  const invalidKey = validateIdempotencyKey(idempotencyKey, "charge");
+  if (invalidKey) return invalidKey;
+
   if (!folioId) {
     return NextResponse.json(
       { error: "Choose the guest to charge the order to.", code: "MISSING_FOLIO", outcome: "NOT_COMMITTED" },

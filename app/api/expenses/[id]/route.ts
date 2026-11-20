@@ -1,3 +1,4 @@
+import { validateFinancialMutation, expenseReviewSchema } from "@/lib/financial-mutation-validation";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { recordAudit } from "@/lib/audit";
@@ -15,12 +16,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   const blocked = await requireModule(tenant.hotelId, "EXPENSES");
   if (blocked) return blocked;
 
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
-  }
+  const validation = await validateFinancialMutation(req, expenseReviewSchema, { id });
+  if (validation.response) return validation.response;
+  const body = validation.data;
 
   const status = (body as { status?: unknown } | null)?.status;
   if (status !== "APPROVED" && status !== "REJECTED") {

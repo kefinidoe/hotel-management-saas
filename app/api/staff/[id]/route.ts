@@ -1,11 +1,10 @@
+import { readMutationBody, validateMutation, staffUpdateSchema, emptySchema } from "@/lib/staff-settings-validation";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { recordAudit } from "@/lib/audit";
 import { INVITATION_ACTIONS, isPendingInvitationFor, recordInvitationCreated, recordInvitationResolved } from "@/lib/invitations";
 import { HotelRole, MembershipStatus } from "@prisma/client";
-
-const PERMITTED_HOTEL_ROLES = Object.values(HotelRole);
 
 export const dynamic = "force-dynamic";
 
@@ -45,15 +44,8 @@ export async function PATCH(
     );
   }
 
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
-  }
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return NextResponse.json({ error: "Request body must be a JSON object." }, { status: 400 });
-  }
+  const input = await readMutationBody(req);
+  const body: any = input && typeof input === "object" && !Array.isArray(input) ? input : {};
 
   // A hotel administrator cannot change a global user's password. Password
   // changes remain account-holder controlled through /api/profile/password.
@@ -67,9 +59,10 @@ export async function PATCH(
   // Suspended memberships without an invitation event are ambiguous legacy
   // records. Never infer consent: issue a fresh invitation in place instead.
   if (body.reinvite === true) {
-    if (Object.keys(body).some((key) => key !== "reinvite")) return NextResponse.json({ error: "Re-invitation cannot be combined with other updates." }, { status: 400 });
     if (targetMembership.status !== MembershipStatus.SUSPENDED || targetMembership.userId === tenant.userId) return NextResponse.json({ error: "Only suspended staff can be invited." }, { status: 400 });
     if (targetMembership.role === HotelRole.HOTEL_OWNER && tenant.role !== HotelRole.HOTEL_OWNER) return NextResponse.json({ error: "Only hotel owners can invite another owner." }, { status: 403 });
+    const validation = validateMutation(req, staffUpdateSchema, input, { id });
+    if (validation.response) return validation.response;
     const invited = await prisma.$transaction(async (tx) => {
       const updated = await tx.hotelMembership.updateMany({
         where: { id: targetMembership.id, hotelId: tenant.hotelId, userId: targetMembership.userId, status: MembershipStatus.SUSPENDED, user: { isActive: true } },
@@ -90,13 +83,7 @@ export async function PATCH(
   const requestedStatus = body.status as MembershipStatus | undefined;
   let requestedDepartment: string | null | undefined;
   if (body.department !== undefined) {
-    if (body.department !== null && typeof body.department !== "string") {
-      return NextResponse.json({ error: "Department must be a string or null." }, { status: 400 });
-    }
     requestedDepartment = typeof body.department === "string" ? body.department.trim() || null : null;
-    if (requestedDepartment && requestedDepartment.length > 100) {
-      return NextResponse.json({ error: "Department name must be 100 characters or fewer." }, { status: 400 });
-    }
   }
 
   // 1. Guard against self-lockout: cannot demote or deactivate yourself
@@ -114,13 +101,6 @@ export async function PATCH(
 
   // 2. Validate role if supplied
   if (requestedRole !== undefined) {
-    if (!PERMITTED_HOTEL_ROLES.includes(requestedRole)) {
-      return NextResponse.json(
-        { error: `Invalid role. Permitted hotel roles: ${PERMITTED_HOTEL_ROLES.join(", ")}` },
-        { status: 400 }
-      );
-    }
-
     // Only a HOTEL_OWNER can promote someone to HOTEL_OWNER
     if (requestedRole === HotelRole.HOTEL_OWNER && tenant.role !== HotelRole.HOTEL_OWNER) {
       return NextResponse.json(
@@ -177,6 +157,9 @@ export async function PATCH(
       }
     }
   }
+
+  const validation = validateMutation(req, staffUpdateSchema, input, { id });
+  if (validation.response) return validation.response;
 
   // Execute membership-only update
   const effectiveStatus =
@@ -261,7 +244,7 @@ export async function PATCH(
 
 // Remove or suspend staff membership in the active hotel
 export async function DELETE(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
@@ -316,6 +299,9 @@ export async function DELETE(
       );
     }
   }
+
+  const validation = validateMutation(req, emptySchema, await readMutationBody(req, true), { id });
+  if (validation.response) return validation.response;
 
   // Revoke an unaccepted invitation atomically. A pending membership itself
   // may represent a legacy membership with history, so retain it suspended.

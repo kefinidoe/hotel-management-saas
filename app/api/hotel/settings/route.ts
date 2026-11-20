@@ -1,3 +1,4 @@
+import { readMutationBody, validateMutation, settingsSchema } from "@/lib/staff-settings-validation";
 import { NextResponse } from "next/server";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
@@ -10,7 +11,7 @@ const SUPPORTED_CURRENCIES = ["KES", "USD", "EUR", "GBP", "TZS", "UGX", "RWF", "
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const tenant = await getTenantFromRoute();
+  const tenant = await getTenantFromRoute("read");
   if (tenant instanceof NextResponse) return tenant;
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.STAFF_ADMIN);
@@ -24,6 +25,7 @@ export async function GET() {
         name: true,
         slug: true,
         logo: true,
+        logoUrl: true,
         email: true,
         phone: true,
         address: true,
@@ -56,12 +58,9 @@ export async function PATCH(req: Request) {
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.STAFF_ADMIN);
   if (forbidden) return forbidden;
 
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
+  const validation = validateMutation(req, settingsSchema, await readMutationBody(req), {});
+  if (validation.response) return validation.response;
+  const body = validation.data;
 
   const updateData: {
     name?: string;

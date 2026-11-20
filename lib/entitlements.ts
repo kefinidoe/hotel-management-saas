@@ -317,13 +317,15 @@ export async function getOrBootstrapSubscription(hotelId: string): Promise<Hotel
  */
 export async function checkModuleEntitlement(
   hotelId: string,
-  module: SaaSModule
+  module: SaaSModule,
+  access: "read" | "write" = "write"
 ): Promise<EntitlementCheckResult> {
   const sub = await getOrBootstrapSubscription(hotelId);
   const plan = sub.plan;
 
   // 1. Check subscription operational status
-  if (!sub.isOperational) {
+  const readOnlyExpired = access === "read" && (sub.effectiveStatus === "TRIAL_EXPIRED" || sub.effectiveStatus === "PAST_DUE");
+  if (!sub.isOperational && !readOnlyExpired) {
     if (sub.effectiveStatus === "SUSPENDED") {
       return {
         allowed: false,
@@ -340,7 +342,7 @@ export async function checkModuleEntitlement(
       return {
         allowed: false,
         code: "TRIAL_EXPIRED",
-        reason: `Your 14-day trial has ended. Please activate your subscription to access ${module}.`,
+        reason: `Your trial has ended. Please activate your subscription to access ${module}.`,
         module,
         effectiveStatus: sub.effectiveStatus,
         planId: plan.id,

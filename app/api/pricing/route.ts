@@ -15,18 +15,18 @@ import {
  * subscription includes the reservations module. `hotelId` always comes from the
  * authenticated tenant, never from the request.
  */
-async function authorize() {
-  const tenant = await getTenantFromRoute();
+async function authorize(access: "read" | "write") {
+  const tenant = await getTenantFromRoute(access);
   if (tenant instanceof NextResponse) return tenant;
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
   if (forbidden) return forbidden;
-  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS", access);
   if (blocked) return blocked;
   return tenant;
 }
 
 export async function GET() {
-  const tenant = await authorize();
+  const tenant = await authorize("read");
   if (tenant instanceof NextResponse) return tenant;
 
   try {
@@ -40,7 +40,7 @@ export async function GET() {
 }
 
 export async function PATCH(req: Request) {
-  const tenant = await authorize();
+  const tenant = await authorize("write");
   if (tenant instanceof NextResponse) return tenant;
 
   let body: Record<string, unknown>;

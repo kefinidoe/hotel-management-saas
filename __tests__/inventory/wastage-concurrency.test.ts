@@ -62,7 +62,13 @@ describe("inventory stock transaction (simulated row lock)", () => {
     const results = await Promise.all([purchase(purchaseRequest("purchase-1")), purchase(purchaseRequest("purchase-2")), POST(request(4))]);
     expect(results.map((r) => r.status)).toEqual([201, 201, 201]);
     expect(state.stock).toBe(16);
-    expect(state.movements.map((m) => [Number(m.beforeQty), Number(m.afterQty)])).toEqual([[10, 15], [15, 20], [20, 16]]);
+    expect(state.movements).toHaveLength(3);
+    expect(Number(state.movements[0].beforeQty)).toBe(10);
+    for (let i = 1; i < state.movements.length; i++) {
+      expect(Number(state.movements[i].beforeQty)).toBe(Number(state.movements[i - 1].afterQty));
+    }
+    expect(Number(state.movements[2].afterQty)).toBe(16);
+    expect(state.movements.map((m) => Number(m.afterQty) - Number(m.beforeQty)).sort((a, b) => a - b)).toEqual([-4, 5, 5]);
   });
   it("serializes meal consumption with a purchase and wastage", async () => {
     const meal = () => prisma.$transaction((tx) => deductRecipeStock(tx, [{ menuItemId: "dish", name: "Dish", unitPrice: 1, quantity: 1 }], "sale", "manager", "hotel-a"));

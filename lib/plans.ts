@@ -91,7 +91,7 @@ export interface PricingConfiguration {
 export const PRICING_CONFIG: PricingConfiguration = {
   isScheduleApproved: false, // Baseline placeholder pricing pending executive sign-off
   defaultAnnualDiscountPercent: 16.67, // Equivalent to ~2 months free on an annual plan (pay for 10 months)
-  trialDurationDays: 14,
+  trialDurationDays: 30,
   supportedCurrencies: ["KES", "USD"],
   defaultCurrency: "KES",
   notes: "Configurable baseline pricing schedule pending final business approval. Final prices to be set before commercial launch.",
@@ -115,7 +115,7 @@ export const ORDERED_ROOM_BANDS: RoomBand[] = [
     minRooms: 1,
     maxRooms: 10,
     isCustomQuote: false,
-    trialDurationDays: 14,
+    trialDurationDays: 30,
     monthlyPriceKES: 3500, // Baseline placeholder
     monthlyPriceUSD: 28,
     yearlyPriceKES: 35000, // 10 months (2 months free)
@@ -136,7 +136,7 @@ export const ORDERED_ROOM_BANDS: RoomBand[] = [
     minRooms: 11,
     maxRooms: 25,
     isCustomQuote: false,
-    trialDurationDays: 14,
+    trialDurationDays: 30,
     monthlyPriceKES: 6500, // Baseline placeholder
     monthlyPriceUSD: 52,
     yearlyPriceKES: 65000,
@@ -158,7 +158,7 @@ export const ORDERED_ROOM_BANDS: RoomBand[] = [
     minRooms: 26,
     maxRooms: 50,
     isCustomQuote: false,
-    trialDurationDays: 14,
+    trialDurationDays: 30,
     monthlyPriceKES: 11000, // Baseline placeholder
     monthlyPriceUSD: 88,
     yearlyPriceKES: 110000,
@@ -179,7 +179,7 @@ export const ORDERED_ROOM_BANDS: RoomBand[] = [
     minRooms: 51,
     maxRooms: 100,
     isCustomQuote: false,
-    trialDurationDays: 14,
+    trialDurationDays: 30,
     monthlyPriceKES: 18500, // Baseline placeholder
     monthlyPriceUSD: 148,
     yearlyPriceKES: 185000,
@@ -200,7 +200,7 @@ export const ORDERED_ROOM_BANDS: RoomBand[] = [
     minRooms: 101,
     maxRooms: 200,
     isCustomQuote: false,
-    trialDurationDays: 14,
+    trialDurationDays: 30,
     monthlyPriceKES: 28000, // Baseline placeholder
     monthlyPriceUSD: 224,
     yearlyPriceKES: 280000,

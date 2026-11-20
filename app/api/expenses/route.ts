@@ -1,3 +1,4 @@
+import { validateIdempotencyKey, validateFinancialMutation, expenseSchema, checkInventoryContext } from "@/lib/financial-mutation-validation";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { inventoryRequest } from "@/lib/inventory-idempotency";
@@ -6,12 +7,12 @@ import { hasRole } from "@/lib/permissions";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 
 export async function GET() {
-  const tenant = await getTenantFromRoute();
+  const tenant = await getTenantFromRoute("read");
   if (tenant instanceof NextResponse) return tenant;
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.ALL_STAFF);
   if (forbidden) return forbidden;
-  const blocked = await requireModule(tenant.hotelId, "EXPENSES");
+  const blocked = await requireModule(tenant.hotelId, "EXPENSES", "read");
   if (blocked) return blocked;
 
   const expenses = await prisma.expense.findMany({
@@ -50,9 +51,15 @@ export async function POST(req: Request) {
   const blocked = await requireModule(tenant.hotelId, "EXPENSES");
   if (blocked) return blocked;
 
-  let body: any;
-  try { body = await req.json(); } catch { return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 }); }
-  if (!body || typeof body !== "object" || Array.isArray(body)) return NextResponse.json({ error: "Invalid request." }, { status: 400 });
+  const contextMismatch = checkInventoryContext(req, tenant.hotelId, tenant.userId);
+  if (contextMismatch) return contextMismatch;
+
+  const validation = await validateFinancialMutation(req, expenseSchema, {});
+  if (validation.response) return validation.response;
+  const body = validation.data;
+  const invalidKey = validateIdempotencyKey(req.headers.get("idempotency-key") || req.headers.get("x-idempotency-key"), "inventory");
+  if (invalidKey) return invalidKey;
+
   const { category, description, amount, paymentMethod, supplier, reference } = body as {
     category: string;
     description: string;

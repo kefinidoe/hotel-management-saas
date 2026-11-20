@@ -5,13 +5,13 @@ import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/l
 import { isMealPlan } from "@/lib/tariffs";
 
 export async function GET() {
-  const tenant = await getTenantFromRoute();
+  const tenant = await getTenantFromRoute("read");
   if (tenant instanceof NextResponse) return tenant;
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MANAGEMENT);
   if (forbidden) return forbidden;
 
-  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS");
+  const blocked = await requireModule(tenant.hotelId, "RESERVATIONS", "read");
   if (blocked) return blocked;
 
   const roomTypes = await prisma.roomType.findMany({

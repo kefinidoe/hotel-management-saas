@@ -5,7 +5,7 @@ import { prisma } from "@/lib/prisma";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
-  const tenant = await getTenantFromRoute();
+  const tenant = await getTenantFromRoute("read");
   if (tenant instanceof NextResponse) return tenant;
 
   // Prevent a stale POS tab from reconciling a different tenant's snapshot.
@@ -21,7 +21,7 @@ export async function GET(req: Request) {
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.RESTAURANT_POS);
   if (forbidden) return forbidden;
 
-  const blocked = await requireModule(tenant.hotelId, "RESTAURANT_POS");
+  const blocked = await requireModule(tenant.hotelId, "RESTAURANT_POS", "read");
   if (blocked) return blocked;
 
   const { searchParams } = new URL(req.url);

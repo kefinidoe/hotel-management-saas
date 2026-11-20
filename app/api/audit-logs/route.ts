@@ -17,7 +17,7 @@ import { getTenantFromRoute, requireRole, ROLE_GROUPS } from "@/lib/authz";
  */
 
 export async function GET(req: Request) {
-  const tenant = await getTenantFromRoute();
+  const tenant = await getTenantFromRoute("read");
   if (tenant instanceof NextResponse) return tenant;
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.STAFF_ADMIN);

@@ -1,3 +1,4 @@
+import { validateIdempotencyKey, validateFinancialMutation, payNowSchema } from "@/lib/financial-mutation-validation";
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
@@ -80,12 +81,9 @@ export async function POST(req: Request) {
   const blocked = await requireModule(tenant.hotelId, "RESTAURANT_POS");
   if (blocked) return blocked;
 
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body.", code: "INVALID_JSON_BODY", outcome: "NOT_COMMITTED" }, { status: 400 });
-  }
+  const validation = await validateFinancialMutation(req, payNowSchema, { pos: true });
+  if (validation.response) return validation.response;
+  const body = validation.data;
 
   const rawIdempotencyKey =
     req.headers.get("x-idempotency-key") ||
@@ -95,19 +93,8 @@ export async function POST(req: Request) {
   const idempotencyKey =
     typeof rawIdempotencyKey === "string" ? rawIdempotencyKey.trim() : "";
 
-  if (!idempotencyKey) {
-    return NextResponse.json(
-      { error: "An idempotency key is required for POS payments.", code: "MISSING_IDEMPOTENCY_KEY", outcome: "NOT_COMMITTED" },
-      { status: 400 }
-    );
-  }
-
-  if (idempotencyKey.length < 4 || idempotencyKey.length > 128) {
-    return NextResponse.json(
-      { error: "Idempotency key must be between 4 and 128 characters.", code: "INVALID_IDEMPOTENCY_KEY_LENGTH", outcome: "NOT_COMMITTED" },
-      { status: 400 }
-    );
-  }
+  const invalidKey = validateIdempotencyKey(idempotencyKey, "pos");
+  if (invalidKey) return invalidKey;
 
   const paymentMethodId: string | undefined =
     typeof body?.paymentMethodId === "string" ? body.paymentMethodId.trim() : undefined;

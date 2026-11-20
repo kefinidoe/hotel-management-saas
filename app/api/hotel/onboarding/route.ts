@@ -1,3 +1,4 @@
+import { readMutationBody, validateMutation, onboardingSchema } from "@/lib/staff-settings-validation";
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
@@ -70,16 +71,9 @@ export async function POST(req: Request) {
     );
   }
 
-  // 2. Parse & Validate Payload
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json(
-      { error: "INVALID_REQUEST_BODY", message: "Malformed JSON body." },
-      { status: 400 }
-    );
-  }
+  const validation = validateMutation(req, onboardingSchema, await readMutationBody(req), { onboarding: true });
+  if (validation.response) return validation.response;
+  const body = validation.data;
 
   const rawName = typeof body?.name === "string" ? body.name.trim() : "";
   let rawSlug = typeof body?.slug === "string" ? body.slug.trim().toLowerCase() : "";

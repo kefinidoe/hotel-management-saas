@@ -170,6 +170,21 @@ describe("Phase 4: Multi-Tenant Context & Access Control", () => {
       expect(ctx.isPlatformAdmin).toBe(false);
     });
 
+    it("uses the selected workspace's name and logo after switching hotels", async () => {
+      const hotels = [
+        { ...sampleHotel, id: "hotel-kim", name: "Kim Resort", logoUrl: "https://example.test/kim.png" },
+        { ...sampleHotel, id: "hotel-james", name: "James Resort", logoUrl: "https://example.test/james.png" },
+      ];
+      for (const hotel of hotels) {
+        mockGetServerSession.mockResolvedValueOnce({ user: { id: "user-123" } });
+        mockPrismaUser.findUnique.mockResolvedValueOnce(activeUser);
+        mockCookiesGet.mockReturnValueOnce({ value: hotel.id });
+        mockPrismaHotelMembership.findUnique.mockResolvedValueOnce({ ...activeMembership, hotelId: hotel.id, hotel });
+        const ctx = await getTenantContext();
+        expect(ctx.hotel).toMatchObject({ id: hotel.id, name: hotel.name, logoUrl: hotel.logoUrl });
+      }
+    });
+
     it("fails closed and NEVER silently falls back when cookie contains an invalid/unauthorized hotel", async () => {
       mockGetServerSession.mockResolvedValueOnce({ user: { id: "user-123" } });
       mockPrismaUser.findUnique.mockResolvedValueOnce(activeUser);

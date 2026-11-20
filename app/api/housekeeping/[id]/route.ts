@@ -1,3 +1,4 @@
+import { readMutationBody, validateMutation, housekeepingSchema } from "@/lib/staff-settings-validation";
 import { NextResponse } from "next/server";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
@@ -21,6 +22,10 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   const blocked = await requireModule(tenant.hotelId, "HOUSEKEEPING");
   if (blocked) return blocked;
 
+  const validation = validateMutation(req, housekeepingSchema, await readMutationBody(req), { id });
+  if (validation.response) return validation.response;
+  const body = validation.data;
+
   const existing = await prisma.housekeepingTask.findFirst({
     where: { id, hotelId: tenant.hotelId },
   });
@@ -28,15 +33,6 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
     return NextResponse.json({ error: "Housekeeping task not found." }, { status: 404 });
   }
 
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
-  }
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return NextResponse.json({ error: "Request body must be a JSON object." }, { status: 400 });
-  }
 
   let assigneeId: string | null | undefined;
   if (body.assigneeId !== undefined) {

@@ -1,3 +1,4 @@
+import { validateIdempotencyKey, validateFinancialMutation, paymentSchema } from "@/lib/financial-mutation-validation";
 import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
@@ -79,12 +80,9 @@ export async function POST(req: Request) {
 
   const hotelId = tenant.hotelId;
 
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
-  }
+  const validation = await validateFinancialMutation(req, paymentSchema, {});
+  if (validation.response) return validation.response;
+  const body = validation.data;
 
   const folioId = typeof body?.folioId === "string" ? body.folioId.trim() : "";
   const paymentMethodId =
@@ -116,12 +114,8 @@ export async function POST(req: Request) {
   const idempotencyKey =
     typeof rawIdempotencyKey === "string" ? rawIdempotencyKey.trim() : undefined;
 
-  if (!idempotencyKey || idempotencyKey.length < 4 || idempotencyKey.length > 128) {
-    return NextResponse.json(
-      { error: "An idempotency key between 4 and 128 characters is required." },
-      { status: 400 }
-    );
-  }
+  const invalidKey = validateIdempotencyKey(idempotencyKey, "payment");
+  if (invalidKey) return invalidKey;
 
   const paymentRequest: PaymentRequest = {
     hotelId,

@@ -1,8 +1,8 @@
+import { readMutationBody, validateMutation, passwordSchema } from "@/lib/staff-settings-validation";
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { requireAuth } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
-import { passwordProblem } from "@/lib/password";
 
 // Change YOUR OWN password. Any signed-in user, and it requires the current
 // password -- so a borrowed or stolen session alone isn't enough to lock the
@@ -20,23 +20,27 @@ export async function POST(req: Request) {
   const limited = await limitAuthRequest(req, "password", auth.user.id);
   if (limited) return limited;
 
-  const body = await req.json();
-  const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
-  const newPassword = body.newPassword;
+  const input = await readMutationBody(req);
 
-  const problem = passwordProblem(newPassword);
-  if (problem) return NextResponse.json({ error: problem }, { status: 400 });
-
+  // Account state and the current-password check are security checks; keep
+  // them ahead of validation of the requested new password.
   const user = await prisma.user.findUnique({ where: { id: auth.user.id } });
   if (!user) return NextResponse.json({ error: "Account not found." }, { status: 404 });
   if (!user.isActive) {
     return NextResponse.json({ error: "This account is deactivated." }, { status: 403 });
   }
 
-  const currentOk = await bcrypt.compare(currentPassword, user.passwordHash);
-  if (!currentOk) {
-    return NextResponse.json({ error: "That current password isn't right." }, { status: 400 });
+  const current = input && typeof input === "object" && "currentPassword" in input
+    ? input.currentPassword : undefined;
+  if (typeof current === "string" && current.length > 0 && current.length <= 200) {
+    if (!(await bcrypt.compare(current, user.passwordHash))) {
+      return NextResponse.json({ error: "That current password isn't right." }, { status: 400 });
+    }
   }
+
+  const validation = validateMutation(req, passwordSchema, input);
+  if (validation.response) return validation.response;
+  const newPassword = validation.data.newPassword;
 
   // Re-using the same password is the most common way a forced rotation ends up
   // meaning nothing.
