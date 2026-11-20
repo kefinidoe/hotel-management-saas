@@ -5,13 +5,13 @@ import { folioTotals } from "@/lib/billing";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const tenant = await getTenantFromRoute();
+  const tenant = await getTenantFromRoute("read");
   if (tenant instanceof NextResponse) return tenant;
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.ACCOMMODATION_PAYMENTS);
   if (forbidden) return forbidden;
 
-  const blocked = await requireModule(tenant.hotelId, "FOLIOS");
+  const blocked = await requireModule(tenant.hotelId, "FOLIOS", "read");
   if (blocked) return blocked;
 
   const hotelId = tenant.hotelId;

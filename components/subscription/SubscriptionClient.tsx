@@ -28,7 +28,7 @@ export default function SubscriptionClient() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/hotel/subscription");
+      const res = await fetch("/api/subscription");
       if (!res.ok) {
         throw new Error(`Failed to load subscription (${res.status})`);
       }

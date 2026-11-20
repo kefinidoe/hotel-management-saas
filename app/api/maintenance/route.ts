@@ -4,13 +4,13 @@ import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/l
 import { notify } from "@/lib/notifications";
 
 export async function GET() {
-  const tenant = await getTenantFromRoute();
+  const tenant = await getTenantFromRoute("read");
   if (tenant instanceof NextResponse) return tenant;
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.MAINTENANCE);
   if (forbidden) return forbidden;
 
-  const blocked = await requireModule(tenant.hotelId, "MAINTENANCE");
+  const blocked = await requireModule(tenant.hotelId, "MAINTENANCE", "read");
   if (blocked) return blocked;
 
   const [tickets, memberships] = await Promise.all([

@@ -7,12 +7,12 @@ import { hasRole } from "@/lib/permissions";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 
 export async function GET() {
-  const tenant = await getTenantFromRoute();
+  const tenant = await getTenantFromRoute("read");
   if (tenant instanceof NextResponse) return tenant;
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.ALL_STAFF);
   if (forbidden) return forbidden;
-  const blocked = await requireModule(tenant.hotelId, "EXPENSES");
+  const blocked = await requireModule(tenant.hotelId, "EXPENSES", "read");
   if (blocked) return blocked;
 
   const expenses = await prisma.expense.findMany({

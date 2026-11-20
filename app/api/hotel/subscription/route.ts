@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getBillingTenantFromRoute, requireRole } from "@/lib/authz";
+import { getTenantFromRoute, requireRole } from "@/lib/authz";
 import { ROLE_GROUPS } from "@/lib/permissions";
 import { getHotelUsageAndSubscription, SubscriptionStatusUnavailableError, PAST_DUE_GRACE_PERIOD_DAYS } from "@/lib/entitlements";
 import { ORDERED_ROOM_BANDS, PRICING_CONFIG, calculateBandPricing, normaliseBillingCurrency, BillingInterval } from "@/lib/plans";
@@ -7,7 +7,7 @@ import { ORDERED_ROOM_BANDS, PRICING_CONFIG, calculateBandPricing, normaliseBill
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const tenant = await getBillingTenantFromRoute();
+  const tenant = await getTenantFromRoute("read");
   if (tenant instanceof NextResponse) return tenant;
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.STAFF_ADMIN);

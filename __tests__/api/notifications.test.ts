@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   getTenantFromRoute: vi.fn(),
   requireRole: vi.fn(),
+  requireModule: vi.fn(),
   findMany: vi.fn(),
   count: vi.fn(),
   updateMany: vi.fn(),
@@ -35,6 +36,7 @@ vi.mock("@/lib/prisma", () => ({
 vi.mock("@/lib/authz", () => ({
   getTenantFromRoute: mocks.getTenantFromRoute,
   requireRole: mocks.requireRole,
+  requireModule: mocks.requireModule,
   ROLE_GROUPS: { ALL_STAFF: ["HOTEL_OWNER", "RECEPTIONIST"], STAFF_ADMIN: ["HOTEL_OWNER"] },
 }));
 
@@ -55,6 +57,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.getTenantFromRoute.mockResolvedValue(tenant);
   mocks.requireRole.mockReturnValue(null);
+  mocks.requireModule.mockResolvedValue(null);
   mocks.findMany.mockResolvedValue([]);
   mocks.count.mockResolvedValue(0);
   mocks.updateMany.mockResolvedValue({ count: 0 });
@@ -92,6 +95,15 @@ describe("notifications API", () => {
     expect(mocks.count).toHaveBeenCalledWith({
       where: { hotelId: "hotel-a", OR: [{ userId: null }, { userId: "user-a" }], isRead: false },
     });
+  });
+
+  it("blocks notification writes when the subscription is not operational", async () => {
+    const { NextResponse } = await import("next/server");
+    mocks.requireModule.mockResolvedValue(NextResponse.json({ error: "TRIAL_EXPIRED" }, { status: 403 }));
+    const response = await markNotifications(request({ all: true }));
+    expect(response.status).toBe(403);
+    expect(mocks.requireModule).toHaveBeenCalledWith("hotel-a", "RESERVATIONS");
+    expect(mocks.updateMany).not.toHaveBeenCalled();
   });
 
   it("marks every visible notification read with { all: true }", async () => {

@@ -13,7 +13,10 @@ import {
   getOrBootstrapSubscription,
   getHotelUsageAndSubscription,
 } from "@/lib/entitlements";
-import { PlatformRole } from "@prisma/client";
+import { PlatformRole, Prisma } from "@prisma/client";
+import { z } from "zod";
+import { manualSubscriptionPaymentSchema } from "@/lib/manual-subscription-payment";
+import { activateManualSubscription, ManualPaymentConflictError, ManualSubscriptionNotFoundError } from "@/lib/activate-manual-subscription";
 
 export const dynamic = "force-dynamic";
 
@@ -106,6 +109,38 @@ export async function PATCH(
       { error: "INVALID_REQUEST_BODY", message: "Malformed JSON body." },
       { status: 400 }
     );
+  }
+
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ error: "INVALID_REQUEST_BODY", message: "Expected a JSON object." }, { status: 400 });
+  }
+
+  if (body.action === "ACTIVATE_MANUAL_PAYMENT") {
+    const query = z.strictObject({}).safeParse(Object.fromEntries(new URL(req.url).searchParams));
+    const id = z.string().trim().min(1).max(200).safeParse(hotelId);
+    const parsed = manualSubscriptionPaymentSchema.safeParse(body);
+    if (!query.success || !id.success || !parsed.success) {
+      return NextResponse.json({ error: "INVALID_REQUEST", issues: [
+        ...(!query.success ? query.error.issues : []),
+        ...(!id.success ? id.error.issues.map((issue) => ({ ...issue, path: ["id", ...issue.path] })) : []),
+        ...(!parsed.success ? parsed.error.issues : []),
+      ] }, { status: 400 });
+    }
+    try {
+      const updated = await activateManualSubscription(id.data, admin, parsed.data);
+      return NextResponse.json({ success: true, subscription: {
+        id: updated.id, hotelId: updated.hotelId, status: updated.status,
+        currentPeriodStartsAt: updated.currentPeriodStartsAt.toISOString(),
+        currentPeriodEndsAt: updated.currentPeriodEndsAt?.toISOString() ?? null,
+      } });
+    } catch (error) {
+      if (error instanceof ManualPaymentConflictError || (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002")) {
+        return NextResponse.json({ error: "DUPLICATE_PAYMENT_REFERENCE", message: "This payment reference has already been recorded." }, { status: 409 });
+      }
+      if (error instanceof ManualSubscriptionNotFoundError) return NextResponse.json({ error: "NOT_FOUND", message: error.message }, { status: 404 });
+      console.error("Failed to activate manual subscription payment:", error);
+      return NextResponse.json({ error: "SERVER_ERROR", message: "Failed to record manual payment." }, { status: 500 });
+    }
   }
 
   const {

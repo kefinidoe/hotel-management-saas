@@ -1,0 +1,63 @@
+import { Prisma } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
+import { calculateManualPaymentPeriod, type ManualSubscriptionPayment } from "@/lib/manual-subscription-payment";
+
+export class ManualPaymentConflictError extends Error {}
+export class ManualSubscriptionNotFoundError extends Error {}
+
+/** All manual activations share an advisory lock. The companion unique index is
+ * also required to protect against other database writers. Never treat entry of
+ * a reference as proof of payment: the administrator must verify it first. */
+export async function activateManualSubscription(
+  hotelId: string,
+  admin: { userId: string; platformRole: string },
+  payment: ManualSubscriptionPayment,
+  now = new Date(),
+) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('subscription-manual-payment'))`;
+    const duplicate = await tx.$queryRaw<Array<{ duplicate: boolean }>>`
+      SELECT EXISTS (
+        SELECT 1 FROM "AuditLog" WHERE "entity" = 'Subscription'
+          AND upper(regexp_replace("metadata"->>'referenceCode', '^[[:space:]]+|[[:space:]]+$', '', 'g')) = ${payment.referenceCode}
+        UNION ALL
+        SELECT 1 FROM "Subscription" AS s
+          CROSS JOIN LATERAL jsonb_array_elements(
+            CASE WHEN jsonb_typeof(s."metadata"->'payments') = 'array'
+              THEN s."metadata"->'payments' ELSE '[]'::jsonb END
+          ) AS p(payment)
+          WHERE upper(regexp_replace(p.payment->>'referenceCode', '^[[:space:]]+|[[:space:]]+$', '', 'g')) = ${payment.referenceCode}
+      ) AS duplicate
+    `;
+    if (duplicate[0]?.duplicate !== false) throw new ManualPaymentConflictError("Payment reference has already been used, or could not be verified.");
+
+    await tx.$queryRaw`SELECT "id" FROM "Subscription" WHERE "hotelId" = ${hotelId} FOR UPDATE`;
+    const current = await tx.subscription.findUnique({ where: { hotelId } });
+    if (!current) throw new ManualSubscriptionNotFoundError("Subscription not found.");
+    const metadata = current.metadata;
+    if (metadata !== null && (typeof metadata !== "object" || Array.isArray(metadata))) throw new Error("Invalid subscription metadata.");
+    const data = (metadata ?? {}) as Prisma.JsonObject;
+    if (data.payments !== undefined && !Array.isArray(data.payments)) throw new Error("Invalid subscription payment history.");
+    const period = calculateManualPaymentPeriod({ status: current.status, currentPeriodStartsAt: current.currentPeriodStartsAt, currentPeriodEndsAt: current.currentPeriodEndsAt, durationDays: payment.durationDays, now });
+    const entry: Prisma.InputJsonObject = {
+      referenceCode: payment.referenceCode, amountPaid: payment.amountPaid, currency: current.currency,
+      durationDays: payment.durationDays, reason: payment.reason, adminUserId: admin.userId,
+      adminRole: admin.platformRole, recordedAt: now.toISOString(),
+      periodStartsAt: period.currentPeriodStartsAt.toISOString(), periodEndsAt: period.currentPeriodEndsAt.toISOString(),
+      method: "MANUAL_COOP_MPESA",
+    };
+    const updated = await tx.subscription.update({
+      where: { hotelId },
+      data: {
+        status: "ACTIVE", suspendedAt: null, suspensionReason: null,
+        currentPeriodStartsAt: period.currentPeriodStartsAt, currentPeriodEndsAt: period.currentPeriodEndsAt,
+        metadata: { ...data, payments: [...(Array.isArray(data.payments) ? data.payments : []), entry] } as Prisma.InputJsonObject,
+      },
+    });
+    // AuditLog has no append-only trigger today. A database trigger and restricted
+    // database privileges are required for strict immutability; application-level
+    // creation here is atomic but does not by itself make the record immutable.
+    await tx.auditLog.create({ data: { hotelId, userId: admin.userId, action: "PLATFORM_MANUAL_PAYMENT_ACTIVATED", entity: "Subscription", entityId: updated.id, metadata: entry } });
+    return updated;
+  });
+}

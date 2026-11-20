@@ -11,7 +11,7 @@ const SUPPORTED_CURRENCIES = ["KES", "USD", "EUR", "GBP", "TZS", "UGX", "RWF", "
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const tenant = await getTenantFromRoute();
+  const tenant = await getTenantFromRoute("read");
   if (tenant instanceof NextResponse) return tenant;
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.STAFF_ADMIN);

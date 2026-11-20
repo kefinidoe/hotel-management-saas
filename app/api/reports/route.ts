@@ -25,13 +25,13 @@ function restaurantItemName(description: string) {
 }
 
 export async function GET(req: Request) {
-  const tenant = await getTenantFromRoute();
+  const tenant = await getTenantFromRoute("read");
   if (tenant instanceof NextResponse) return tenant;
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.FINANCIAL_REPORTS);
   if (forbidden) return forbidden;
 
-  const blocked = await requireModule(tenant.hotelId, "REPORTS");
+  const blocked = await requireModule(tenant.hotelId, "REPORTS", "read");
   if (blocked) return blocked;
 
   const { searchParams } = new URL(req.url);

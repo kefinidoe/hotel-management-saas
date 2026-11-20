@@ -184,9 +184,21 @@ describe("Prisma migration history", () => {
     for (const name of dbEnumTypes.keys()) if (!enums.has(name)) problems.push(`extra enum: ${name}`);
 
     const expectedIndexes = expectedIndexNames(models);
+    // Prisma cannot express a partial expression index in schema.prisma. This
+    // database-native safety constraint is verified separately below.
+    expectedIndexes.add("AuditLog_manual_payment_reference_unique");
     for (const name of expectedIndexes) if (!dbIndexes.has(name)) problems.push(`missing index: ${name}`);
     for (const name of dbIndexes) if (!expectedIndexes.has(name)) problems.push(`extra index: ${name}`);
     expect(problems).toEqual([]);
+  });
+
+  it("keeps the manual payment reference index unique and scoped to subscription payment audit records", async () => {
+    const result = await db.query<{ indexdef: string }>(`SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'AuditLog_manual_payment_reference_unique'`);
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0].indexdef).toMatch(/CREATE UNIQUE INDEX/i);
+    expect(result.rows[0].indexdef).toMatch(/upper\(btrim/i);
+    expect(result.rows[0].indexdef).toContain("PLATFORM_MANUAL_PAYMENT_ACTIVATED");
+    expect(result.rows[0].indexdef).toContain("Subscription");
   });
 
   it("keeps every required tenant ID non-null and has composite tenant ownership constraints", async () => {

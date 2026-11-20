@@ -826,6 +826,8 @@ describe("Phase 7: SaaS Subscription Foundation and Plan Enforcement", () => {
       expect(res.allowed).toBe(false);
       expect(res.code).toBe("TRIAL_EXPIRED");
       expect(res.effectiveStatus).toBe("TRIAL_EXPIRED");
+      const read = await checkModuleEntitlement("hotel-c", "RESERVATIONS", "read");
+      expect(read.allowed).toBe(true);
     });
 
     it("locks out operational modules when hotel subscription is suspended", async () => {
@@ -843,7 +845,7 @@ describe("Phase 7: SaaS Subscription Foundation and Plan Enforcement", () => {
         ...db.subscriptions.get("hotel-a"),
         trialEndsAt: new Date(Date.now() - 1_000),
       });
-      const { GET } = await import("@/app/api/hotel/subscription/route");
+      const { GET } = await import("@/app/api/subscription/route");
 
       const response = await GET();
       const json = await response.json();
@@ -862,7 +864,7 @@ describe("Phase 7: SaaS Subscription Foundation and Plan Enforcement", () => {
         ...db.memberships.get("mem-a-owner"),
         role: HotelRole.RECEPTIONIST,
       });
-      const { GET } = await import("@/app/api/hotel/subscription/route");
+      const { GET } = await import("@/app/api/subscription/route");
 
       const response = await GET();
 

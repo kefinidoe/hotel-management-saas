@@ -3,13 +3,13 @@ import { prisma } from "@/lib/prisma";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 
 export async function GET() {
-  const tenant = await getTenantFromRoute();
+  const tenant = await getTenantFromRoute("read");
   if (tenant instanceof NextResponse) return tenant;
 
   const forbidden = requireRole(tenant.role, ROLE_GROUPS.HOUSEKEEPING);
   if (forbidden) return forbidden;
 
-  const blocked = await requireModule(tenant.hotelId, "HOUSEKEEPING");
+  const blocked = await requireModule(tenant.hotelId, "HOUSEKEEPING", "read");
   if (blocked) return blocked;
 
   const [tasks, memberships] = await Promise.all([

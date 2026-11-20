@@ -18,11 +18,11 @@ const updateSchema = z.discriminatedUnion("kind", [meal.extend({ id }), occupanc
 const deleteSchema = z.strictObject({ kind: z.enum(["meal", "occupancy"]), id });
 
 async function authorize(write = true) {
-  const tenant = await getTenantFromRoute();
+  const tenant = await getTenantFromRoute(write ? "write" : "read");
   if (tenant instanceof NextResponse) return tenant;
   const forbidden = requireRole(tenant.role, write ? ROLE_GROUPS.MANAGEMENT : ROLE_GROUPS.GUEST_STAYS);
   if (forbidden) return forbidden;
-  return (await requireModule(tenant.hotelId, "RESERVATIONS")) || tenant;
+  return (await requireModule(tenant.hotelId, "RESERVATIONS", write ? "write" : "read")) || tenant;
 }
 
 export async function GET(req: Request) {

@@ -137,14 +137,14 @@ export default function BrandingSettings({ initialName }: { initialName?: string
                 <span>{isUploading ? "Uploading..." : "Choose Image"}</span>
                 <input
                   type="file"
-                  accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                  accept="image/png,image/jpeg,image/webp"
                   onChange={handleLogoUpload}
                   disabled={isUploading}
                   className="hidden"
                 />
               </label>
               <span className="text-xs text-text-secondary">
-                PNG, JPG, WebP, or SVG (max 2MB)
+                PNG, JPG, or WebP (max 2MB)
               </span>
             </div>
           </div>
