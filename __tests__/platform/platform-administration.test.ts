@@ -714,6 +714,31 @@ describe("Phase 6: Platform Administration & Hotel Lifecycle", () => {
       expect(data.error).toBe("CONFIRMATION_REQUIRED");
     });
 
+    it.each(["false", "true", 1, {}, []])("rejects non-boolean suspension confirmation %j without updating the hotel", async (confirmed) => {
+      mockSession = { user: { id: "user-super-admin" } };
+      const req = new Request("http://localhost/api/platform/hotels/hotel-alpha/status", {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: HotelStatus.SUSPENDED, reason: "Needs suspension", confirmed }),
+      });
+      const res = await updateHotelStatus(req, { params: Promise.resolve({ id: "hotel-alpha" }) });
+      expect(res.status).toBe(400);
+      expect((await res.json()).issues).toEqual(expect.arrayContaining([expect.objectContaining({ path: ["confirmed"] })]));
+      expect(hotels.get("hotel-alpha")?.status).toBe(HotelStatus.ACTIVE);
+    });
+
+    it("rejects unknown query parameters and body fields", async () => {
+      mockSession = { user: { id: "user-super-admin" } };
+      for (const [url, body] of [
+        ["http://localhost/api/platform/hotels/hotel-alpha/status?unexpected=1", { status: HotelStatus.ACTIVE }],
+        ["http://localhost/api/platform/hotels/hotel-alpha/status", { status: HotelStatus.ACTIVE, extra: true }],
+      ] as const) {
+        const res = await updateHotelStatus(new Request(url, { method: "PATCH", body: JSON.stringify(body) }), { params: Promise.resolve({ id: "hotel-alpha" }) });
+        expect(res.status).toBe(400);
+        expect((await res.json()).issues.length).toBeGreaterThan(0);
+      }
+      expect(hotels.get("hotel-alpha")?.status).toBe(HotelStatus.ACTIVE);
+    });
+
     it("rejects suspension if reason is too short (< 5 characters)", async () => {
       mockSession = { user: { id: "user-super-admin" } };
       const req = new Request("http://localhost/api/platform/hotels/hotel-alpha/status", {

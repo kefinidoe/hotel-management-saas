@@ -2,8 +2,16 @@ import { NextResponse } from "next/server";
 import { getPlatformAdminFromRoute } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 import { HotelStatus, PlatformRole } from "@prisma/client";
+import { z } from "zod";
 
 export const dynamic = "force-dynamic";
+
+const statusBodySchema = z.strictObject({
+  status: z.nativeEnum(HotelStatus),
+  reason: z.string().trim().max(1000).optional(),
+  confirmed: z.boolean().optional(),
+});
+const emptyQuerySchema = z.strictObject({});
 
 export async function PATCH(
   req: Request,
@@ -13,34 +21,47 @@ export async function PATCH(
   if (admin instanceof NextResponse) return admin;
 
   const { id } = await params;
-  if (!id) {
-    return NextResponse.json({ error: "Hotel ID is required" }, { status: 400 });
+  const idResult = z.string().trim().min(1).max(200).safeParse(id);
+  const queryResult = emptyQuerySchema.safeParse(Object.fromEntries(new URL(req.url).searchParams));
+  if (!idResult.success || !queryResult.success) {
+    return NextResponse.json({ error: "INVALID_REQUEST", issues: [
+      ...(!idResult.success ? idResult.error.issues.map((issue) => ({ ...issue, path: ["id", ...issue.path] })) : []),
+      ...(!queryResult.success ? queryResult.error.issues : []),
+    ] }, { status: 400 });
   }
 
-  let body: any;
+  let body: unknown;
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const targetStatus = body?.status as HotelStatus | undefined;
-  const reason = typeof body?.reason === "string" ? body.reason.trim() : "";
-  const confirmed = Boolean(body?.confirmed);
+  const parsed = statusBodySchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({
+      error: parsed.error.issues.some((issue) => issue.path[0] === "status") ? "INVALID_STATUS" : "INVALID_REQUEST_BODY",
+      issues: parsed.error.issues,
+    }, { status: 400 });
+  }
+  const targetStatus = parsed.data.status;
+  const reason = parsed.data.reason ?? "";
+  const confirmed = parsed.data.confirmed === true;
 
-  if (!targetStatus || !Object.values(HotelStatus).includes(targetStatus)) {
-    return NextResponse.json(
-      {
-        error: "INVALID_STATUS",
-        message: `Status must be one of: ${Object.values(HotelStatus).join(", ")}`,
-      },
-      { status: 400 }
-    );
+  // Confirmation and reason are security requirements; check them before
+  // looking up the target hotel so malformed requests cannot reach business data.
+  if (targetStatus === HotelStatus.SUSPENDED || targetStatus === HotelStatus.CANCELLED) {
+    if (!confirmed) {
+      return NextResponse.json({ error: "CONFIRMATION_REQUIRED", message: `Explicit confirmation is required to transition hotel to ${targetStatus}.`, issues: [{ code: "custom", path: ["confirmed"], message: "Must be true for suspension or cancellation." }] }, { status: 400 });
+    }
+    if (reason.length < 5) {
+      return NextResponse.json({ error: "REASON_REQUIRED", message: `An explanatory reason of at least 5 characters is required to transition hotel to ${targetStatus}.`, issues: [{ code: "custom", path: ["reason"], message: "Must contain at least 5 characters." }] }, { status: 400 });
+    }
   }
 
   try {
     const hotel = await prisma.hotel.findUnique({
-      where: { id },
+      where: { id: idResult.data },
       select: { id: true, name: true, slug: true, status: true },
     });
 
@@ -61,30 +82,7 @@ export async function PATCH(
       );
     }
 
-    // Lifecycle validation rules:
-    // 1. Suspension or cancellation requires explicit operational reason and confirmation
-    if (targetStatus === HotelStatus.SUSPENDED || targetStatus === HotelStatus.CANCELLED) {
-      if (!confirmed) {
-        return NextResponse.json(
-          {
-            error: "CONFIRMATION_REQUIRED",
-            message: `Explicit confirmation is required to transition hotel to ${targetStatus}.`,
-          },
-          { status: 400 }
-        );
-      }
-      if (!reason || reason.length < 5) {
-        return NextResponse.json(
-          {
-            error: "REASON_REQUIRED",
-            message: `An explanatory reason of at least 5 characters is required to transition hotel to ${targetStatus}.`,
-          },
-          { status: 400 }
-        );
-      }
-    }
-
-    // 2. Reactivating a CANCELLED hotel requires PLATFORM_SUPER_ADMIN privileges
+    // Reactivating a CANCELLED hotel requires PLATFORM_SUPER_ADMIN privileges
     if (
       hotel.status === HotelStatus.CANCELLED &&
       targetStatus !== HotelStatus.CANCELLED &&
