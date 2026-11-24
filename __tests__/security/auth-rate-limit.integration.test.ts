@@ -222,6 +222,32 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     expect((await replay.json()).id).toBe(payment.id);
     const paymentCount = await db.query('SELECT count(*)::int AS count FROM "Payment" WHERE "hotelId"=$1 AND "idempotencyKey"=$2', [fixtures.hotels.a.id, request.idempotencyKey]);
     expect(paymentCount.rows[0].count).toBe(1);
+    const auditCount = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='PAYMENT_RECORDED' AND "entityId"=$2 AND (metadata->>'amount')::numeric=100 AND metadata->>'reference'='CI-ONLY'`, [fixtures.hotels.a.id, payment.id]);
+    expect(auditCount.rows[0].count).toBe(1);
+
+    // This grant change is confined to the verified disposable cluster. Restore
+    // it even when an assertion fails so the other test workflows remain usable.
+    const deniedRequest = { ...request, idempotencyKey: `ci-denied-${instanceTag}` };
+    await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
+    try {
+      const denied = await post(base, "/api/payments", deniedRequest, headers);
+      expect(denied.status).toBe(500);
+    } finally {
+      await db.query('GRANT INSERT ON "AuditLog" TO hotel_saas_runtime');
+    }
+    const rolledBack = await db.query('SELECT count(*)::int AS count FROM "Payment" WHERE "hotelId"=$1 AND "idempotencyKey"=$2', [fixtures.hotels.a.id, deniedRequest.idempotencyKey]);
+    expect(rolledBack.rows[0].count).toBe(0);
+    const retried = await expectJson(await post(base, "/api/payments", deniedRequest, headers), 201);
+    const retriedAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='PAYMENT_RECORDED' AND "entityId"=$2`, [fixtures.hotels.a.id, retried.id]);
+    expect(retriedAudit.rows[0].count).toBe(1);
+
+    const concurrentRequest = { ...request, amount: 50, idempotencyKey: `ci-race-${instanceTag}` };
+    const concurrent = await Promise.all([post(base, "/api/payments", concurrentRequest, headers), post(base, "/api/payments", concurrentRequest, headers)]);
+    expect(concurrent.some(response => response.status === 201)).toBe(true);
+    expect(concurrent.every(response => [201, 409].includes(response.status))).toBe(true);
+    const winner = await expectJson(await post(base, "/api/payments", concurrentRequest, headers), 201);
+    const raceCounts = await db.query(`SELECT (SELECT count(*) FROM "Payment" WHERE "hotelId"=$1 AND "idempotencyKey"=$2)::int AS count, (SELECT count(*) FROM "AuditLog" WHERE "hotelId"=$1 AND action='PAYMENT_RECORDED' AND "entityId"=$3)::int AS attempts`, [fixtures.hotels.a.id, concurrentRequest.idempotencyKey, winner.id]);
+    expect(raceCounts.rows[0]).toMatchObject({ count: 1, attempts: 1 });
     await expectJson(await fetch(base + "/api/guests", { headers }), 200);
     await expectJson(await fetch(base + "/api/inventory", { headers }), 200);
     await expectJson(await fetch(base + "/api/reservations", { headers }), 200);

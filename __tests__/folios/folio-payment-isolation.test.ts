@@ -144,6 +144,7 @@ interface TestDB {
   folios: Map<string, any>;
   folioItems: Map<string, any>;
   payments: Map<string, any>;
+  auditEvents: Array<Record<string, unknown>>;
   paymentMethods: Map<string, any>;
   menuItems: Map<string, any>;
   inventoryItems: Map<string, any>;
@@ -159,6 +160,7 @@ function createFreshTestDB(): TestDB {
     folios: new Map(),
     folioItems: new Map(),
     payments: new Map(),
+    auditEvents: [],
     paymentMethods: new Map(),
     menuItems: new Map(),
     inventoryItems: new Map(),
@@ -236,6 +238,7 @@ vi.doMock("@/lib/prisma", () => ({
   prisma: {
     $transaction: async (fn: any) => {
       const tx = {
+        auditLog: { create: async ({ data }: { data: Record<string, unknown> }) => { db.auditEvents.push(data); return data; } },
         $queryRaw: async (query: any, ...values: any[]) => {
           const parts = Array.isArray(query) ? query : [query];
           const rendered = parts.map((p: any, i: number) => `${p}${values[i] !== undefined ? values[i] : ""}`).join("");
