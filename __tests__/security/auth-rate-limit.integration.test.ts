@@ -16,7 +16,7 @@ type Account = { email: string; password: string };
 type TestDb = {
   connect(): Promise<void>;
   end(): Promise<void>;
-  query(sql: string, values?: unknown[]): Promise<{ rows: Array<{ data_directory: string; count: number; attempts: number }> }>;
+  query(sql: string, values?: unknown[]): Promise<{ rows: Array<{ data_directory: string; count: number; attempts: number; tasks: number; occupied: number }> }>;
 };
 const { Client } = require("pg") as { Client: new (options: { host: string; port: number; user: string; database: string }) => TestDb };
 let db: TestDb;
@@ -248,6 +248,24 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     const winner = await expectJson(await post(base, "/api/payments", concurrentRequest, headers), 201);
     const raceCounts = await db.query(`SELECT (SELECT count(*) FROM "Payment" WHERE "hotelId"=$1 AND "idempotencyKey"=$2)::int AS count, (SELECT count(*) FROM "AuditLog" WHERE "hotelId"=$1 AND action='PAYMENT_RECORDED' AND "entityId"=$3)::int AS attempts`, [fixtures.hotels.a.id, concurrentRequest.idempotencyKey, winner.id]);
     expect(raceCounts.rows[0]).toMatchObject({ count: 1, attempts: 1 });
+
+    const checkOutUrl = `/api/reservations/${stay.id}/check-out`;
+    await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
+    try {
+      const denied = await post(base, checkOutUrl, { allowOutstandingBalance: true }, headers);
+      expect(denied.status).toBe(500);
+    } finally {
+      await db.query('GRANT INSERT ON "AuditLog" TO hotel_saas_runtime');
+    }
+    const unchanged = await db.query(`SELECT
+      (SELECT count(*) FROM "Reservation" WHERE id=$1 AND status='CHECKED_IN')::int AS count,
+      (SELECT count(*) FROM "Folio" WHERE id=$2 AND "isClosed"=false)::int AS attempts,
+      (SELECT count(*) FROM "HousekeepingTask" WHERE "roomId"=$3)::int AS tasks,
+      (SELECT count(*) FROM "Room" WHERE id=$3 AND status='OCCUPIED')::int AS occupied`, [stay.id, checkedIn.folioId, room.id]);
+    expect(unchanged.rows[0]).toMatchObject({ count: 1, attempts: 1, tasks: 0, occupied: 1 });
+    await expectJson(await post(base, checkOutUrl, { allowOutstandingBalance: true }, headers), 200);
+    const checkoutAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='CHECK_OUT_WITH_BALANCE' AND "entityId"=$2`, [fixtures.hotels.a.id, stay.id]);
+    expect(checkoutAudit.rows[0].count).toBe(1);
     await expectJson(await fetch(base + "/api/guests", { headers }), 200);
     await expectJson(await fetch(base + "/api/inventory", { headers }), 200);
     await expectJson(await fetch(base + "/api/reservations", { headers }), 200);

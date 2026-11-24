@@ -437,7 +437,8 @@ export async function executeCheckOut(tenant: TenantContext, options: CheckOutOp
           entityId: reservation.id,
           metadata: { folioId: openFolio.id, balance: totals.balance },
         },
-        tx
+        tx,
+        { strict: true }
       );
 
       return { folioId: openFolio.id, ...totals };
