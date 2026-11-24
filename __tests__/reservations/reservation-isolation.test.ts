@@ -146,6 +146,7 @@ interface TestDB {
   payments: Map<string, any>;
   paymentMethods: Map<string, any>;
   housekeepingTasks: Map<string, any>;
+  auditEvents: Array<Record<string, unknown>>;
   locks: string[];
 }
 
@@ -162,6 +163,7 @@ function createFreshTestDB(): TestDB {
     payments: new Map(),
     paymentMethods: new Map(),
     housekeepingTasks: new Map(),
+    auditEvents: [],
     locks: [],
   };
 
@@ -232,6 +234,7 @@ vi.doMock("@/lib/prisma", () => ({
     $transaction: async (fn: any) => {
       const tx = {
         ...pricingModelStubs(),
+        auditLog: { create: async ({ data }: any) => { db.auditEvents.push(data); return data; } },
         hotel: { findUnique: async ({ where }: any) => db.hotels.has(where.id) ? { useModularPricing: false } : null },
         $queryRaw: async (query: any, ...values: any[]) => {
           const parts = Array.isArray(query) ? query : [query];
@@ -841,6 +844,7 @@ describe("Phase 4: Multi-Tenant Reservation & Stay Security Hardening", () => {
       expect(result.balance).toBe(0);
       expect(db.reservations.get(resA.id)?.status).toBe("CHECKED_OUT");
       expect(db.rooms.get("room-a-101")?.status).toBe("DIRTY");
+      expect(db.auditEvents).toEqual(expect.arrayContaining([expect.objectContaining({ action: "CHECK_OUT", hotelId: "hotel-a", entityId: resA.id })]));
 
       // Verify housekeeping task created with tenant hotelId
       const tasks = Array.from(db.housekeepingTasks.values()).filter((t) => t.roomId === "room-a-101");
