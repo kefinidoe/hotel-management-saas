@@ -164,6 +164,24 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     if (db) await db.end();
   });
 
+  it("rolls back the native-engine audit probe under append-only protections", async () => {
+    const { PrismaClient } = await import("@prisma/client");
+    const { probeAuditRollback } = await import("../../scripts/native-engine-audit-probe.mjs");
+    const previousEngine = process.env.PRISMA_QUERY_ENGINE_LIBRARY;
+    process.env.PRISMA_QUERY_ENGINE_LIBRARY = path.resolve("node_modules/.prisma/client/libquery_engine.so.node");
+    const client = new PrismaClient({ datasources: { db: { url: "postgresql://hotel_saas_runtime@127.0.0.1:55434/hotel_saas_disposable_audit" } } });
+    const probe = `ci-native-probe-${instanceTag}`;
+    try {
+      expect(await probeAuditRollback(client, probe)).toBe(true);
+      const rows = await db.query('SELECT count(*)::int AS count FROM "AuditLog" WHERE "entityId"=$1', [probe]);
+      expect(rows.rows[0].count).toBe(0);
+    } finally {
+      await client.$disconnect();
+      if (previousEngine === undefined) delete process.env.PRISMA_QUERY_ENGINE_LIBRARY;
+      else process.env.PRISMA_QUERY_ENGINE_LIBRARY = previousEngine;
+    }
+  }, 30_000);
+
   it("runs hotel booking, check-in, payment and audited pricing with the non-owner role", async () => {
     const owner = await signIn(await newAccount("runtime-workflow-owner", true));
     const base = bases[0];
