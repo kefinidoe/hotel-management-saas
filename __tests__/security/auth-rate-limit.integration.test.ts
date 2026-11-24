@@ -364,6 +364,17 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     const pricingAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='PRICING_SETTINGS_UPDATED'`, [fixtures.hotels.a.id]);
     expect(pricingAudit.rows[0].count).toBe(1);
 
+    const staffEmail = `runtime-new-staff-${instanceTag}@example.invalid`;
+    const staffBody = { name: "Fictional New Staff", email: staffEmail, password: fakePassword, role: "ACCOUNTANT" };
+    await rejectAudit(() => post(base, "/api/staff", staffBody, headers));
+    const noUser = await db.query('SELECT count(*)::int AS count FROM "User" WHERE email=$1', [staffEmail]);
+    expect(noUser.rows[0].count).toBe(0);
+    const staff = await expectJson(await post(base, "/api/staff", staffBody, headers), 201);
+    const staffAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='STAFF_MEMBER_ADDED' AND "entityId"=$2`, [fixtures.hotels.a.id, staff.id]);
+    expect(staffAudit.rows[0].count).toBe(1);
+    // Avoid consuming a seat needed by unrelated limiter tests in this fixture.
+    await db.query('DELETE FROM "HotelMembership" WHERE id=$1 AND "hotelId"=$2', [staff.id, fixtures.hotels.a.id]);
+
     const settingsFingerprint = async () => (await db.query(`SELECT md5(
       (SELECT row_to_json(h)::text FROM "Hotel" h WHERE id=$1) ||
       COALESCE((SELECT row_to_json(s)::text FROM "Subscription" s WHERE "hotelId"=$1), '')

@@ -244,6 +244,18 @@ export async function POST(req: Request) {
           status: MembershipStatus.ACTIVE,
         },
       });
+      await recordAudit({
+        hotelId: tenant.hotelId,
+        userId: tenant.userId,
+        action: "STAFF_MEMBER_ADDED",
+        entity: "HOTEL_MEMBERSHIP",
+        entityId: newMembership.id,
+        metadata: {
+          targetUserId: newUser.id,
+          role: newMembership.role,
+          existingAccount: false,
+        },
+      }, tx, { strict: true });
       return { user: newUser, membership: newMembership };
     });
     if (!quotaResult.allowed) {
@@ -253,19 +265,6 @@ export async function POST(req: Request) {
       );
     }
     const result = quotaResult.value;
-
-    await recordAudit({
-      hotelId: tenant.hotelId,
-      userId: tenant.userId,
-      action: "STAFF_MEMBER_ADDED",
-      entity: "HOTEL_MEMBERSHIP",
-      entityId: result.membership.id,
-      metadata: {
-        targetUserId: result.user.id,
-        role: result.membership.role,
-        existingAccount: false,
-      },
-    });
 
     return NextResponse.json(
       {
