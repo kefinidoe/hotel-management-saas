@@ -300,6 +300,51 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     await expectJson(await fetch(base + "/api/inventory", { headers }), 200);
     await expectJson(await fetch(base + "/api/reservations", { headers }), 200);
 
+    // Exercise create/update/delete and the bulk rate write against a real
+    // non-owner role, including failure after business writes have happened.
+    const entityUrl = "/api/pricing/occupancy-types";
+    const occupancyName = `CI occupancy ${instanceTag}`;
+    const pricingRequest = (method: string, url: string, body?: unknown) => fetch(base + url, {
+      method, headers: { ...headers, origin: base, "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const rejectAudit = async (request: () => Promise<Response>) => {
+      await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
+      try { expect((await request()).status).toBe(500); }
+      finally { await db.query('GRANT INSERT ON "AuditLog" TO hotel_saas_runtime'); }
+    };
+    const newOccupancy = { name: occupancyName, minAdults: 1, maxAdults: 2, maxChildren: 0 };
+    await rejectAudit(() => pricingRequest("POST", entityUrl, newOccupancy));
+    const noOccupancy = await db.query('SELECT count(*)::int AS count FROM "OccupancyType" WHERE "hotelId"=$1 AND name=$2', [fixtures.hotels.a.id, occupancyName]);
+    expect(noOccupancy.rows[0].count).toBe(0);
+    const occupancy = (await expectJson(await pricingRequest("POST", entityUrl, newOccupancy), 201)).record;
+    const renameOccupancy = { id: occupancy.id, name: `${occupancyName} updated` };
+    await rejectAudit(() => pricingRequest("PATCH", entityUrl, renameOccupancy));
+    const originalOccupancy = await db.query('SELECT count(*)::int AS count FROM "OccupancyType" WHERE id=$1 AND name=$2', [occupancy.id, occupancyName]);
+    expect(originalOccupancy.rows[0].count).toBe(1);
+    await expectJson(await pricingRequest("PATCH", entityUrl, renameOccupancy), 200);
+    const rateBody = { roomTypeId: rate.id, rates: [{ occupancyTypeId: occupancy.id, nightlyRate: 1800 }] };
+    await rejectAudit(() => pricingRequest("POST", "/api/pricing/room-rates", rateBody));
+    const absentRate = await db.query('SELECT count(*)::int AS count FROM "RoomTypeOccupancy" WHERE "roomTypeId"=$1 AND "occupancyTypeId"=$2', [rate.id, occupancy.id]);
+    expect(absentRate.rows[0].count).toBe(0);
+    const oldBaseRate = await db.query('SELECT count(*)::int AS count FROM "RoomType" WHERE id=$1 AND "baseRate"=1500', [rate.id]);
+    expect(oldBaseRate.rows[0].count).toBe(1);
+    await expectJson(await pricingRequest("POST", "/api/pricing/room-rates", rateBody), 200);
+    // An invalid later row must not leave the earlier deletion behind.
+    await expectJson(await pricingRequest("POST", "/api/pricing/room-rates", { roomTypeId: rate.id, rates: [
+      { occupancyTypeId: occupancy.id, nightlyRate: null }, { occupancyTypeId: "not-a-real-id", nightlyRate: 20 },
+    ] }), 404);
+    const rateRemains = await db.query('SELECT count(*)::int AS count FROM "RoomTypeOccupancy" WHERE "roomTypeId"=$1 AND "occupancyTypeId"=$2 AND "nightlyRate"=1800', [rate.id, occupancy.id]);
+    expect(rateRemains.rows[0].count).toBe(1);
+    await expectJson(await pricingRequest("POST", "/api/pricing/room-rates", { roomTypeId: rate.id, rates: [{ occupancyTypeId: occupancy.id, nightlyRate: null }] }), 200);
+    const deleteUrl = `${entityUrl}?id=${encodeURIComponent(occupancy.id)}`;
+    await rejectAudit(() => pricingRequest("DELETE", deleteUrl));
+    const retainedOccupancy = await db.query('SELECT count(*)::int AS count FROM "OccupancyType" WHERE id=$1', [occupancy.id]);
+    expect(retainedOccupancy.rows[0].count).toBe(1);
+    await expectJson(await pricingRequest("DELETE", deleteUrl), 200);
+    const entityAudits = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND "entityId"=$2 AND action IN ('PRICING_OCCUPANCY_TYPES_CREATED','PRICING_OCCUPANCY_TYPES_UPDATED','PRICING_OCCUPANCY_TYPES_DELETED')`, [fixtures.hotels.a.id, occupancy.id]);
+    expect(entityAudits.rows[0].count).toBe(3);
+
     const pricingFingerprint = async () => (await db.query(`SELECT md5(COALESCE(
       (SELECT row_to_json(p)::text FROM "HotelPricingSettings" p WHERE "hotelId"=$1), ''
     )) AS fingerprint`, [fixtures.hotels.a.id])).rows[0].fingerprint;

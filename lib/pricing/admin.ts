@@ -102,9 +102,9 @@ function enumValue<T extends string>(value: unknown, allowed: readonly T[], labe
 // ---------------------------------------------------------------------------
 // tenant-safe reference checks
 // ---------------------------------------------------------------------------
-async function assertRoomType(hotelId: string, roomTypeId: string | null): Promise<string | null> {
+async function assertRoomType(hotelId: string, roomTypeId: string | null, client: Prisma.TransactionClient): Promise<string | null> {
   if (!roomTypeId) return null;
-  const found = await prisma.roomType.findUnique({
+  const found = await client.roomType.findUnique({
     where: { id_hotelId: { id: roomTypeId, hotelId } },
     select: { id: true },
   });
@@ -112,8 +112,8 @@ async function assertRoomType(hotelId: string, roomTypeId: string | null): Promi
   return found.id;
 }
 
-async function assertOccupancy(hotelId: string, occupancyTypeId: string): Promise<string> {
-  const found = await prisma.occupancyType.findUnique({
+async function assertOccupancy(hotelId: string, occupancyTypeId: string, client: Prisma.TransactionClient): Promise<string> {
+  const found = await client.occupancyType.findUnique({
     where: { id_hotelId: { id: occupancyTypeId, hotelId } },
     select: { id: true },
   });
@@ -352,11 +352,12 @@ export async function updatePricingSettings(hotelId: string, body: Record<string
 // ---------------------------------------------------------------------------
 export async function setRoomTypeRates(
   hotelId: string,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  client: Prisma.TransactionClient
 ) {
   assertPricingClient("room rate update");
 
-  const roomTypeId = await assertRoomType(hotelId, String(body.roomTypeId ?? ""));
+  const roomTypeId = await assertRoomType(hotelId, String(body.roomTypeId ?? ""), client);
   if (!roomTypeId) throw new PricingConfigError("Choose a room type to set rates for.");
 
   const rows = Array.isArray(body.rates) ? (body.rates as Record<string, unknown>[]) : [];
@@ -364,17 +365,17 @@ export async function setRoomTypeRates(
 
   const results: unknown[] = [];
   for (const row of rows) {
-    const occupancyTypeId = await assertOccupancy(hotelId, String(row.occupancyTypeId ?? ""));
+    const occupancyTypeId = await assertOccupancy(hotelId, String(row.occupancyTypeId ?? ""), client);
     if (row.nightlyRate === null || row.nightlyRate === "" || row.nightlyRate === undefined) {
       // No rate for this occupancy: remove the pairing rather than storing zero.
-      await prisma.roomTypeOccupancy.deleteMany({ where: { hotelId, roomTypeId, occupancyTypeId } });
+      await client.roomTypeOccupancy.deleteMany({ where: { hotelId, roomTypeId, occupancyTypeId } });
       continue;
     }
     const nightlyRate = requiredMoney(row.nightlyRate, "Nightly rate");
     if (nightlyRate <= 0) {
       throw new PricingConfigError("Nightly rates must be greater than zero.");
     }
-    const saved = await prisma.roomTypeOccupancy.upsert({
+    const saved = await client.roomTypeOccupancy.upsert({
       where: { roomTypeId_occupancyTypeId: { roomTypeId, occupancyTypeId } },
       update: { nightlyRate, isActive: bool(row.isActive, true), hotelId },
       create: {
@@ -390,12 +391,12 @@ export async function setRoomTypeRates(
 
   // Keep the hotel's headline price in step with its single-occupancy rate so the
   // Rooms page and reports stay meaningful for legacy readers.
-  const baseRow = await prisma.roomTypeOccupancy.findFirst({
+  const baseRow = await client.roomTypeOccupancy.findFirst({
     where: { hotelId, roomTypeId, isActive: true },
     orderBy: { occupancyType: { sortOrder: "asc" } },
   });
   if (baseRow) {
-    await prisma.roomType.update({
+    await client.roomType.update({
       where: { id_hotelId: { id: roomTypeId, hotelId } },
       data: { baseRate: baseRow.nightlyRate },
     });
@@ -410,13 +411,14 @@ export async function setRoomTypeRates(
 export async function createEntity(
   entity: PricingEntity,
   hotelId: string,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  client: Prisma.TransactionClient
 ) {
   assertPricingClient(`pricing ${entity} create`);
 
   switch (entity) {
     case "occupancy-types":
-      return prisma.occupancyType.create({
+      return client.occupancyType.create({
         data: {
           hotelId,
           name: str(body.name, "Name", { max: 60 }),
@@ -432,8 +434,8 @@ export async function createEntity(
     case "meal-plans": {
       // Validate the room-type links *before* writing, so a request that names
       // another hotel's room type cannot leave a half-created meal plan behind.
-      await assertRoomTypes(hotelId, body.roomTypeIds);
-      const plan = await prisma.mealPlanConfig.create({
+      await assertRoomTypes(hotelId, body.roomTypeIds, client);
+      const plan = await client.mealPlanConfig.create({
         data: {
           hotelId,
           name: str(body.name, "Name", { max: 80 }),
@@ -449,15 +451,15 @@ export async function createEntity(
           isActive: bool(body.isActive),
         },
       });
-      await syncMealPlanRoomTypes(hotelId, plan.id, body.roomTypeIds);
+      await syncMealPlanRoomTypes(hotelId, plan.id, body.roomTypeIds, client);
       return plan;
     }
 
     case "adjustments":
-      return prisma.rateAdjustment.create({
+      return client.rateAdjustment.create({
         data: {
           hotelId,
-          roomTypeId: await assertRoomType(hotelId, body.roomTypeId ? String(body.roomTypeId) : null),
+          roomTypeId: await assertRoomType(hotelId, body.roomTypeId ? String(body.roomTypeId) : null, client),
           name: str(body.name, "Name", { max: 80 }),
           kind: enumValue(body.kind, ADJUSTMENT_KINDS, "Kind"),
           adjustmentType: enumValue(body.adjustmentType, ADJUSTMENT_TYPES, "Adjustment type"),
@@ -471,10 +473,10 @@ export async function createEntity(
       });
 
     case "extra-beds":
-      return prisma.extraBedRule.create({
+      return client.extraBedRule.create({
         data: {
           hotelId,
-          roomTypeId: await assertRoomType(hotelId, body.roomTypeId ? String(body.roomTypeId) : null),
+          roomTypeId: await assertRoomType(hotelId, body.roomTypeId ? String(body.roomTypeId) : null, client),
           name: str(body.name, "Name", { max: 80 }),
           nightlyRate: optionalMoney(body.nightlyRate, "Nightly rate") ?? 0,
           childRate: optionalMoney(body.childRate, "Child rate"),
@@ -487,7 +489,7 @@ export async function createEntity(
       const minAge = int(body.minAge ?? 0, "Minimum age", { min: 0, max: 17 });
       const maxAge = int(body.maxAge ?? 12, "Maximum age", { min: 0, max: 17 });
       if (maxAge < minAge) throw new PricingConfigError("Maximum age must be at least the minimum age.");
-      return prisma.childPricingRule.create({
+      return client.childPricingRule.create({
         data: {
           hotelId,
           name: str(body.name, "Name", { max: 80 }),
@@ -501,7 +503,7 @@ export async function createEntity(
     }
 
     case "tax-rules":
-      return prisma.taxRule.create({
+      return client.taxRule.create({
         data: {
           hotelId,
           name: str(body.name, "Name", { max: 80 }),
@@ -521,18 +523,19 @@ export async function updateEntity(
   entity: PricingEntity,
   hotelId: string,
   id: string,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  client: Prisma.TransactionClient
 ) {
   assertPricingClient(`pricing ${entity} update`);
 
   switch (entity) {
     case "occupancy-types": {
-      const existing = await prisma.occupancyType.findUnique({
+      const existing = await client.occupancyType.findUnique({
         where: { id_hotelId: { id, hotelId } },
         select: { id: true },
       });
       if (!existing) throw new PricingConfigError("Occupancy option not found in this hotel.", 404);
-      return prisma.occupancyType.update({
+      return client.occupancyType.update({
         where: { id_hotelId: { id, hotelId } },
         data: {
           ...(body.name !== undefined ? { name: str(body.name, "Name", { max: 60 }) } : {}),
@@ -557,12 +560,12 @@ export async function updateEntity(
     }
 
     case "meal-plans": {
-      const existing = await prisma.mealPlanConfig.findUnique({
+      const existing = await client.mealPlanConfig.findUnique({
         where: { id_hotelId: { id, hotelId } },
         select: { id: true },
       });
       if (!existing) throw new PricingConfigError("Meal plan not found in this hotel.", 404);
-      const plan = await prisma.mealPlanConfig.update({
+      const plan = await client.mealPlanConfig.update({
         where: { id_hotelId: { id, hotelId } },
         data: {
           ...(body.name !== undefined ? { name: str(body.name, "Name", { max: 80 }) } : {}),
@@ -592,17 +595,17 @@ export async function updateEntity(
           ...(body.isActive !== undefined ? { isActive: Boolean(body.isActive) } : {}),
         },
       });
-      if (body.roomTypeIds !== undefined) await syncMealPlanRoomTypes(hotelId, id, body.roomTypeIds);
+      if (body.roomTypeIds !== undefined) await syncMealPlanRoomTypes(hotelId, id, body.roomTypeIds, client);
       return plan;
     }
 
     case "adjustments": {
-      const existing = await prisma.rateAdjustment.findUnique({
+      const existing = await client.rateAdjustment.findUnique({
         where: { id_hotelId: { id, hotelId } },
         select: { id: true },
       });
       if (!existing) throw new PricingConfigError("Rate adjustment not found in this hotel.", 404);
-      return prisma.rateAdjustment.update({
+      return client.rateAdjustment.update({
         where: { id_hotelId: { id, hotelId } },
         data: {
           ...(body.name !== undefined ? { name: str(body.name, "Name", { max: 80 }) } : {}),
@@ -623,7 +626,7 @@ export async function updateEntity(
           ...(body.startDate !== undefined ? { startDate: optionalDate(body.startDate, "Start date") } : {}),
           ...(body.endDate !== undefined ? { endDate: optionalDate(body.endDate, "End date") } : {}),
           ...(body.roomTypeId !== undefined
-            ? { roomTypeId: await assertRoomType(hotelId, body.roomTypeId ? String(body.roomTypeId) : null) }
+            ? { roomTypeId: await assertRoomType(hotelId, body.roomTypeId ? String(body.roomTypeId) : null, client) }
             : {}),
           ...(body.priority !== undefined
             ? { priority: int(body.priority, "Priority", { min: 0, max: 100 }) }
@@ -634,12 +637,12 @@ export async function updateEntity(
     }
 
     case "extra-beds": {
-      const existing = await prisma.extraBedRule.findUnique({
+      const existing = await client.extraBedRule.findUnique({
         where: { id_hotelId: { id, hotelId } },
         select: { id: true },
       });
       if (!existing) throw new PricingConfigError("Extra bed rule not found in this hotel.", 404);
-      return prisma.extraBedRule.update({
+      return client.extraBedRule.update({
         where: { id_hotelId: { id, hotelId } },
         data: {
           ...(body.name !== undefined ? { name: str(body.name, "Name", { max: 80 }) } : {}),
@@ -651,7 +654,7 @@ export async function updateEntity(
             ? { maxPerRoom: int(body.maxPerRoom, "Maximum per room", { min: 1, max: 10 }) }
             : {}),
           ...(body.roomTypeId !== undefined
-            ? { roomTypeId: await assertRoomType(hotelId, body.roomTypeId ? String(body.roomTypeId) : null) }
+            ? { roomTypeId: await assertRoomType(hotelId, body.roomTypeId ? String(body.roomTypeId) : null, client) }
             : {}),
           ...(body.isActive !== undefined ? { isActive: Boolean(body.isActive) } : {}),
         },
@@ -659,7 +662,7 @@ export async function updateEntity(
     }
 
     case "child-rules": {
-      const existing = await prisma.childPricingRule.findUnique({
+      const existing = await client.childPricingRule.findUnique({
         where: { id_hotelId: { id, hotelId } },
         select: { id: true },
       });
@@ -669,7 +672,7 @@ export async function updateEntity(
       if (minAge !== undefined && maxAge !== undefined && maxAge < minAge) {
         throw new PricingConfigError("Maximum age must be at least the minimum age.");
       }
-      return prisma.childPricingRule.update({
+      return client.childPricingRule.update({
         where: { id_hotelId: { id, hotelId } },
         data: {
           ...(body.name !== undefined ? { name: str(body.name, "Name", { max: 80 }) } : {}),
@@ -685,12 +688,12 @@ export async function updateEntity(
     }
 
     case "tax-rules": {
-      const existing = await prisma.taxRule.findUnique({
+      const existing = await client.taxRule.findUnique({
         where: { id_hotelId: { id, hotelId } },
         select: { id: true },
       });
       if (!existing) throw new PricingConfigError("Tax rule not found in this hotel.", 404);
-      return prisma.taxRule.update({
+      return client.taxRule.update({
         where: { id_hotelId: { id, hotelId } },
         data: {
           ...(body.name !== undefined ? { name: str(body.name, "Name", { max: 80 }) } : {}),
@@ -713,30 +716,30 @@ export async function updateEntity(
   }
 }
 
-export async function deleteEntity(entity: PricingEntity, hotelId: string, id: string) {
+export async function deleteEntity(entity: PricingEntity, hotelId: string, id: string, client: Prisma.TransactionClient) {
   assertPricingClient(`pricing ${entity} delete`);
 
   switch (entity) {
     case "occupancy-types": {
-      const used = await prisma.roomTypeOccupancy.count({ where: { hotelId, occupancyTypeId: id } });
+      const used = await client.roomTypeOccupancy.count({ where: { hotelId, occupancyTypeId: id } });
       if (used > 0) {
         throw new PricingConfigError(
           "This occupancy option is used by room rates. Deactivate it instead of deleting it.",
           409
         );
       }
-      return prisma.occupancyType.delete({ where: { id_hotelId: { id, hotelId } } });
+      return client.occupancyType.delete({ where: { id_hotelId: { id, hotelId } } });
     }
     case "meal-plans":
-      return prisma.mealPlanConfig.delete({ where: { id_hotelId: { id, hotelId } } });
+      return client.mealPlanConfig.delete({ where: { id_hotelId: { id, hotelId } } });
     case "adjustments":
-      return prisma.rateAdjustment.delete({ where: { id_hotelId: { id, hotelId } } });
+      return client.rateAdjustment.delete({ where: { id_hotelId: { id, hotelId } } });
     case "extra-beds":
-      return prisma.extraBedRule.delete({ where: { id_hotelId: { id, hotelId } } });
+      return client.extraBedRule.delete({ where: { id_hotelId: { id, hotelId } } });
     case "child-rules":
-      return prisma.childPricingRule.delete({ where: { id_hotelId: { id, hotelId } } });
+      return client.childPricingRule.delete({ where: { id_hotelId: { id, hotelId } } });
     case "tax-rules":
-      return prisma.taxRule.delete({ where: { id_hotelId: { id, hotelId } } });
+      return client.taxRule.delete({ where: { id_hotelId: { id, hotelId } } });
   }
 }
 
@@ -770,21 +773,21 @@ function taxAmount(body: Record<string, unknown>): number {
   return Math.round(amount * 100) / 100;
 }
 
-async function assertRoomTypes(hotelId: string, roomTypeIds: unknown): Promise<string[]> {
+async function assertRoomTypes(hotelId: string, roomTypeIds: unknown, client: Prisma.TransactionClient): Promise<string[]> {
   if (!Array.isArray(roomTypeIds)) return [];
   const wanted: string[] = [];
   for (const raw of roomTypeIds) {
-    const id = await assertRoomType(hotelId, String(raw));
+    const id = await assertRoomType(hotelId, String(raw), client);
     if (id) wanted.push(id);
   }
   return wanted;
 }
 
-async function syncMealPlanRoomTypes(hotelId: string, mealPlanId: string, roomTypeIds: unknown) {
-  const wanted = await assertRoomTypes(hotelId, roomTypeIds);
-  await prisma.mealPlanRoomType.deleteMany({ where: { hotelId, mealPlanId } });
+async function syncMealPlanRoomTypes(hotelId: string, mealPlanId: string, roomTypeIds: unknown, client: Prisma.TransactionClient) {
+  const wanted = await assertRoomTypes(hotelId, roomTypeIds, client);
+  await client.mealPlanRoomType.deleteMany({ where: { hotelId, mealPlanId } });
   if (wanted.length > 0) {
-    await prisma.mealPlanRoomType.createMany({
+    await client.mealPlanRoomType.createMany({
       data: wanted.map((roomTypeId) => ({ hotelId, mealPlanId, roomTypeId })),
     });
   }

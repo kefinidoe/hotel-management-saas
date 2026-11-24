@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getTenantFromRoute, requireModule, requireRole, ROLE_GROUPS } from "@/lib/authz";
 import { recordAudit } from "@/lib/audit";
+import { prisma } from "@/lib/prisma";
 import { pricingUnavailableResponse } from "@/lib/pricing/http";
 import { PricingConfigError, setRoomTypeRates } from "@/lib/pricing/admin";
 
@@ -21,15 +22,18 @@ export async function POST(req: Request) {
   }
 
   try {
-    const rates = await setRoomTypeRates(tenant.hotelId, body);
-    await recordAudit({
-      hotelId: tenant.hotelId,
-      userId: tenant.userId,
-      action: "ROOM_RATES_UPDATED",
-      entity: "RoomTypeOccupancy",
-      entityId: typeof body.roomTypeId === "string" ? body.roomTypeId : null,
-      metadata: { rates: body.rates },
-    });
+    const rates = await prisma.$transaction(async (tx) => {
+      const saved = await setRoomTypeRates(tenant.hotelId, body, tx);
+      await recordAudit({
+        hotelId: tenant.hotelId,
+        userId: tenant.userId,
+        action: "ROOM_RATES_UPDATED",
+        entity: "RoomTypeOccupancy",
+        entityId: typeof body.roomTypeId === "string" ? body.roomTypeId : null,
+        metadata: { rates: body.rates },
+      }, tx, { strict: true });
+      return saved;
+    }, { isolationLevel: "Serializable" });
     return NextResponse.json({ ok: true, rates });
   } catch (error) {
     if (error instanceof PricingConfigError) {

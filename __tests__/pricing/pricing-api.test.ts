@@ -231,9 +231,16 @@ vi.doMock("@/lib/prisma", () => {
 
   prismaDouble.$transaction = async (fn: (tx: typeof withFailures) => Promise<unknown>) => {
     const settings = structuredClone(state.settings);
+    const occupancies = structuredClone(state.occupancyTypes);
+    const rates = structuredClone(state.roomTypeOccupancies);
+    const plans = structuredClone(state.mealPlans);
     const audits = structuredClone(state.audits);
     try { return await fn(withFailures); }
-    catch (error) { state.settings = settings; state.audits = audits; throw error; }
+    catch (error) {
+      state.settings = settings; state.occupancyTypes = occupancies;
+      state.roomTypeOccupancies = rates; state.mealPlans = plans; state.audits = audits;
+      throw error;
+    }
   };
   return { prisma: withFailures };
 });

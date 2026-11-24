@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getTenantFromRoute, requireModule, requireRole, ROLE_GROUPS } from "@/lib/authz";
 import { recordAudit } from "@/lib/audit";
+import { prisma } from "@/lib/prisma";
 import { pricingUnavailableResponse } from "@/lib/pricing/http";
 import {
   PricingConfigError,
@@ -59,15 +60,18 @@ export async function POST(
   }
 
   try {
-    const created = await createEntity(entity, tenant.hotelId, body);
-    await recordAudit({
-      hotelId: tenant.hotelId,
-      userId: tenant.userId,
-      action: `PRICING_${entity.toUpperCase().replace(/-/g, "_")}_CREATED`,
-      entity,
-      entityId: (created as { id?: string }).id ?? null,
-      metadata: body,
-    });
+    const created = await prisma.$transaction(async (tx) => {
+      const saved = await createEntity(entity, tenant.hotelId, body, tx);
+      await recordAudit({
+        hotelId: tenant.hotelId,
+        userId: tenant.userId,
+        action: `PRICING_${entity.toUpperCase().replace(/-/g, "_")}_CREATED`,
+        entity,
+        entityId: saved.id,
+        metadata: body,
+      }, tx, { strict: true });
+      return saved;
+    }, { isolationLevel: "Serializable" });
     return NextResponse.json({ ok: true, record: created }, { status: 201 });
   } catch (error) {
     return errorResponse(error, "Could not save this pricing setting.");
@@ -96,15 +100,18 @@ export async function PATCH(
   if (!id) return NextResponse.json({ error: "Missing record id." }, { status: 400 });
 
   try {
-    const updated = await updateEntity(entity, tenant.hotelId, id, body);
-    await recordAudit({
-      hotelId: tenant.hotelId,
-      userId: tenant.userId,
-      action: `PRICING_${entity.toUpperCase().replace(/-/g, "_")}_UPDATED`,
-      entity,
-      entityId: id,
-      metadata: body,
-    });
+    const updated = await prisma.$transaction(async (tx) => {
+      const saved = await updateEntity(entity, tenant.hotelId, id, body, tx);
+      await recordAudit({
+        hotelId: tenant.hotelId,
+        userId: tenant.userId,
+        action: `PRICING_${entity.toUpperCase().replace(/-/g, "_")}_UPDATED`,
+        entity,
+        entityId: id,
+        metadata: body,
+      }, tx, { strict: true });
+      return saved;
+    }, { isolationLevel: "Serializable" });
     return NextResponse.json({ ok: true, record: updated });
   } catch (error) {
     return errorResponse(error, "Could not update this pricing setting.");
@@ -127,14 +134,16 @@ export async function DELETE(
   if (!id) return NextResponse.json({ error: "Missing record id." }, { status: 400 });
 
   try {
-    await deleteEntity(entity, tenant.hotelId, id);
-    await recordAudit({
-      hotelId: tenant.hotelId,
-      userId: tenant.userId,
-      action: `PRICING_${entity.toUpperCase().replace(/-/g, "_")}_DELETED`,
-      entity,
-      entityId: id,
-    });
+    await prisma.$transaction(async (tx) => {
+      await deleteEntity(entity, tenant.hotelId, id, tx);
+      await recordAudit({
+        hotelId: tenant.hotelId,
+        userId: tenant.userId,
+        action: `PRICING_${entity.toUpperCase().replace(/-/g, "_")}_DELETED`,
+        entity,
+        entityId: id,
+      }, tx, { strict: true });
+    }, { isolationLevel: "Serializable" });
     return NextResponse.json({ ok: true });
   } catch (error) {
     return errorResponse(error, "Could not delete this pricing setting.");
