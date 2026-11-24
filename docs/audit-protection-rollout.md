@@ -1,0 +1,27 @@
+# Audit protection rollout and rollback checklist (not authorization)
+
+Status: proposal only. No audit migration or runtime-role change has been applied to the connected Supabase test project. Do not run these steps against any database without separate explicit approval for that exact target. Production requires separate approval. The test project's earlier pricing-repair approval does not cover this work.
+
+## Before any change
+
+- Have the owner and an appropriate privacy/legal reviewer approve retention, user/hotel deletion restrictions, and an actionable lawful deletion/archival process. The current proposal retains linked audit rows and blocks parent deletion and ID changes; it is not a privacy policy.
+- Obtain and restore-test a backup in an isolated environment; record its time, contents, target and recovery procedure. There is currently no verified backup or restore test for the connected test project. Do not treat an untested export as a tested restore.
+- Review migration drift, migration ledger and actual effective grants and memberships, including ownership, PUBLIC and security-definer functions. Review `proposals/runtime-role.sql` against the target and all application operations. The broad table CRUD grants do not enforce tenant isolation or constitute complete least privilege. New tables require reviewed grants.
+- Identify distinct migration/maintenance and runtime credentials; obtain the correct connection and pooler mode from the provider. Test the provider's custom role/login support, migration connection, TLS hostname and trusted CA on an isolated representative environment. Never disable certificate validation. Keep credentials out of logs, source control and chat.
+- Rehearse the exact deployment, smoke tests, connection draining and rollback with a restored representative database and realistic traffic. Prepare a maintenance window, monitoring, accountable operator and abort criteria. A CI pass does not prove pooler/provider compatibility or full application coverage.
+- Plan off-database, independently administered tamper-evident audit export and monitoring. Owners and administrators can bypass database protections; existing best-effort audit callers can omit events. Neither this migration nor the role fixes those limitations.
+
+## Proposed sequencing for an approved target
+
+1. Verify the exact database identity independently and check a recent tested backup and migration status. Stop if unexpected drift or privileges are found. Record baseline counts, trigger/FK/index definitions, and privileges without exposing sensitive data.
+2. During a controlled window deploy the reviewed additive audit migration through the dedicated migration connection. Verify migration status, trigger/FK definitions, audit insert/read and rejection of mutations and duplicate manual-payment references using isolated test records. Do not mutate historical audit data. Stop and investigate on any failure.
+3. Provision a reviewed non-owner runtime identity with the minimum tested privileges and secure credentials through the provider's supported mechanism. The proposal is NOLOGIN and is not a complete credential/pooler provisioning script. Review any role membership and all indirect privileges rather than assuming a named role is safe. Do not revoke provider/platform roles indiscriminately.
+4. Change only the application's runtime connection to the approved runtime identity; retain a separate protected migration connection. Restart or drain all instances and pools so old owner sessions cannot continue serving requests. With verified TLS run the read-only role diagnostic using the *actual runtime connection*, then independently verify effective privileges and execute approved smoke tests (login, hotel, booking, billing and strict audit). A diagnostic PASS is limited and not a proof of security. Abort if any instance still runs as an owner/admin or tests fail.
+5. Monitor errors, audit inserts, rejected mutations and business workflows; document evidence and accountabilities. Keep the change unapproved for production until the above and production-specific reviews are complete.
+
+## Abort and rollback principles
+
+- If the migration transaction fails, stop; inspect the ledger and actual schema before any retry. Never mark a failed migration applied, reset, or alter historical migration files merely to clear an error.
+- If a runtime cutover fails, stop affected traffic and restore the previous application configuration only as a temporary recovery measure **with explicit acknowledgement that reverting to the owner role defeats the privilege boundary**. Drain all pools, verify the identity actually in use, alert the operator and restrict exposure until a reviewed fix is available. Never report the system as audit-protected while the owner is the runtime user.
+- The append-only migration is intentionally not automatically reversed. Dropping triggers/FKs or restoring an older database can permit tampering, lose newer payments/audits, or re-enable reference reuse. Any schema reversal or restore requires a separately reviewed incident-specific plan, data reconciliation, a fresh tested backup where possible, and explicit authorization. Preserve logs and communicate the protection gap.
+- Disable or revoke only the newly introduced credential/role after confirming no remaining sessions or dependencies, and only through a reviewed provider-compatible procedure. Do not remove provider-managed privileges or delete audit history as a rollback shortcut.

@@ -86,7 +86,9 @@ async function startApp(useTrustedHeader = true, schema?: string): Promise<strin
   apps.push(child);
   let output = "";
   child.stdout?.on("data", (chunk) => { output += chunk; });
-  child.stderr?.on("data", (chunk) => { output += chunk; });
+  // The server and its database contain fictional CI fixtures only. Expose
+  // errors so failed end-to-end workflows are diagnosable in CI logs.
+  child.stderr?.on("data", (chunk) => { output += chunk; console.error(String(chunk)); });
   for (let i = 0; i < 150; i++) {
     if (child.exitCode !== null) throw new Error(`Test server exited: ${output.slice(-1000)}`);
     try { if ((await fetch(`${base}/api/auth/csrf`)).ok) return base; } catch { /* startup */ }
