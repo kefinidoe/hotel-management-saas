@@ -4,7 +4,8 @@
 param(
     [Parameter(Mandatory=$true)][string]$Archive,
     [Parameter(Mandatory=$true)][string]$ExpectedSha256,
-    [string]$PgBin = "C:\Program Files\PostgreSQL\17\bin"
+    [string]$PgBin = "C:\Program Files\PostgreSQL\17\bin",
+    [switch]$AllowKnownCrlf
 )
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
@@ -76,7 +77,9 @@ SELECT count(*)::text || ':' || md5(COALESCE(string_agg(row_to_json(t)::text, ''
     $rows = & $psql -X -v ON_ERROR_STOP=1 -At -d $target -f $ledgerFile
     if ($LASTEXITCODE -ne 0) { throw "Could not read the restored migration ledger." }
     [IO.File]::WriteAllText($ledgerJson, ($rows -join "`n"), [Text.UTF8Encoding]::new($false))
-    node scripts/audit-rehearsal-ledger.mjs prisma/migration-release-manifest.json $ledgerJson
+    $ledgerArgs = @("scripts/audit-rehearsal-ledger.mjs", "prisma/migration-release-manifest.json", $ledgerJson)
+    if ($AllowKnownCrlf) { $ledgerArgs += "--allow-known-crlf" }
+    node @ledgerArgs
     if ($LASTEXITCODE -ne 0) { throw "Restored ledger preflight failed." }
     $before = & $psql -X -v ON_ERROR_STOP=1 -At -d $target -f $fingerprintFile
     if ($LASTEXITCODE -ne 0 -or $before -notmatch '^\d+:[0-9a-f]{32}$') { throw "Could not fingerprint restored audit rows." }
