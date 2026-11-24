@@ -113,6 +113,13 @@ jobs:
           INSERT INTO "Subscription" (id, "hotelId", "planId", status, "currentPeriodEndsAt", "updatedAt") VALUES ('ci-disposable-subscription-a', 'ci-disposable-hotel-a', 'GROWTH', 'ACTIVE', CURRENT_TIMESTAMP + INTERVAL '30 days', CURRENT_TIMESTAMP);
           SQL
           printf '%s\n' '{"hotels":{"a":{"id":"ci-disposable-hotel-a"}}}' > "$CI_DISPOSABLE_ROOT/fixtures.json"
+      - name: Verify audit protection on marked disposable PostgreSQL
+        working-directory: ${{ env.CI_DISPOSABLE_ROOT }}/source
+        run: |
+          set -euo pipefail
+          test "$(cat "$CI_DISPOSABLE_ROOT/DISPOSABLE")" = DISPOSABLE_HOTEL_SAAS_ONLY
+          test "$(psql -h "$CI_DISPOSABLE_ROOT" -p 55434 -U postgres -d hotel_saas_disposable_audit -Atc 'SHOW data_directory')" = "$CI_DISPOSABLE_ROOT/pgdata"
+          psql -h "$CI_DISPOSABLE_ROOT" -p 55434 -U postgres -d hotel_saas_disposable_audit -v ON_ERROR_STOP=1 -f .github/scripts/ci-audit-protection.sql
       - name: TypeScript, lint, and production build
         working-directory: ${{ env.CI_DISPOSABLE_ROOT }}/source
         run: |
