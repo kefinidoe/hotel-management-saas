@@ -161,6 +161,51 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     if (db) await db.end();
   });
 
+  it("runs hotel booking, check-in, payment and audited pricing with the non-owner role", async () => {
+    const owner = await signIn(await newAccount("runtime-workflow-owner", true));
+    const base = bases[0];
+    const headers = { cookie: owner };
+    const expectJson = async (response: Response, status: number) => {
+      const body = await response.json();
+      expect(response.status, JSON.stringify(body)).toBe(status);
+      return body;
+    };
+    await expectJson(await fetch(base + "/api/subscription", { headers }), 200);
+    const rate = await expectJson(await post(base, "/api/room-types", {
+      name: `CI room ${instanceTag}`, baseRate: 1500, capacity: 2, mealPlan: "BED_ONLY",
+    }, headers), 201);
+    const room = await expectJson(await post(base, "/api/rooms", {
+      number: `CI-${instanceTag.slice(0, 8)}`, roomTypeId: rate.id,
+    }, headers), 201);
+    const mealResponse = await fetch(base + "/api/settings/meals", { method: "PUT", headers: { ...headers, origin: base, "content-type": "application/json" },
+      body: JSON.stringify({ mealPlan: "BED_BREAKFAST", adultSurcharge: 120, childSurcharge: 60, isActive: true }) });
+    await expectJson(mealResponse, 200);
+    const audit = await db.query('SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action=$2', [fixtures.hotels.a.id, "MEAL_PRICING_UPDATED"]);
+    expect(audit.rows[0].count).toBeGreaterThan(0);
+
+    const start = new Date(Date.now() + 10 * 86400000);
+    const end = new Date(start.getTime() + 2 * 86400000);
+    const stay = await expectJson(await post(base, "/api/reservations", {
+      guestName: "Fictional CI Guest", checkInDate: start.toISOString(), checkOutDate: end.toISOString(),
+      roomId: room.id, tariffId: rate.id, occupancy: "SINGLE", mealPlan: "BED_ONLY", adults: 1, children: 0,
+    }, headers), 201);
+    expect(stay.id).toBeTruthy();
+    const checkedIn = await expectJson(await post(base, `/api/reservations/${stay.id}/check-in`, {}, headers), 201);
+    expect(checkedIn.folioId).toBeTruthy();
+    const methodId = randomUUID();
+    await db.query('INSERT INTO "PaymentMethod" (id, "hotelId", name, "isActive") VALUES ($1,$2,$3,true)', [methodId, fixtures.hotels.a.id, `CI-${instanceTag}`]);
+    const request = { folioId: checkedIn.folioId, paymentMethodId: methodId, amount: 100, reference: "CI-ONLY", idempotencyKey: `ci-payment-${instanceTag}` };
+    const payment = await expectJson(await post(base, "/api/payments", request, headers), 201);
+    const replay = await post(base, "/api/payments", request, headers);
+    expect([200, 201]).toContain(replay.status);
+    expect((await replay.json()).id).toBe(payment.id);
+    const paymentCount = await db.query('SELECT count(*)::int AS count FROM "Payment" WHERE "hotelId"=$1 AND "idempotencyKey"=$2', [fixtures.hotels.a.id, request.idempotencyKey]);
+    expect(paymentCount.rows[0].count).toBe(1);
+    await expectJson(await fetch(base + "/api/guests", { headers }), 200);
+    await expectJson(await fetch(base + "/api/inventory", { headers }), 200);
+    await expectJson(await fetch(base + "/api/reservations", { headers }), 200);
+  }, 60_000);
+
   it("limits normalized login accounts atomically across two server instances with unknown IP", async () => {
     const email = `race-${instanceTag}@example.invalid`;
     const responses = await Promise.all(Array.from({ length: 20 }, (_, i) => post(bases[i % 2], "/api/auth/callback/credentials", { email: i % 2 ? `  ${email.toUpperCase()}  ` : email, password: fakePassword }, { "x-forwarded-for": `203.0.113.${i + 1}` })));
