@@ -16,7 +16,7 @@ type Account = { email: string; password: string };
 type TestDb = {
   connect(): Promise<void>;
   end(): Promise<void>;
-  query(sql: string, values?: unknown[]): Promise<{ rows: Array<{ data_directory: string; count: number; attempts: number; tasks: number; occupied: number }> }>;
+  query(sql: string, values?: unknown[]): Promise<{ rows: Array<{ data_directory: string; count: number; attempts: number; tasks: number; occupied: number; fingerprint: string }> }>;
 };
 const { Client } = require("pg") as { Client: new (options: { host: string; port: number; user: string; database: string }) => TestDb };
 let db: TestDb;
@@ -299,6 +299,26 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     await expectJson(await fetch(base + "/api/guests", { headers }), 200);
     await expectJson(await fetch(base + "/api/inventory", { headers }), 200);
     await expectJson(await fetch(base + "/api/reservations", { headers }), 200);
+
+    const settingsFingerprint = async () => (await db.query(`SELECT md5(
+      (SELECT row_to_json(h)::text FROM "Hotel" h WHERE id=$1) ||
+      COALESCE((SELECT row_to_json(s)::text FROM "Subscription" s WHERE "hotelId"=$1), '')
+    ) AS fingerprint`, [fixtures.hotels.a.id])).rows[0].fingerprint;
+    const beforeSettings = await settingsFingerprint();
+    const updateSettings = () => fetch(base + "/api/hotel/settings", {
+      method: "PATCH", headers: { ...headers, origin: base, "content-type": "application/json" },
+      body: JSON.stringify({ name: `Fictional CI Hotel ${instanceTag}`, currency: "USD" }),
+    });
+    await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
+    try {
+      expect((await updateSettings()).status).toBe(500);
+    } finally {
+      await db.query('GRANT INSERT ON "AuditLog" TO hotel_saas_runtime');
+    }
+    expect(await settingsFingerprint()).toBe(beforeSettings);
+    await expectJson(await updateSettings(), 200);
+    const settingsAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='HOTEL_SETTINGS_UPDATED'`, [fixtures.hotels.a.id]);
+    expect(settingsAudit.rows[0].count).toBe(1);
   }, 60_000);
 
   it("limits normalized login accounts atomically across two server instances with unknown IP", async () => {

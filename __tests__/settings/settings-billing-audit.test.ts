@@ -121,7 +121,19 @@ function buildPrisma() {
       },
     },
   };
-  client.$transaction = async (fn: any) => fn(client);
+  client.$transaction = async (fn: any) => {
+    const previousHotels = structuredClone(hotels);
+    const previousSubscriptions = structuredClone(subscriptions);
+    const previousAudits = structuredClone(auditRows);
+    try {
+      return await fn(client);
+    } catch (error) {
+      hotels = previousHotels;
+      subscriptions = previousSubscriptions;
+      auditRows = previousAudits;
+      throw error;
+    }
+  };
   return client;
 }
 
@@ -262,18 +274,18 @@ describe("PATCH /api/hotel/settings — billing consistency", () => {
     const res = await patch({ currency: "USD" });
     spy.mockRestore();
     expect(res.status).toBe(500);
-    // The hotel update happened inside the transaction that then threw, so the
-    // caller sees a failure; the mock's Map is not transactional, so we assert on
-    // the response only and note the real client rolls back.
+    expect(hotels.get("hotel-alpha")!.currency).toBe("KES");
     expect((await res.json()).error).toMatch(/could not save/i);
   });
 
-  it("still succeeds when the audit write fails, and logs it", async () => {
+  it("rolls back the hotel and subscription changes when the audit write fails", async () => {
     auditWritesFail = true;
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const res = await patch({ currency: "USD" });
-    expect(res.status).toBe(200);
-    expect(subscriptions.get("hotel-alpha")!.currency).toBe("USD");
+    const res = await patch({ currency: "USD", name: "Alpha Grand" });
+    expect(res.status).toBe(500);
+    expect(hotels.get("hotel-alpha")).toMatchObject({ currency: "KES", name: "Alpha Resort" });
+    expect(subscriptions.get("hotel-alpha")).toMatchObject({ currency: "KES", amount: 3000 });
+    expect(auditRows).toHaveLength(0);
     expect(spy).toHaveBeenCalled();
     spy.mockRestore();
   });
