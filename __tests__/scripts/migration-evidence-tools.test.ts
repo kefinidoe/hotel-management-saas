@@ -347,7 +347,8 @@ describe("scripts/restore-rehearsal.mjs — dependent comments survive filtering
         expect(report.restore.ok).toBe(true);
         expect(report.restore.problems).toEqual([]);
         expect(report.restore.filter.byReason).toMatchObject({ "schema comment": 1 });
-        expect(report.inspection.tables).toEqual(["Guest", "Hotel", "_prisma_migrations"]);
+        expect(report.inspection.tables).toHaveLength(3);
+        expect(report.inspection.tables).toEqual(expect.arrayContaining(["Guest", "Hotel", "_prisma_migrations"]));
         expect(report.inspection.rowCounts).toEqual({ Hotel: 1, Guest: 1, _prisma_migrations: 1 });
         expect(report.inspection.missingTables).toEqual([]);
         expect(report.inspection.extraTables).toEqual([]);
