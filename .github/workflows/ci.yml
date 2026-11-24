@@ -134,7 +134,12 @@ jobs:
           export SAAS_ENVIRONMENT=saas SAAS_DATABASE_IDENTIFIER=hotel_saas_disposable_audit
           export DIRECT_URL='postgresql://postgres@127.0.0.1:55434/hotel_saas_disposable_audit'
           export DATABASE_URL='postgresql://ci_audit_login@127.0.0.1:55434/hotel_saas_disposable_audit'
-          node scripts/audit-runtime-role-check.mjs --connect
+          if ! node scripts/audit-runtime-role-check.mjs --connect > "$RUNNER_TEMP/audit-role-check.log" 2>&1; then
+            cat "$RUNNER_TEMP/audit-role-check.log"
+            while IFS= read -r line; do echo "::error::$line"; done < "$RUNNER_TEMP/audit-role-check.log"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/audit-role-check.log"
           export DATABASE_URL="$DIRECT_URL"
           if node scripts/audit-runtime-role-check.mjs --connect; then
             echo '::error::Audit runtime checker unexpectedly accepted the table owner'

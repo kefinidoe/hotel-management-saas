@@ -77,5 +77,9 @@ async function main() {
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  main().catch(() => { console.error("Audit role inspection failed. Check the approved target, database availability and privileges; no connection details are printed."); process.exitCode = 1; });
+  main().catch((error) => {
+    const code = typeof error?.code === "string" && /^[A-Z0-9_]{1,32}$/.test(error.code) ? ` (${error.code})` : "";
+    console.error(`Audit role inspection failed${code}. Check the approved target, database availability and privileges; no connection details are printed.`);
+    process.exitCode = 1;
+  });
 }
