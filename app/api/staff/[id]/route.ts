@@ -8,6 +8,10 @@ import { HotelRole, MembershipStatus } from "@prisma/client";
 
 export const dynamic = "force-dynamic";
 
+class StaffMutationError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
 // Find membership by ID or userId strictly within tenant.hotelId
 async function findHotelMembership(hotelId: string, idOrUserId: string) {
   return await prisma.hotelMembership.findFirst({
@@ -65,7 +69,7 @@ export async function PATCH(
     if (validation.response) return validation.response;
     const invited = await prisma.$transaction(async (tx) => {
       const updated = await tx.hotelMembership.updateMany({
-        where: { id: targetMembership.id, hotelId: tenant.hotelId, userId: targetMembership.userId, status: MembershipStatus.SUSPENDED, user: { isActive: true } },
+        where: { id: targetMembership.id, hotelId: tenant.hotelId, userId: targetMembership.userId, role: targetMembership.role, status: MembershipStatus.SUSPENDED, user: { isActive: true } },
         data: { status: MembershipStatus.SUSPENDED },
       });
       if (updated.count !== 1) return false;
@@ -172,11 +176,19 @@ export async function PATCH(
       : undefined;
 
   const updateStaff = async (tx: any) => {
-    if (effectiveStatus === MembershipStatus.ACTIVE) {
-      const current = await tx.hotelMembership.findFirst({ where: { id: targetMembership.id, hotelId: tenant.hotelId } });
-      if (!current || current.status !== MembershipStatus.ACTIVE) throw new Error("PENDING_INVITATION");
+    const current = await tx.hotelMembership.findFirst({ where: { id: targetMembership.id, hotelId: tenant.hotelId } });
+    if (!current || current.userId !== targetMembership.userId || current.role !== targetMembership.role || current.status !== targetMembership.status) {
+      throw new StaffMutationError("Membership changed. Refresh and try again.", 409);
     }
-    return tx.hotelMembership.update({
+    if (effectiveStatus === MembershipStatus.ACTIVE && current.status !== MembershipStatus.ACTIVE) throw new Error("PENDING_INVITATION");
+    if (current.role === HotelRole.HOTEL_OWNER && current.status === MembershipStatus.ACTIVE &&
+        ((requestedRole !== undefined && requestedRole !== HotelRole.HOTEL_OWNER) || effectiveStatus === MembershipStatus.SUSPENDED)) {
+      const remainingOwners = await tx.hotelMembership.count({ where: {
+        hotelId: tenant.hotelId, role: HotelRole.HOTEL_OWNER, status: MembershipStatus.ACTIVE, id: { not: current.id },
+      } });
+      if (remainingOwners === 0) throw new StaffMutationError("Cannot remove the only active hotel owner.", 400);
+    }
+    const updated = await tx.hotelMembership.update({
       where: { id: targetMembership.id },
       data: {
         role: requestedRole ?? undefined,
@@ -185,6 +197,13 @@ export async function PATCH(
       },
       include: { user: { select: { id: true, name: true, email: true } } },
     });
+    await recordAudit({
+      hotelId: tenant.hotelId, userId: tenant.userId, action: "STAFF_MEMBERSHIP_UPDATED",
+      entity: "HOTEL_MEMBERSHIP", entityId: updated.id,
+      metadata: { targetUserId: updated.user.id, previousRole: current.role, role: updated.role,
+        previousStatus: current.status, status: updated.status, department: updated.department },
+    }, tx, { strict: true });
+    return updated;
   };
 
   let updatedMembership: any;
@@ -200,6 +219,7 @@ export async function PATCH(
       }
       updatedMembership = quotaResult.value;
     } catch (error: any) {
+      if (error instanceof StaffMutationError) return NextResponse.json({ error: error.message }, { status: error.status });
       if (error?.message === "PENDING_INVITATION") return NextResponse.json({ error: "Suspended memberships require an invitation accepted by the account holder." }, { status: 403 });
       if (error?.code === "SUBSCRIPTION_STATUS_UNAVAILABLE" || error?.code === "USAGE_LIMIT_UNAVAILABLE") {
         return NextResponse.json({ error: error.code, message: error.message }, { status: 503 });
@@ -210,26 +230,11 @@ export async function PATCH(
     try {
       updatedMembership = await prisma.$transaction((tx) => updateStaff(tx), { isolationLevel: "Serializable" });
     } catch (error: any) {
+      if (error instanceof StaffMutationError) return NextResponse.json({ error: error.message }, { status: error.status });
       if (error?.message === "PENDING_INVITATION") return NextResponse.json({ error: "Suspended memberships require an invitation accepted by the account holder." }, { status: 403 });
       throw error;
     }
   }
-
-  await recordAudit({
-    hotelId: tenant.hotelId,
-    userId: tenant.userId,
-    action: "STAFF_MEMBERSHIP_UPDATED",
-    entity: "HOTEL_MEMBERSHIP",
-    entityId: updatedMembership.id,
-    metadata: {
-      targetUserId: updatedMembership.user.id,
-      previousRole: targetMembership.role,
-      role: updatedMembership.role,
-      previousStatus: targetMembership.status,
-      status: updatedMembership.status,
-      department: updatedMembership.department,
-    },
-  });
 
   return NextResponse.json({
     id: updatedMembership.id,
@@ -310,7 +315,7 @@ export async function DELETE(
     const revoked = await prisma.$transaction(async (tx) => {
       if (!(await isPendingInvitationFor(targetMembership.id, targetMembership.userId, tx, false))) return false;
       const updated = await tx.hotelMembership.updateMany({
-        where: { id: targetMembership.id, hotelId: tenant.hotelId, userId: targetMembership.userId, status: MembershipStatus.SUSPENDED },
+        where: { id: targetMembership.id, hotelId: tenant.hotelId, userId: targetMembership.userId, role: targetMembership.role, status: MembershipStatus.SUSPENDED },
         data: { status: MembershipStatus.SUSPENDED },
       });
       if (updated.count !== 1) return false;
@@ -322,79 +327,52 @@ export async function DELETE(
     return NextResponse.json({ ok: true, mode: "suspended", name: targetMembership.user.name, message: "Invitation revoked." });
   }
 
-  // Check historical records in this hotel
-  const [
-    reservationsCount,
-    paymentsCount,
-    housekeepingCount,
-    maintenanceCount,
-  ] = await Promise.all([
-    prisma.reservation.count({
-      where: { hotelId: tenant.hotelId, createdById: targetMembership.userId },
-    }),
-    prisma.payment.count({
-      where: { hotelId: tenant.hotelId, cashierId: targetMembership.userId },
-    }),
-    prisma.housekeepingTask.count({
-      where: { hotelId: tenant.hotelId, assigneeId: targetMembership.userId },
-    }),
-    prisma.maintenanceTicket.count({
-      where: { hotelId: tenant.hotelId, assigneeId: targetMembership.userId },
-    }),
-  ]);
+  // Recheck the target, owner invariant and history inside the same serializable
+  // transaction as the mutation and its audit. A concurrent change must not
+  // turn an earlier authorization or history decision into a stale write.
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      const current = await tx.hotelMembership.findFirst({ where: { id: targetMembership.id, hotelId: tenant.hotelId } });
+      if (!current || current.userId !== targetMembership.userId || current.role !== targetMembership.role || current.status !== targetMembership.status) {
+        throw new StaffMutationError("Membership changed. Refresh and try again.", 409);
+      }
+      if (current.role === HotelRole.HOTEL_OWNER && current.status === MembershipStatus.ACTIVE) {
+        const remaining = await tx.hotelMembership.count({ where: {
+          hotelId: tenant.hotelId, role: HotelRole.HOTEL_OWNER, status: MembershipStatus.ACTIVE, id: { not: current.id },
+        } });
+        if (!remaining) throw new StaffMutationError("Cannot remove the only remaining hotel owner.", 400);
+      }
+      const [reservations, payments, housekeeping, maintenance] = await Promise.all([
+        tx.reservation.count({ where: { hotelId: tenant.hotelId, createdById: current.userId } }),
+        tx.payment.count({ where: { hotelId: tenant.hotelId, cashierId: current.userId } }),
+        tx.housekeepingTask.count({ where: { hotelId: tenant.hotelId, assigneeId: current.userId } }),
+        tx.maintenanceTicket.count({ where: { hotelId: tenant.hotelId, assigneeId: current.userId } }),
+      ]);
+      const hasHistory = reservations + payments + housekeeping + maintenance > 0;
+      if (hasHistory) {
+        await tx.hotelMembership.update({ where: { id: current.id }, data: { status: MembershipStatus.SUSPENDED } });
+      } else {
+        await tx.hotelMembership.delete({ where: { id: current.id } });
+      }
+      await recordAudit({
+        hotelId: tenant.hotelId, userId: tenant.userId,
+        action: hasHistory ? "STAFF_MEMBERSHIP_SUSPENDED" : "STAFF_MEMBERSHIP_REMOVED",
+        entity: "HOTEL_MEMBERSHIP", entityId: current.id,
+        metadata: { targetUserId: current.userId, role: current.role,
+          ...(hasHistory ? { reason: "Existing activity in this hotel" } : {}) },
+      }, tx, { strict: true });
+      return hasHistory;
+    }, { isolationLevel: "Serializable" });
 
-  const hasHistoryInHotel =
-    reservationsCount + paymentsCount + housekeepingCount + maintenanceCount > 0;
-
-  if (hasHistoryInHotel) {
-    // Suspend membership to preserve referential integrity of financial/audit records
-    await prisma.hotelMembership.update({
-      where: { id: targetMembership.id },
-      data: { status: MembershipStatus.SUSPENDED },
-    });
-
-    await recordAudit({
-      hotelId: tenant.hotelId,
-      userId: tenant.userId,
-      action: "STAFF_MEMBERSHIP_SUSPENDED",
-      entity: "HOTEL_MEMBERSHIP",
-      entityId: targetMembership.id,
-      metadata: {
-        targetUserId: targetMembership.userId,
-        role: targetMembership.role,
-        reason: "Existing activity in this hotel",
-      },
-    });
-
-    return NextResponse.json({
-      ok: true,
-      mode: "suspended",
-      name: targetMembership.user.name,
+    return NextResponse.json(result ? {
+      ok: true, mode: "suspended", name: targetMembership.user.name,
       message: `${targetMembership.user.name} has existing activity on record in this hotel. Membership was suspended instead of deleted to protect historical logs.`,
+    } : {
+      ok: true, mode: "deleted", name: targetMembership.user.name,
+      message: `${targetMembership.user.name} was removed from this hotel workspace.`,
     });
+  } catch (error) {
+    if (error instanceof StaffMutationError) return NextResponse.json({ error: error.message }, { status: error.status });
+    throw error;
   }
-
-  // Clean delete if no transaction history exists in this hotel
-  await prisma.hotelMembership.delete({
-    where: { id: targetMembership.id },
-  });
-
-  await recordAudit({
-    hotelId: tenant.hotelId,
-    userId: tenant.userId,
-    action: "STAFF_MEMBERSHIP_REMOVED",
-    entity: "HOTEL_MEMBERSHIP",
-    entityId: targetMembership.id,
-    metadata: {
-      targetUserId: targetMembership.userId,
-      role: targetMembership.role,
-    },
-  });
-
-  return NextResponse.json({
-    ok: true,
-    mode: "deleted",
-    name: targetMembership.user.name,
-    message: `${targetMembership.user.name} was removed from this hotel workspace.`,
-  });
 }

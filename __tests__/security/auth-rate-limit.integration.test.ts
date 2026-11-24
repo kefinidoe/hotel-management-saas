@@ -372,8 +372,29 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     const staff = await expectJson(await post(base, "/api/staff", staffBody, headers), 201);
     const staffAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='STAFF_MEMBER_ADDED' AND "entityId"=$2`, [fixtures.hotels.a.id, staff.id]);
     expect(staffAudit.rows[0].count).toBe(1);
-    // Avoid consuming a seat needed by unrelated limiter tests in this fixture.
-    await db.query('DELETE FROM "HotelMembership" WHERE id=$1 AND "hotelId"=$2', [staff.id, fixtures.hotels.a.id]);
+    const staffUrl = `/api/staff/${staff.id}`;
+    await rejectAudit(() => pricingRequest("PATCH", staffUrl, { department: "Fictional Finance" }));
+    const originalStaff = await db.query('SELECT count(*)::int AS count FROM "HotelMembership" WHERE id=$1 AND department IS NULL', [staff.id]);
+    expect(originalStaff.rows[0].count).toBe(1);
+    await expectJson(await pricingRequest("PATCH", staffUrl, { department: "Fictional Finance" }), 200);
+    const staffUpdateAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='STAFF_MEMBERSHIP_UPDATED' AND "entityId"=$2`, [fixtures.hotels.a.id, staff.id]);
+    expect(staffUpdateAudit.rows[0].count).toBe(1);
+    // Existing activity requires suspension rather than deletion, and both
+    // branches must roll back if the audit insert is unavailable.
+    await db.query('UPDATE "HousekeepingTask" SET "assigneeId"=$1 WHERE "roomId"=$2 AND "hotelId"=$3', [staff.userId, room.id, fixtures.hotels.a.id]);
+    await rejectAudit(() => pricingRequest("DELETE", staffUrl));
+    const activeStaff = await db.query(`SELECT count(*)::int AS count FROM "HotelMembership" WHERE id=$1 AND status='ACTIVE'`, [staff.id]);
+    expect(activeStaff.rows[0].count).toBe(1);
+    expect((await expectJson(await pricingRequest("DELETE", staffUrl), 200)).mode).toBe("suspended");
+    const suspensionAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE action='STAFF_MEMBERSHIP_SUSPENDED' AND "hotelId"=$1 AND "entityId"=$2`, [fixtures.hotels.a.id, staff.id]);
+    expect(suspensionAudit.rows[0].count).toBe(1);
+    await db.query('UPDATE "HousekeepingTask" SET "assigneeId"=NULL WHERE "assigneeId"=$1 AND "hotelId"=$2', [staff.userId, fixtures.hotels.a.id]);
+    await rejectAudit(() => pricingRequest("DELETE", staffUrl));
+    const retainedStaff = await db.query('SELECT count(*)::int AS count FROM "HotelMembership" WHERE id=$1', [staff.id]);
+    expect(retainedStaff.rows[0].count).toBe(1);
+    expect((await expectJson(await pricingRequest("DELETE", staffUrl), 200)).mode).toBe("deleted");
+    const removalAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE action='STAFF_MEMBERSHIP_REMOVED' AND "hotelId"=$1 AND "entityId"=$2`, [fixtures.hotels.a.id, staff.id]);
+    expect(removalAudit.rows[0].count).toBe(1);
 
     const settingsFingerprint = async () => (await db.query(`SELECT md5(
       (SELECT row_to_json(h)::text FROM "Hotel" h WHERE id=$1) ||
