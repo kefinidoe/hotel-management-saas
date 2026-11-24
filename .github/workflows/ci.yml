@@ -226,6 +226,7 @@ jobs:
           Set-Content -LiteralPath $fake -Value 'fictional archive' -NoNewline
           & pwsh -NoProfile -File scripts/audit-restored-prisma-rehearsal.ps1 -Archive $fake -ExpectedSha256 ('0' * 64)
           if ($LASTEXITCODE -eq 0) { throw 'Rehearsal unexpectedly accepted a mismatched archive digest.' }
+          exit 0
       - name: TypeScript, lint, and production build
         run: |
           npx tsc --noEmit
