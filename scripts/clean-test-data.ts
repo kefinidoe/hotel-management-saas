@@ -67,7 +67,7 @@ async function main() {
     const deletedStockMovements = await tx.stockMovement.deleteMany({ where: { hotelId } });
     const deletedExpenses = await tx.expense.deleteMany({ where: { hotelId } });
     const deletedNotifications = await tx.notification.deleteMany({ where: { hotelId } });
-    const deletedAuditLogs = await tx.auditLog.deleteMany({ where: { hotelId } });
+    // Audit history remains append-only, even in disposable test databases.
     const deletedGuests = await tx.guest.deleteMany({ where: { hotelId } });
     const updatedRooms = await tx.room.updateMany({
       where: { hotelId },
@@ -89,7 +89,7 @@ async function main() {
     console.log(`Deleted ${deletedStockMovements.count} stock movements`);
     console.log(`Deleted ${deletedExpenses.count} expenses`);
     console.log(`Deleted ${deletedNotifications.count} notifications`);
-    console.log(`Deleted ${deletedAuditLogs.count} audit logs`);
+    console.log("Preserved audit logs");
     console.log(`Deleted ${deletedGuests.count} guest profiles`);
     console.log(`Reset ${updatedRooms.count} rooms to AVAILABLE`);
   });

@@ -126,6 +126,10 @@
     {
       "name": "20261114120000_repair_pricing_check_constraints",
       "sha256": "45cb6263881b2be2841df81e64735a97642fd9418e2c8296bb93fff472a52c91"
+    },
+    {
+      "name": "20261115120000_append_only_audit_log",
+      "sha256": "ab52d7bbf7cad416cd2e9d66406b9a4fe5d431b8c0092b98223e29edab9549f7"
     }
   ]
 }

@@ -874,9 +874,9 @@ model Notification {
 model AuditLog {
   id        String   @id @default(uuid())
   hotelId   String? // null = platform-level event; set = hotel-scoped event
-  hotel     Hotel?   @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  hotel     Hotel?   @relation(fields: [hotelId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   userId    String? // null = system action
-  user      User?    @relation(fields: [userId], references: [id])
+  user      User?    @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   action    String
   entity    String
   entityId  String?

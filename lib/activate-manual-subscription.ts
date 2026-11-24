@@ -54,9 +54,9 @@ export async function activateManualSubscription(
         metadata: { ...data, payments: [...(Array.isArray(data.payments) ? data.payments : []), entry] } as Prisma.InputJsonObject,
       },
     });
-    // AuditLog has no append-only trigger today. A database trigger and restricted
-    // database privileges are required for strict immutability; application-level
-    // creation here is atomic but does not by itself make the record immutable.
+    // The audit insert is atomic with activation. Database trigger protection
+    // requires its migration to be deployed; a separate restricted runtime role
+    // and independent audit storage are still needed against privileged changes.
     await tx.auditLog.create({ data: { hotelId, userId: admin.userId, action: "PLATFORM_MANUAL_PAYMENT_ACTIVATED", entity: "Subscription", entityId: updated.id, metadata: entry } });
     return updated;
   });
