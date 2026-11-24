@@ -50,7 +50,9 @@ export async function PUT(req: Request) {
   try {
     const saved = await prisma.$transaction(async (tx) => {
       const lockKey = `hotel-${tenant.hotelId}-reservation-create`;
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
+      // PostgreSQL advisory locks return void; cast so Prisma can decode the
+      // result while retaining the same transaction-scoped lock.
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))::text AS locked`;
       const row = await tx.hotelMealPricing.upsert({
         where: { hotelId_mealPlan: { hotelId: tenant.hotelId, mealPlan } },
         create: { hotelId: tenant.hotelId, mealPlan, adultSurcharge, childSurcharge, isActive },
