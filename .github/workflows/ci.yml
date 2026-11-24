@@ -119,7 +119,13 @@ jobs:
           set -euo pipefail
           test "$(cat "$CI_DISPOSABLE_ROOT/DISPOSABLE")" = DISPOSABLE_HOTEL_SAAS_ONLY
           test "$(psql -h "$CI_DISPOSABLE_ROOT" -p 55434 -U postgres -d hotel_saas_disposable_audit -Atc 'SHOW data_directory')" = "$CI_DISPOSABLE_ROOT/pgdata"
-          psql -h "$CI_DISPOSABLE_ROOT" -p 55434 -U postgres -d hotel_saas_disposable_audit -v ON_ERROR_STOP=1 -f .github/scripts/ci-audit-protection.sql
+          if ! psql -h "$CI_DISPOSABLE_ROOT" -p 55434 -U postgres -d hotel_saas_disposable_audit -v ON_ERROR_STOP=1 -f .github/scripts/ci-audit-protection.sql > "$RUNNER_TEMP/audit-ci.log" 2>&1; then
+            cat "$RUNNER_TEMP/audit-ci.log"
+            detail=$(grep -m1 'ERROR:' "$RUNNER_TEMP/audit-ci.log" || echo 'Audit SQL verification failed without a PostgreSQL error')
+            echo "::error::$detail"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/audit-ci.log"
       - name: TypeScript, lint, and production build
         working-directory: ${{ env.CI_DISPOSABLE_ROOT }}/source
         run: |
