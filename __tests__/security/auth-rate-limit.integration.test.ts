@@ -212,6 +212,13 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     }, headers), 201);
     expect(stay.id).toBeTruthy();
 
+    // This legacy-rate booking has no frozen snapshot by default. Seed a
+    // fictional agreement so this exercises the priced-reservation branch.
+    await db.query(`INSERT INTO "ReservationPriceSnapshot"
+      (id, "hotelId", "reservationId", version, "pricingModel", currency, "nightlyRate", nights, "roomTotal", "grandTotal", breakdown, "createdById")
+      VALUES ($1,$2,$3,1,'LEGACY_BASE_RATE','KES',1500,2,3000,3000,$4::jsonb,$5)`,
+      [randomUUID(), fixtures.hotels.a.id, stay.id, JSON.stringify({ lines: [] }), "fictional-ci-user"]);
+
     // A schedule change to a priced reservation must not commit without its
     // rate-review audit. Permission changes here affect only the disposable CI cluster.
     const scheduleUrl = `/api/reservations/${stay.id}`;
