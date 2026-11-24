@@ -211,6 +211,29 @@ suite("real Postgres HTTP authentication rate limiting", () => {
       roomId: room.id, tariffId: rate.id, occupancy: "SINGLE", mealPlan: "BED_ONLY", adults: 1, children: 0,
     }, headers), 201);
     expect(stay.id).toBeTruthy();
+
+    // A schedule change to a priced reservation must not commit without its
+    // rate-review audit. Permission changes here affect only the disposable CI cluster.
+    const scheduleUrl = `/api/reservations/${stay.id}`;
+    const shiftedStart = new Date(start.getTime() + 86400000);
+    const shiftedEnd = new Date(end.getTime() + 86400000);
+    const changeSchedule = () => fetch(base + scheduleUrl, {
+      method: "PUT", headers: { ...headers, origin: base, "content-type": "application/json" },
+      body: JSON.stringify({ checkInDate: shiftedStart.toISOString(), checkOutDate: shiftedEnd.toISOString() }),
+    });
+    await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
+    try {
+      expect((await changeSchedule()).status).toBe(500);
+    } finally {
+      await db.query('GRANT INSERT ON "AuditLog" TO hotel_saas_runtime');
+    }
+    const originalSchedule = await db.query(`SELECT count(*)::int AS count FROM "Reservation" WHERE id=$1 AND "hotelId"=$2 AND "checkInDate"=$3 AND "checkOutDate"=$4`, [stay.id, fixtures.hotels.a.id, start.toISOString(), end.toISOString()]);
+    expect(originalSchedule.rows[0].count).toBe(1);
+    const moved = await expectJson(await changeSchedule(), 200);
+    expect(moved.pricingNeedsReview).toBe(true);
+    const reviewAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='RESERVATION_RATE_REVIEW_REQUIRED' AND "entityId"=$2`, [fixtures.hotels.a.id, stay.id]);
+    expect(reviewAudit.rows[0].count).toBe(1);
+
     const checkedIn = await expectJson(await post(base, `/api/reservations/${stay.id}/check-in`, {}, headers), 201);
     expect(checkedIn.folioId).toBeTruthy();
     const methodId = randomUUID();
