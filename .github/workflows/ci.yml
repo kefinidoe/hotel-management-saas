@@ -113,6 +113,39 @@ jobs:
           INSERT INTO "Subscription" (id, "hotelId", "planId", status, "currentPeriodEndsAt", "updatedAt") VALUES ('ci-disposable-subscription-a', 'ci-disposable-hotel-a', 'GROWTH', 'ACTIVE', CURRENT_TIMESTAMP + INTERVAL '30 days', CURRENT_TIMESTAMP);
           SQL
           printf '%s\n' '{"hotels":{"a":{"id":"ci-disposable-hotel-a"}}}' > "$CI_DISPOSABLE_ROOT/fixtures.json"
+      - name: Verify audit protection on marked disposable PostgreSQL
+        working-directory: ${{ env.CI_DISPOSABLE_ROOT }}/source
+        run: |
+          set -euo pipefail
+          test "$(cat "$CI_DISPOSABLE_ROOT/DISPOSABLE")" = DISPOSABLE_HOTEL_SAAS_ONLY
+          test "$(psql -h "$CI_DISPOSABLE_ROOT" -p 55434 -U postgres -d hotel_saas_disposable_audit -Atc 'SHOW data_directory')" = "$CI_DISPOSABLE_ROOT/pgdata"
+          if ! psql -h "$CI_DISPOSABLE_ROOT" -p 55434 -U postgres -d hotel_saas_disposable_audit -v ON_ERROR_STOP=1 -f .github/scripts/ci-audit-protection.sql > "$RUNNER_TEMP/audit-ci.log" 2>&1; then
+            cat "$RUNNER_TEMP/audit-ci.log"
+            detail=$(grep -m1 'ERROR:' "$RUNNER_TEMP/audit-ci.log" || echo 'Audit SQL verification failed without a PostgreSQL error')
+            echo "::error::$detail"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/audit-ci.log"
+          # Proposal runs only on this newly created, positively identified CI cluster.
+          psql -h "$CI_DISPOSABLE_ROOT" -p 55434 -U postgres -d hotel_saas_disposable_audit -v ON_ERROR_STOP=1 -f proposals/runtime-role.sql
+          # Trust auth and this login flag exist only in the ephemeral CI cluster.
+          psql -h "$CI_DISPOSABLE_ROOT" -p 55434 -U postgres -d hotel_saas_disposable_audit -v ON_ERROR_STOP=1 -c 'ALTER ROLE hotel_saas_runtime LOGIN'
+          export SAAS_ENVIRONMENT=saas SAAS_DATABASE_IDENTIFIER=hotel_saas_disposable_audit
+          export DIRECT_URL='postgresql://postgres@127.0.0.1:55434/hotel_saas_disposable_audit'
+          export DATABASE_URL='postgresql://hotel_saas_runtime@127.0.0.1:55434/hotel_saas_disposable_audit'
+          if ! node scripts/audit-runtime-role-check.mjs --connect > "$RUNNER_TEMP/audit-role-check.log" 2>&1; then
+            cat "$RUNNER_TEMP/audit-role-check.log"
+            while IFS= read -r line; do echo "::error::$line"; done < "$RUNNER_TEMP/audit-role-check.log"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/audit-role-check.log"
+          export DATABASE_URL="$DIRECT_URL"
+          if node scripts/audit-runtime-role-check.mjs --connect; then
+            echo '::error::Audit runtime checker unexpectedly accepted the table owner'
+            exit 1
+          fi
+          # The temporary role remains only in this disposable cluster so the
+          # real HTTP authentication suite can exercise the app without ownership.
       - name: TypeScript, lint, and production build
         working-directory: ${{ env.CI_DISPOSABLE_ROOT }}/source
         run: |
@@ -136,6 +169,9 @@ jobs:
           test_status=$?
           node .github/scripts/ci-vitest-summary.mjs "$RUNNER_TEMP/vitest-linux.json" linux
           summary_status=$?
+          if test "$test_status" -ne 0 && test -f "$RUNNER_TEMP/vitest-linux.json"; then
+            node -e 'const r=require(process.argv[1]); for(const s of r.testResults || []) for(const t of s.assertionResults || []) if(t.status === "failed") console.log("::error::" + (t.fullName + " - " + (t.failureMessages || []).join(" ")).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A"));' "$RUNNER_TEMP/vitest-linux.json"
+          fi
           test "$test_status" -eq 0 && test "$summary_status" -eq 0
       - name: Stop marked local PostgreSQL
         if: always() && env.CI_DISPOSABLE_ROOT != ''

@@ -24,6 +24,7 @@ let apps: ChildProcess[] = [];
 let bases: string[] = [];
 let fixtures: { accounts: Record<string, Account>; hotels: Record<string, { id: string; reservation: string }> };
 let instanceTag: string;
+let serverErrors = "";
 
 // Refuse to launch an HTTP app until the loopback database socket is owned by
 // the exact postmaster for the marked cluster. This check is Linux-specific and
@@ -67,7 +68,9 @@ async function freePort(): Promise<number> {
 async function startApp(useTrustedHeader = true, schema?: string): Promise<string> {
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
-  const dbUrl = "postgresql://postgres@127.0.0.1:55434/hotel_saas_disposable_audit" + (schema ? `?schema=${schema}` : "");
+  // A fixed, non-owner role is provisioned only in the marked CI cluster.
+  // Administrative setup remains on the separate verified socket connection.
+  const dbUrl = "postgresql://hotel_saas_runtime@127.0.0.1:55434/hotel_saas_disposable_audit" + (schema ? `?schema=${schema}` : "");
   const child = spawn(process.execPath, ["node_modules/next/dist/bin/next", "start", "-H", "127.0.0.1", "-p", String(port)], {
     cwd: process.cwd(),
     env: {
@@ -84,7 +87,9 @@ async function startApp(useTrustedHeader = true, schema?: string): Promise<strin
   apps.push(child);
   let output = "";
   child.stdout?.on("data", (chunk) => { output += chunk; });
-  child.stderr?.on("data", (chunk) => { output += chunk; });
+  // The server and its database contain fictional CI fixtures only. Expose
+  // errors so failed end-to-end workflows are diagnosable in CI logs.
+  child.stderr?.on("data", (chunk) => { output += chunk; serverErrors += String(chunk); console.error(String(chunk)); });
   for (let i = 0; i < 150; i++) {
     if (child.exitCode !== null) throw new Error(`Test server exited: ${output.slice(-1000)}`);
     try { if ((await fetch(`${base}/api/auth/csrf`)).ok) return base; } catch { /* startup */ }
@@ -158,6 +163,95 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     for (const app of apps) app.kill("SIGTERM");
     if (db) await db.end();
   });
+
+  it("rolls back the native-engine audit probe under append-only protections", async () => {
+    const { PrismaClient } = await import("@prisma/client");
+    const { probeAuditRollback } = await import("../../scripts/native-engine-audit-probe.mjs");
+    const previousEngine = process.env.PRISMA_QUERY_ENGINE_LIBRARY;
+    process.env.PRISMA_QUERY_ENGINE_LIBRARY = path.resolve("node_modules/.prisma/client/libquery_engine.so.node");
+    const client = new PrismaClient({ datasources: { db: { url: "postgresql://hotel_saas_runtime@127.0.0.1:55434/hotel_saas_disposable_audit" } } });
+    const probe = `ci-native-probe-${instanceTag}`;
+    try {
+      expect(await probeAuditRollback(client, probe)).toBe(true);
+      const rows = await db.query('SELECT count(*)::int AS count FROM "AuditLog" WHERE "entityId"=$1', [probe]);
+      expect(rows.rows[0].count).toBe(0);
+    } finally {
+      await client.$disconnect();
+      if (previousEngine === undefined) delete process.env.PRISMA_QUERY_ENGINE_LIBRARY;
+      else process.env.PRISMA_QUERY_ENGINE_LIBRARY = previousEngine;
+    }
+  }, 30_000);
+
+  it("runs hotel booking, check-in, payment and audited pricing with the non-owner role", async () => {
+    const owner = await signIn(await newAccount("runtime-workflow-owner", true));
+    const base = bases[0];
+    const headers = { cookie: owner };
+    const expectJson = async (response: Response, status: number) => {
+      const body = await response.json();
+      expect(response.status, `${JSON.stringify(body)} ${serverErrors.slice(-2500)}`).toBe(status);
+      return body;
+    };
+    await expectJson(await fetch(base + "/api/subscription", { headers }), 200);
+    const rate = await expectJson(await post(base, "/api/room-types", {
+      name: `CI room ${instanceTag}`, baseRate: 1500, capacity: 2, mealPlan: "BED_ONLY",
+    }, headers), 201);
+    const room = await expectJson(await post(base, "/api/rooms", {
+      number: `CI-${instanceTag.slice(0, 8)}`, roomTypeId: rate.id,
+    }, headers), 201);
+    const mealResponse = await fetch(base + "/api/settings/meals", { method: "PUT", headers: { ...headers, origin: base, "content-type": "application/json" },
+      body: JSON.stringify({ mealPlan: "BED_BREAKFAST", adultSurcharge: 120, childSurcharge: 60, isActive: true }) });
+    await expectJson(mealResponse, 200);
+    const audit = await db.query('SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action=$2', [fixtures.hotels.a.id, "MEAL_PRICING_UPDATED"]);
+    expect(audit.rows[0].count).toBeGreaterThan(0);
+
+    const start = new Date(Date.now() + 10 * 86400000);
+    const end = new Date(start.getTime() + 2 * 86400000);
+    const stay = await expectJson(await post(base, "/api/reservations", {
+      guestName: "Fictional CI Guest", checkInDate: start.toISOString(), checkOutDate: end.toISOString(),
+      roomId: room.id, tariffId: rate.id, occupancy: "SINGLE", mealPlan: "BED_ONLY", adults: 1, children: 0,
+    }, headers), 201);
+    expect(stay.id).toBeTruthy();
+    const checkedIn = await expectJson(await post(base, `/api/reservations/${stay.id}/check-in`, {}, headers), 201);
+    expect(checkedIn.folioId).toBeTruthy();
+    const methodId = randomUUID();
+    await db.query('INSERT INTO "PaymentMethod" (id, "hotelId", name, "isActive") VALUES ($1,$2,$3,true)', [methodId, fixtures.hotels.a.id, `CI-${instanceTag}`]);
+    const request = { folioId: checkedIn.folioId, paymentMethodId: methodId, amount: 100, reference: "CI-ONLY", idempotencyKey: `ci-payment-${instanceTag}` };
+    const payment = await expectJson(await post(base, "/api/payments", request, headers), 201);
+    const replay = await post(base, "/api/payments", request, headers);
+    expect([200, 201]).toContain(replay.status);
+    expect((await replay.json()).id).toBe(payment.id);
+    const paymentCount = await db.query('SELECT count(*)::int AS count FROM "Payment" WHERE "hotelId"=$1 AND "idempotencyKey"=$2', [fixtures.hotels.a.id, request.idempotencyKey]);
+    expect(paymentCount.rows[0].count).toBe(1);
+    const auditCount = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='PAYMENT_RECORDED' AND "entityId"=$2 AND (metadata->>'amount')::numeric=100 AND metadata->>'reference'='CI-ONLY'`, [fixtures.hotels.a.id, payment.id]);
+    expect(auditCount.rows[0].count).toBe(1);
+
+    // This grant change is confined to the verified disposable cluster. Restore
+    // it even when an assertion fails so the other test workflows remain usable.
+    const deniedRequest = { ...request, idempotencyKey: `ci-denied-${instanceTag}` };
+    await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
+    try {
+      const denied = await post(base, "/api/payments", deniedRequest, headers);
+      expect(denied.status).toBe(500);
+    } finally {
+      await db.query('GRANT INSERT ON "AuditLog" TO hotel_saas_runtime');
+    }
+    const rolledBack = await db.query('SELECT count(*)::int AS count FROM "Payment" WHERE "hotelId"=$1 AND "idempotencyKey"=$2', [fixtures.hotels.a.id, deniedRequest.idempotencyKey]);
+    expect(rolledBack.rows[0].count).toBe(0);
+    const retried = await expectJson(await post(base, "/api/payments", deniedRequest, headers), 201);
+    const retriedAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='PAYMENT_RECORDED' AND "entityId"=$2`, [fixtures.hotels.a.id, retried.id]);
+    expect(retriedAudit.rows[0].count).toBe(1);
+
+    const concurrentRequest = { ...request, amount: 50, idempotencyKey: `ci-race-${instanceTag}` };
+    const concurrent = await Promise.all([post(base, "/api/payments", concurrentRequest, headers), post(base, "/api/payments", concurrentRequest, headers)]);
+    expect(concurrent.some(response => response.status === 201)).toBe(true);
+    expect(concurrent.every(response => [201, 409].includes(response.status))).toBe(true);
+    const winner = await expectJson(await post(base, "/api/payments", concurrentRequest, headers), 201);
+    const raceCounts = await db.query(`SELECT (SELECT count(*) FROM "Payment" WHERE "hotelId"=$1 AND "idempotencyKey"=$2)::int AS count, (SELECT count(*) FROM "AuditLog" WHERE "hotelId"=$1 AND action='PAYMENT_RECORDED' AND "entityId"=$3)::int AS attempts`, [fixtures.hotels.a.id, concurrentRequest.idempotencyKey, winner.id]);
+    expect(raceCounts.rows[0]).toMatchObject({ count: 1, attempts: 1 });
+    await expectJson(await fetch(base + "/api/guests", { headers }), 200);
+    await expectJson(await fetch(base + "/api/inventory", { headers }), 200);
+    await expectJson(await fetch(base + "/api/reservations", { headers }), 200);
+  }, 60_000);
 
   it("limits normalized login accounts atomically across two server instances with unknown IP", async () => {
     const email = `race-${instanceTag}@example.invalid`;

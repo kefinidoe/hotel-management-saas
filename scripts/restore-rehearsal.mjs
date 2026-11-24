@@ -955,7 +955,10 @@ async function main() {
 
   if (inspection) {
     const archiveTables = tocSummary?.applicationTables ?? null;
-    const restoredTables = (inspection.tables ?? []).filter((name) => !name.startsWith("_prisma"));
+    // The archive inventory includes the Prisma ledger too. Compare like with
+    // like: omitting it from only the restored side falsely reports it missing
+    // even when the ledger and all of its rows were restored successfully.
+    const restoredTables = inspection.tables ?? [];
     if (archiveTables) {
       inspection.missingTables = archiveTables.filter((name) => !restoredTables.includes(name));
       inspection.extraTables = restoredTables.filter((name) => !archiveTables.includes(name));

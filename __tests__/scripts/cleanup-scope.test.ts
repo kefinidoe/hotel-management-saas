@@ -23,6 +23,11 @@ describe("test-data cleanup script safety", () => {
     expect(SOURCE).toContain("where: { hotelId },\n      data: { status: \"AVAILABLE\", notes: null }");
   });
 
+  it("preserves append-only audit records", () => {
+    expect(SOURCE).not.toMatch(/auditLog\.(delete|deleteMany|update|updateMany)\s*\(/);
+    expect(SOURCE).toContain("Preserved audit logs");
+  });
+
   it("runs cleanup as a single transaction", () => {
     expect(SOURCE).toContain("await prisma.$transaction(async (tx) => {");
     expect(SOURCE).not.toContain("prisma.payment.deleteMany");

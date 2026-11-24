@@ -218,6 +218,18 @@ export async function POST(req: Request) {
           },
         });
 
+        // The payment and its audit record are one transaction. Replays return
+        // above without creating another event; a failed audit rolls back the
+        // payment instead of committing an unexplained financial change.
+        await recordAudit({
+          hotelId,
+          userId: tenant.userId,
+          action: "PAYMENT_RECORDED",
+          entity: "Payment",
+          entityId: payment.id,
+          metadata: { folioId, amount, reference: reference || null },
+        }, tx, { strict: true });
+
         return {
           id: payment.id,
           required: totals.required,
@@ -230,15 +242,6 @@ export async function POST(req: Request) {
         timeout: 10_000,
       }
     );
-
-    await recordAudit({
-      hotelId,
-      userId: tenant.userId,
-      action: "PAYMENT_RECORDED",
-      entity: "Payment",
-      entityId: result.id,
-      metadata: { folioId: body.folioId, amount: result.paid, reference: body.reference ?? null },
-    });
 
     return NextResponse.json(result, { status: 201 });
   } catch (error) {

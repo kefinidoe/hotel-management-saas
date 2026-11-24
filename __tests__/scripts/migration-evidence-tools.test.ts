@@ -304,6 +304,10 @@ describe("scripts/restore-rehearsal.mjs — dependent comments survive filtering
           "-c",
           "CREATE TABLE auth.users (id int primary key)",
           "-c",
+          'CREATE TABLE public."_prisma_migrations" (id text primary key, finished_at timestamptz, rolled_back_at timestamptz)',
+          "-c",
+          `INSERT INTO public."_prisma_migrations" VALUES ('fictional', now(), null)`,
+          "-c",
           'CREATE TABLE public."Hotel" (id int primary key)',
           "-c",
           'CREATE TABLE public."Guest" (id int primary key, "hotelId" int references public."Hotel"(id))',
@@ -343,8 +347,12 @@ describe("scripts/restore-rehearsal.mjs — dependent comments survive filtering
         expect(report.restore.ok).toBe(true);
         expect(report.restore.problems).toEqual([]);
         expect(report.restore.filter.byReason).toMatchObject({ "schema comment": 1 });
-        expect(report.inspection.tables).toEqual(["Guest", "Hotel"]);
-        expect(report.inspection.rowCounts).toEqual({ Hotel: 1, Guest: 1 });
+        expect(report.inspection.tables).toHaveLength(3);
+        expect(report.inspection.tables).toEqual(expect.arrayContaining(["Guest", "Hotel", "_prisma_migrations"]));
+        expect(report.inspection.rowCounts).toEqual({ Hotel: 1, Guest: 1, _prisma_migrations: 1 });
+        expect(report.inspection.missingTables).toEqual([]);
+        expect(report.inspection.extraTables).toEqual([]);
+        expect(report.checks.find((check: { name: string }) => check.name === "every application table in the archive was restored").ok).toBe(true);
         const restoreCheck = report.checks.find((check: { name: string }) => check.name.startsWith("restore finished"));
         expect(restoreCheck.ok).toBe(true);
       } finally {

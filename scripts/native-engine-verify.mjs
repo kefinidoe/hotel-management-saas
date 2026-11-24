@@ -37,6 +37,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { probeAuditRollback } from "./native-engine-audit-probe.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(join(ROOT, "package.json"));
@@ -186,16 +187,7 @@ if (prisma) {
     // Write and roll back: proves the engine can execute a transaction without
     // leaving a row behind in whatever database this points at.
     const probe = `native-engine-probe-${Date.now()}`;
-    const rolledBack = await prisma
-      .$transaction(async (tx) => {
-        const created = await tx.auditLog.create({
-          data: { action: "NATIVE_ENGINE_PROBE", entity: "SYSTEM", entityId: probe, metadata: { probe } },
-        });
-        await tx.auditLog.delete({ where: { id: created.id } });
-        throw new Error("rollback");
-      })
-      .then(() => false)
-      .catch((error) => String(error.message).includes("rollback"));
+    const rolledBack = await probeAuditRollback(prisma, probe);
     record("write", "execute a write inside a transaction through the native engine", rolledBack ? "PASS" : "FAIL", {
       rolledBack,
     });

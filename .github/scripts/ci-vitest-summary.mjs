@@ -14,7 +14,7 @@ if (skipped.length) {
   for (const test of skipped) console.log(`  ${test.file}: ${test.fullName} [${test.status}]`);
 } else console.log("Skipped tests: none");
 const required = [
-  ["__tests__/security/auth-rate-limit.integration.test.ts", 11],
+  ["__tests__/security/auth-rate-limit.integration.test.ts", 13],
   ["__tests__/scripts/cleanup-disposable.integration.test.ts", 5],
   ["__tests__/scripts/migration-evidence-tools.test.ts", null],
   ["__tests__/scripts/archive-toc.test.ts", null],
