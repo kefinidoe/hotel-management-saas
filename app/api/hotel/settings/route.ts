@@ -162,7 +162,7 @@ export async function PATCH(req: Request) {
               billingInterval: sub.billingInterval ?? BillingInterval.MONTHLY,
               currency: nextCurrency,
             });
-            if (nextAmount !== null && nextAmount !== sub.amount) {
+            if (nextAmount !== null) {
               await tx.subscription.update({
                 where: { hotelId: tenant.hotelId },
                 data: { currency: nextCurrency, amount: nextAmount },

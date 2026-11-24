@@ -215,6 +215,13 @@ describe("PATCH /api/hotel/settings — billing consistency", () => {
     });
   });
 
+  it("updates the billing currency even when the numeric amounts happen to match", async () => {
+    subscriptions.get("hotel-alpha")!.amount = band.monthlyPriceUSD;
+    const res = await patch({ currency: "USD" });
+    expect(res.status).toBe(200);
+    expect(subscriptions.get("hotel-alpha")).toMatchObject({ currency: "USD", amount: band.monthlyPriceUSD });
+  });
+
   it("leaves the subscription alone when the billed currency does not change", async () => {
     // alpha is billed in KES; switching operations to EUR must not re-denominate
     // the bill into a currency the price schedule does not publish.
