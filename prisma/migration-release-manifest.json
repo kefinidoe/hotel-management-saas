@@ -122,6 +122,10 @@
     {
       "name": "20261113120000_unique_manual_subscription_payment_reference",
       "sha256": "4ce3e0a16a2c9a0da3c227ec141b65cfc6f3b85e977b0d9b45f4e2c050e08460"
+    },
+    {
+      "name": "20261114120000_repair_pricing_check_constraints",
+      "sha256": "45cb6263881b2be2841df81e64735a97642fd9418e2c8296bb93fff472a52c91"
     }
   ]
 }
