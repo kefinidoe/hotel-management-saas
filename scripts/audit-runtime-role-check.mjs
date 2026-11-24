@@ -31,7 +31,8 @@ export const AUDIT_RUNTIME_QUERY = `
         has_table_privilege(r.oid, c.oid, 'UPDATE') OR
         has_any_column_privilege(r.oid, c.oid, 'UPDATE') OR
         has_table_privilege(r.oid, c.oid, 'DELETE') OR
-        has_table_privilege(r.oid, c.oid, 'TRUNCATE')
+        has_table_privilege(r.oid, c.oid, 'TRUNCATE') OR
+        has_table_privilege(r.oid, c.oid, 'TRIGGER')
       ) ORDER BY r.rolname) AS risky_roles
   FROM (SELECT 1) one
   LEFT JOIN pg_namespace n ON n.nspname='public'

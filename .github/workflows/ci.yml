@@ -126,16 +126,13 @@ jobs:
             exit 1
           fi
           cat "$RUNNER_TEMP/audit-ci.log"
-          psql -h "$CI_DISPOSABLE_ROOT" -p 55434 -U postgres -d hotel_saas_disposable_audit -v ON_ERROR_STOP=1 <<'SQL'
-          CREATE ROLE ci_audit_login LOGIN;
-          GRANT USAGE ON SCHEMA public TO ci_audit_login;
-          GRANT SELECT, INSERT ON "AuditLog" TO ci_audit_login;
-          -- Minimal fictional test grants, not a production role configuration.
-          GRANT SELECT, INSERT, UPDATE, DELETE ON "User", "Hotel", "HotelMembership", "Subscription", "AuthRateLimitBucket" TO ci_audit_login;
-          SQL
+          # Proposal runs only on this newly created, positively identified CI cluster.
+          psql -h "$CI_DISPOSABLE_ROOT" -p 55434 -U postgres -d hotel_saas_disposable_audit -v ON_ERROR_STOP=1 -f proposals/runtime-role.sql
+          # Trust auth and this login flag exist only in the ephemeral CI cluster.
+          psql -h "$CI_DISPOSABLE_ROOT" -p 55434 -U postgres -d hotel_saas_disposable_audit -v ON_ERROR_STOP=1 -c 'ALTER ROLE hotel_saas_runtime LOGIN'
           export SAAS_ENVIRONMENT=saas SAAS_DATABASE_IDENTIFIER=hotel_saas_disposable_audit
           export DIRECT_URL='postgresql://postgres@127.0.0.1:55434/hotel_saas_disposable_audit'
-          export DATABASE_URL='postgresql://ci_audit_login@127.0.0.1:55434/hotel_saas_disposable_audit'
+          export DATABASE_URL='postgresql://hotel_saas_runtime@127.0.0.1:55434/hotel_saas_disposable_audit'
           if ! node scripts/audit-runtime-role-check.mjs --connect > "$RUNNER_TEMP/audit-role-check.log" 2>&1; then
             cat "$RUNNER_TEMP/audit-role-check.log"
             while IFS= read -r line; do echo "::error::$line"; done < "$RUNNER_TEMP/audit-role-check.log"

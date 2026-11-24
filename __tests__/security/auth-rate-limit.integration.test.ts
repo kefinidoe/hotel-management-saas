@@ -69,7 +69,7 @@ async function startApp(useTrustedHeader = true, schema?: string): Promise<strin
   const base = `http://127.0.0.1:${port}`;
   // A fixed, non-owner role is provisioned only in the marked CI cluster.
   // Administrative setup remains on the separate verified socket connection.
-  const dbUrl = "postgresql://ci_audit_login@127.0.0.1:55434/hotel_saas_disposable_audit" + (schema ? `?schema=${schema}` : "");
+  const dbUrl = "postgresql://hotel_saas_runtime@127.0.0.1:55434/hotel_saas_disposable_audit" + (schema ? `?schema=${schema}` : "");
   const child = spawn(process.execPath, ["node_modules/next/dist/bin/next", "start", "-H", "127.0.0.1", "-p", String(port)], {
     cwd: process.cwd(),
     env: {
