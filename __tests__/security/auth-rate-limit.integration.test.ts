@@ -24,6 +24,7 @@ let apps: ChildProcess[] = [];
 let bases: string[] = [];
 let fixtures: { accounts: Record<string, Account>; hotels: Record<string, { id: string; reservation: string }> };
 let instanceTag: string;
+let serverErrors = "";
 
 // Refuse to launch an HTTP app until the loopback database socket is owned by
 // the exact postmaster for the marked cluster. This check is Linux-specific and
@@ -88,7 +89,7 @@ async function startApp(useTrustedHeader = true, schema?: string): Promise<strin
   child.stdout?.on("data", (chunk) => { output += chunk; });
   // The server and its database contain fictional CI fixtures only. Expose
   // errors so failed end-to-end workflows are diagnosable in CI logs.
-  child.stderr?.on("data", (chunk) => { output += chunk; console.error(String(chunk)); });
+  child.stderr?.on("data", (chunk) => { output += chunk; serverErrors += String(chunk); console.error(String(chunk)); });
   for (let i = 0; i < 150; i++) {
     if (child.exitCode !== null) throw new Error(`Test server exited: ${output.slice(-1000)}`);
     try { if ((await fetch(`${base}/api/auth/csrf`)).ok) return base; } catch { /* startup */ }
@@ -169,7 +170,7 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     const headers = { cookie: owner };
     const expectJson = async (response: Response, status: number) => {
       const body = await response.json();
-      expect(response.status, JSON.stringify(body)).toBe(status);
+      expect(response.status, `${JSON.stringify(body)} ${serverErrors.slice(-2500)}`).toBe(status);
       return body;
     };
     await expectJson(await fetch(base + "/api/subscription", { headers }), 200);
