@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@prisma/client";
 import { parseMoney } from "@/lib/billing";
 import { assertPricingDelegates } from "./delegates";
 
@@ -238,7 +239,7 @@ export async function listPricingBundle(hotelId: string) {
 // ---------------------------------------------------------------------------
 // settings
 // ---------------------------------------------------------------------------
-export async function updatePricingSettings(hotelId: string, body: Record<string, unknown>) {
+export async function updatePricingSettings(hotelId: string, body: Record<string, unknown>, client: Prisma.TransactionClient = prisma) {
   assertPricingClient("pricing settings update");
 
   const data: Record<string, unknown> = {};
@@ -265,7 +266,7 @@ export async function updatePricingSettings(hotelId: string, body: Record<string
   //
   // The check is on the *effective* state after this request, so a hotel that is
   // already inconsistent has to be repaired before any other change is saved.
-  const existing = await prisma.hotelPricingSettings.findUnique({ where: { hotelId } });
+  const existing = await client.hotelPricingSettings.findUnique({ where: { hotelId } });
   const effective = {
     pricingModel: (data.pricingModel as string | undefined) ?? existing?.pricingModel ?? "LEGACY_BASE_RATE",
     useOccupancyRates: data.useOccupancyRates !== undefined ? Boolean(data.useOccupancyRates) : Boolean(existing?.useOccupancyRates),
@@ -276,8 +277,8 @@ export async function updatePricingSettings(hotelId: string, body: Record<string
   };
 
   if (effective.pricingModel === "ROOM_TYPE_OCCUPANCY" && effective.useOccupancyRates) {
-    const occupancies = await prisma.occupancyType.count({ where: { hotelId, isActive: true } });
-    const rates = await prisma.roomTypeOccupancy.count({ where: { hotelId, isActive: true } });
+    const occupancies = await client.occupancyType.count({ where: { hotelId, isActive: true } });
+    const rates = await client.roomTypeOccupancy.count({ where: { hotelId, isActive: true } });
     if (occupancies === 0 && rates === 0) {
       throw new PricingConfigError(
         "Add at least one occupancy option and an occupancy rate before switching occupancy pricing on.",
@@ -299,7 +300,7 @@ export async function updatePricingSettings(hotelId: string, body: Record<string
   }
 
   if (effective.useTaxes) {
-    const taxes = await prisma.taxRule.count({ where: { hotelId, isActive: true } });
+    const taxes = await client.taxRule.count({ where: { hotelId, isActive: true } });
     if (taxes === 0) {
       throw new PricingConfigError(
         "Add at least one tax rule before switching taxes on — otherwise a booking cannot be priced.",
@@ -309,7 +310,7 @@ export async function updatePricingSettings(hotelId: string, body: Record<string
   }
 
   if (effective.useChildPricing) {
-    const rules = await prisma.childPricingRule.count({ where: { hotelId, isActive: true } });
+    const rules = await client.childPricingRule.count({ where: { hotelId, isActive: true } });
     if (rules === 0) {
       throw new PricingConfigError(
         "Add at least one child age band before switching child pricing on.",
@@ -319,7 +320,7 @@ export async function updatePricingSettings(hotelId: string, body: Record<string
   }
 
   if (effective.useMealPlans) {
-    const plans = await prisma.mealPlanConfig.count({ where: { hotelId, isActive: true } });
+    const plans = await client.mealPlanConfig.count({ where: { hotelId, isActive: true } });
     if (plans === 0) {
       throw new PricingConfigError(
         "Add at least one meal plan before switching meal-plan pricing on.",
@@ -329,7 +330,7 @@ export async function updatePricingSettings(hotelId: string, body: Record<string
   }
 
   if (effective.useExtraBeds) {
-    const rules = await prisma.extraBedRule.count({ where: { hotelId, isActive: true } });
+    const rules = await client.extraBedRule.count({ where: { hotelId, isActive: true } });
     if (rules === 0) {
       throw new PricingConfigError(
         "Add at least one extra-bed rule before switching extra beds on.",
@@ -338,7 +339,7 @@ export async function updatePricingSettings(hotelId: string, body: Record<string
     }
   }
 
-  const settings = await prisma.hotelPricingSettings.upsert({
+  const settings = await client.hotelPricingSettings.upsert({
     where: { hotelId },
     update: data,
     create: { hotelId, ...data },

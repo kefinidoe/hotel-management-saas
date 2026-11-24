@@ -300,6 +300,25 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     await expectJson(await fetch(base + "/api/inventory", { headers }), 200);
     await expectJson(await fetch(base + "/api/reservations", { headers }), 200);
 
+    const pricingFingerprint = async () => (await db.query(`SELECT md5(COALESCE(
+      (SELECT row_to_json(p)::text FROM "HotelPricingSettings" p WHERE "hotelId"=$1), ''
+    )) AS fingerprint`, [fixtures.hotels.a.id])).rows[0].fingerprint;
+    const beforePricing = await pricingFingerprint();
+    const updatePricing = () => fetch(base + "/api/pricing", {
+      method: "PATCH", headers: { ...headers, origin: base, "content-type": "application/json" },
+      body: JSON.stringify({ useWeekendPricing: true }),
+    });
+    await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
+    try {
+      expect((await updatePricing()).status).toBe(500);
+    } finally {
+      await db.query('GRANT INSERT ON "AuditLog" TO hotel_saas_runtime');
+    }
+    expect(await pricingFingerprint()).toBe(beforePricing);
+    await expectJson(await updatePricing(), 200);
+    const pricingAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='PRICING_SETTINGS_UPDATED'`, [fixtures.hotels.a.id]);
+    expect(pricingAudit.rows[0].count).toBe(1);
+
     const settingsFingerprint = async () => (await db.query(`SELECT md5(
       (SELECT row_to_json(h)::text FROM "Hotel" h WHERE id=$1) ||
       COALESCE((SELECT row_to_json(s)::text FROM "Subscription" s WHERE "hotelId"=$1), '')
