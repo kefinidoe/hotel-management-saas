@@ -5,11 +5,19 @@ Status: proposal only. No audit migration or runtime-role change has been applie
 ## Before any change
 
 - Have the owner and an appropriate privacy/legal reviewer approve retention, user/hotel deletion restrictions, and an actionable lawful deletion/archival process. The current proposal retains linked audit rows and blocks parent deletion and ID changes; it is not a privacy policy.
-- Obtain and restore-test a backup in an isolated environment; record its time, contents, target and recovery procedure. There is currently no verified backup or restore test for the connected test project. Do not treat an untested export as a tested restore.
+- Obtain and restore-test a fresh backup in an isolated environment; record its time, contents, target and recovery procedure. The user-reported rehearsal below verifies one public-schema archive, not full project recovery, ongoing backup freshness, or production recovery. Do not treat an untested export as a tested restore.
 - Review migration drift, migration ledger and actual effective grants and memberships, including ownership, PUBLIC and security-definer functions. Review `proposals/runtime-role.sql` against the target and all application operations. The broad table CRUD grants do not enforce tenant isolation or constitute complete least privilege. New tables require reviewed grants.
 - Identify distinct migration/maintenance and runtime credentials; obtain the correct connection and pooler mode from the provider. Test the provider's custom role/login support, migration connection, TLS hostname and trusted CA on an isolated representative environment. Never disable certificate validation. Keep credentials out of logs, source control and chat.
 - Rehearse the exact deployment, smoke tests, connection draining and rollback with a restored representative database and realistic traffic. Prepare a maintenance window, monitoring, accountable operator and abort criteria. A CI pass does not prove pooler/provider compatibility or full application coverage.
 - Plan off-database, independently administered tamper-evident audit export and monitoring. Owners and administrators can bypass database protections; existing best-effort audit callers can omit events. Neither this migration nor the role fixes those limitations.
+
+## User-reported test-project backup rehearsal
+
+The user reported a TLS-verified `public`-schema custom-format export from the configured test project `jhablmqphfcjwealyxxr`. The archive filename was `hms-2026-11-24T14-04-48.dump`, SHA-256 `077074100d1e52fc9d418313daf9509acbf78c00373b4e4436a5fe2f0a28fb38`. The date in the filename is the exporting computer's clock, not independently verified. The archive is on the user's Windows computer; its bytes were not available to the agent.
+
+The user reported restoring that digest-matched archive to a newly initialized, loopback-only disposable PostgreSQL 17.11 cluster using the corrected rehearsal script at commit `b20e04414d746650e59ab2e3cd32d8f8af47a8e5`. The output said 366 of 366 archive entries retained, restore completed with no errors, all 46 archive tables present, ledger present with 32 rows and no unfinished rows, checkpoint `saas_current`, and inspection read-only. The scratch database was dropped and the temporary server stopped. An earlier attempt restored successfully but failed the table-coverage check because of a ledger-comparison bug; that check was corrected and regression-tested before the successful rerun.
+
+This is evidence that this specific archive can be restored to a plain local PostgreSQL server. It is not proof of complete project recovery: the export excluded owners and privileges, non-public schemas, Supabase Auth and Storage objects/files and other platform configuration. The test did not compare a contemporaneous source-side snapshot of every row or test a full provider-compatible recovery. The archive is currently only reported on one computer, and its freshness must be reassessed immediately before any change. Protect it as sensitive data; establish encrypted off-device storage and rehearse the approved recovery procedure.
 
 ## Proposed sequencing for an approved target
 
