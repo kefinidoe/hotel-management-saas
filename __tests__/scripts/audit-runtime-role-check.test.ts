@@ -1,7 +1,8 @@
 // @vitest-environment node
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
-import { AUDIT_RUNTIME_QUERY, evaluateAuditRuntime } from "../../scripts/audit-runtime-role-check.mjs";
+import { spawnSync } from "node:child_process";
+import { AUDIT_RUNTIME_QUERY, configuredRoleName, evaluateAuditRuntime } from "../../scripts/audit-runtime-role-check.mjs";
 
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 120_000 });
 let db: PGlite;
@@ -16,6 +17,24 @@ beforeAll(async () => {
 afterAll(async () => { await db.close(); });
 
 describe("audit runtime role diagnostic", () => {
+  it("extracts only a safe role name from validated connection configuration", () => {
+    expect(configuredRoleName("postgresql://hotel_runtime.jhablmqphfcjwealyxxr:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres", "supabase-pooler")).toBe("hotel_runtime");
+    expect(configuredRoleName("postgresql://postgres:secret@127.0.0.1:55434/demo", "loopback")).toBe("postgres");
+    expect(() => configuredRoleName("postgresql://%0Asecret:password@127.0.0.1/demo", "loopback")).toThrow();
+  });
+  it("config-only performs no connection and does not print the password or URL", () => {
+    const databaseUrl = "postgresql://hotel_runtime:fictional-secret@127.0.0.1:1/disposable_test";
+    const child = spawnSync(process.execPath, ["scripts/audit-runtime-role-check.mjs", "--config-only"], {
+      encoding: "utf8", timeout: 10_000,
+      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", NODE_ENV: "test", SAAS_ENVIRONMENT: "saas",
+        SAAS_DATABASE_IDENTIFIER: "disposable_test", DATABASE_URL: databaseUrl, DIRECT_URL: databaseUrl },
+    });
+    expect(child.status).toBe(0);
+    expect(child.stdout).toContain("Configured DATABASE_URL role: hotel_runtime");
+    expect(child.stdout).toContain("no connection was made");
+    expect(child.stdout + child.stderr).not.toContain("fictional-secret");
+    expect(child.stdout + child.stderr).not.toContain(databaseUrl);
+  });
   it("fails closed if the result is missing or not confirmed read-only", () => {
     expect(evaluateAuditRuntime(undefined).ok).toBe(false);
     expect(evaluateAuditRuntime({ read_only: "off" }).ok).toBe(false);

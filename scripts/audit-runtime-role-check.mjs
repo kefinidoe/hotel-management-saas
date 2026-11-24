@@ -52,15 +52,28 @@ export function evaluateAuditRuntime(row) {
   return { ok: true, reason: "No checked audit-table or schema privilege risks detected." };
 }
 
+export function configuredRoleName(databaseUrl, targetKind) {
+  const url = new URL(databaseUrl);
+  const username = decodeURIComponent(url.username);
+  const role = targetKind === "supabase-pooler" ? username.slice(0, username.lastIndexOf(".")) : username;
+  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(role)) throw new Error("Unable to determine a safe role name.");
+  return role;
+}
+
 async function main() {
-  if (process.argv.length !== 3 || process.argv[2] !== "--connect") {
-    console.error("Usage: node scripts/audit-runtime-role-check.mjs --connect (read-only; connects using DATABASE_URL)");
+  if (process.argv.length !== 3 || !["--connect", "--config-only"].includes(process.argv[2])) {
+    console.error("Usage: node scripts/audit-runtime-role-check.mjs --config-only | --connect");
     process.exitCode = 2;
     return;
   }
   loadEnvFiles();
-  assertDatabaseTarget({ environment: process.env.SAAS_ENVIRONMENT, identifier: process.env.SAAS_DATABASE_IDENTIFIER,
+  const target = assertDatabaseTarget({ environment: process.env.SAAS_ENVIRONMENT, identifier: process.env.SAAS_DATABASE_IDENTIFIER,
     databaseUrl: process.env.DATABASE_URL, directUrl: process.env.DIRECT_URL, requireDirectUrl: "remote" });
+  if (process.argv[2] === "--config-only") {
+    console.log(`Configured DATABASE_URL role: ${configuredRoleName(process.env.DATABASE_URL, target.kind)}`);
+    console.log("Configuration only: no connection was made; effective database privileges have NOT been verified.");
+    return;
+  }
   const client = new pg.Client({ connectionString: sanitiseForPgTools(process.env.DATABASE_URL), connectionTimeoutMillis: 10_000 });
   try {
     await client.connect();
