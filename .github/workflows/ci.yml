@@ -130,6 +130,8 @@ jobs:
           CREATE ROLE ci_audit_login LOGIN;
           GRANT USAGE ON SCHEMA public TO ci_audit_login;
           GRANT SELECT, INSERT ON "AuditLog" TO ci_audit_login;
+          -- Minimal fictional test grants, not a production role configuration.
+          GRANT SELECT, INSERT, UPDATE, DELETE ON "User", "Hotel", "HotelMembership", "Subscription", "AuthRateLimitBucket" TO ci_audit_login;
           SQL
           export SAAS_ENVIRONMENT=saas SAAS_DATABASE_IDENTIFIER=hotel_saas_disposable_audit
           export DIRECT_URL='postgresql://postgres@127.0.0.1:55434/hotel_saas_disposable_audit'
@@ -145,10 +147,8 @@ jobs:
             echo '::error::Audit runtime checker unexpectedly accepted the table owner'
             exit 1
           fi
-          psql -h "$CI_DISPOSABLE_ROOT" -p 55434 -U postgres -d hotel_saas_disposable_audit -v ON_ERROR_STOP=1 <<'SQL'
-          DROP OWNED BY ci_audit_login;
-          DROP ROLE ci_audit_login;
-          SQL
+          # The temporary role remains only in this disposable cluster so the
+          # real HTTP authentication suite can exercise the app without ownership.
       - name: TypeScript, lint, and production build
         working-directory: ${{ env.CI_DISPOSABLE_ROOT }}/source
         run: |
@@ -172,6 +172,9 @@ jobs:
           test_status=$?
           node .github/scripts/ci-vitest-summary.mjs "$RUNNER_TEMP/vitest-linux.json" linux
           summary_status=$?
+          if test "$test_status" -ne 0 && test -f "$RUNNER_TEMP/vitest-linux.json"; then
+            node -e 'const r=require(process.argv[1]); for(const s of r.testResults || []) for(const t of s.assertionResults || []) if(t.status === "failed") console.log("::error::" + (t.fullName + " - " + (t.failureMessages || []).join(" ")).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A"));' "$RUNNER_TEMP/vitest-linux.json"
+          fi
           test "$test_status" -eq 0 && test "$summary_status" -eq 0
       - name: Stop marked local PostgreSQL
         if: always() && env.CI_DISPOSABLE_ROOT != ''
