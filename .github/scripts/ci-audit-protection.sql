@@ -28,12 +28,12 @@ BEGIN
 
   blocked := false;
   BEGIN DELETE FROM "Hotel" WHERE id='ci-audit-guard-hotel';
-  EXCEPTION WHEN restrict_violation THEN blocked := true; END;
+  EXCEPTION WHEN restrict_violation OR foreign_key_violation THEN blocked := true; END;
   IF NOT blocked THEN RAISE EXCEPTION 'linked hotel DELETE was not blocked'; END IF;
 
   blocked := false;
   BEGIN DELETE FROM "User" WHERE id='ci-audit-guard-user';
-  EXCEPTION WHEN restrict_violation THEN blocked := true; END;
+  EXCEPTION WHEN restrict_violation OR foreign_key_violation THEN blocked := true; END;
   IF NOT blocked THEN RAISE EXCEPTION 'linked user DELETE was not blocked'; END IF;
 
   blocked := false;
