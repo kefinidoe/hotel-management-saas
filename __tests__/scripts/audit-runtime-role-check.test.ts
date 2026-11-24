@@ -29,7 +29,7 @@ describe("audit runtime role diagnostic", () => {
     await db.exec("ROLLBACK");
   });
   it("passes a read-and-insert-only login and catches inherited write privileges", async () => {
-    for (const risky of [false, true]) {
+    for (const risk of ["none", "inherited-update", "security-definer"]) {
       const instance = new PGlite();
       try {
         await instance.exec(`CREATE TABLE "AuditLog" (id text PRIMARY KEY, action text);
@@ -37,10 +37,11 @@ describe("audit runtime role diagnostic", () => {
           CREATE ROLE audit_test_reader NOLOGIN;
           GRANT USAGE ON SCHEMA public TO audit_test_reader;
           GRANT SELECT, INSERT ON "AuditLog" TO audit_test_reader;`);
-        if (risky) await instance.exec(`CREATE ROLE audit_test_writer NOLOGIN; GRANT UPDATE(action) ON "AuditLog" TO audit_test_writer; GRANT audit_test_writer TO audit_test_reader`);
+        if (risk === "inherited-update") await instance.exec(`CREATE ROLE audit_test_writer NOLOGIN; GRANT UPDATE(action) ON "AuditLog" TO audit_test_writer; GRANT audit_test_writer TO audit_test_reader`);
+        if (risk === "security-definer") await instance.exec(`CREATE FUNCTION public.owner_function() RETURNS int LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'`);
         await instance.exec("SET SESSION AUTHORIZATION audit_test_reader; BEGIN READ ONLY");
         const result = await instance.query(AUDIT_RUNTIME_QUERY);
-        expect(evaluateAuditRuntime(result.rows[0]).ok).toBe(!risky);
+        expect(evaluateAuditRuntime(result.rows[0]).ok, risk).toBe(risk === "none");
       } finally { await instance.close(); }
     }
   });

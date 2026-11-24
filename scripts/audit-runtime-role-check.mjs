@@ -17,9 +17,13 @@ export const AUDIT_RUNTIME_QUERY = `
     COALESCE(has_table_privilege(current_user, c.oid, 'INSERT'), false) AS can_insert,
     ARRAY(SELECT r.rolname FROM pg_roles r
       WHERE pg_has_role(current_user, r.oid, 'MEMBER') AND (
-        r.rolsuper OR r.rolcreaterole OR r.rolbypassrls OR
+        r.rolsuper OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication OR r.rolbypassrls OR
         pg_has_role(r.oid, c.relowner, 'MEMBER') OR
         pg_has_role(r.oid, n.nspowner, 'MEMBER') OR
+        EXISTS (SELECT 1 FROM pg_database d WHERE d.datname=current_database()
+          AND pg_has_role(r.oid, d.datdba, 'MEMBER')) OR
+        EXISTS (SELECT 1 FROM pg_proc p WHERE p.pronamespace=n.oid AND p.prosecdef
+          AND has_function_privilege(r.oid, p.oid, 'EXECUTE')) OR
         EXISTS (SELECT 1 FROM pg_proc p WHERE p.pronamespace=n.oid
           AND p.proname='reject_audit_log_mutation' AND p.pronargs=0
           AND pg_has_role(r.oid, p.proowner, 'MEMBER')) OR

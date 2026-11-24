@@ -126,6 +126,24 @@ jobs:
             exit 1
           fi
           cat "$RUNNER_TEMP/audit-ci.log"
+          psql -h "$CI_DISPOSABLE_ROOT" -p 55434 -U postgres -d hotel_saas_disposable_audit -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE ci_audit_login LOGIN;
+          GRANT USAGE ON SCHEMA public TO ci_audit_login;
+          GRANT SELECT, INSERT ON "AuditLog" TO ci_audit_login;
+          SQL
+          export SAAS_ENVIRONMENT=saas SAAS_DATABASE_IDENTIFIER=hotel_saas_disposable_audit
+          export DIRECT_URL='postgresql://postgres@127.0.0.1:55434/hotel_saas_disposable_audit'
+          export DATABASE_URL='postgresql://ci_audit_login@127.0.0.1:55434/hotel_saas_disposable_audit'
+          node scripts/audit-runtime-role-check.mjs --connect
+          export DATABASE_URL="$DIRECT_URL"
+          if node scripts/audit-runtime-role-check.mjs --connect; then
+            echo '::error::Audit runtime checker unexpectedly accepted the table owner'
+            exit 1
+          fi
+          psql -h "$CI_DISPOSABLE_ROOT" -p 55434 -U postgres -d hotel_saas_disposable_audit -v ON_ERROR_STOP=1 <<'SQL'
+          DROP OWNED BY ci_audit_login;
+          DROP ROLE ci_audit_login;
+          SQL
       - name: TypeScript, lint, and production build
         working-directory: ${{ env.CI_DISPOSABLE_ROOT }}/source
         run: |
