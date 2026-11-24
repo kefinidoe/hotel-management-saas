@@ -112,7 +112,7 @@ export async function GET() {
         removals: "Decommissioning rooms reduces your billable room count. Downgrading to a lower room band preserves existing room records without destructive deletion.",
         featureParity: "All core modules (Front Desk, Folios, Housekeeping, Restaurant POS, Inventory, Expenses, Maintenance, Reports) are included across all room bands.",
       },
-      note: "Live payment processing is managed in a separate phase. Contact platform administration or support for plan upgrades.",
+      note: "Subscription payments are verified and recorded manually. Contact platform billing support to confirm payment details or request plan changes.",
     });
   } catch (error) {
     console.error("Failed to fetch tenant subscription:", error);

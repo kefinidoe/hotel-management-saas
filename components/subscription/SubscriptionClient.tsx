@@ -79,7 +79,7 @@ export default function SubscriptionClient() {
   }
 
   const { hotel, subscription, billableBreakdown, pricingSchedule, roomBands } = data;
-  const isUSD = (hotel?.currency || "KES").toUpperCase() === "USD";
+  const isUSD = (subscription?.currency || hotel?.currency || "KES").toUpperCase() === "USD";
   const currencySymbol = isUSD ? "$" : "KSh ";
 
   const activeRooms = billableBreakdown?.billableActiveRooms ?? 0;
@@ -304,16 +304,47 @@ export default function SubscriptionClient() {
               </span>
             </div>
             <div className="flex justify-between">
-              <span>Next Renewal / Term End:</span>
+              <span>Current Term End:</span>
               <span className="font-mono text-text-primary">
                 {subscription.currentPeriodEndsAt
                   ? new Date(subscription.currentPeriodEndsAt).toLocaleDateString()
-                  : "Automatic Monthly Renewal"}
+                  : "Not specified"}
               </span>
             </div>
           </div>
         </div>
       </div>
+
+      {/* MANUAL SUBSCRIPTION PAYMENT INSTRUCTIONS */}
+      <section aria-labelledby="manual-payment-heading" className="card p-6 border border-border space-y-4 shadow-sm bg-surface">
+        <div>
+          <h2 id="manual-payment-heading" className="text-lg font-bold text-text-primary flex items-center gap-2">
+            <CreditCard className="text-primary-500" size={20} />
+            Pay your subscription manually
+          </h2>
+          <p className="text-sm text-text-secondary mt-1">
+            Confirm the amount and currency with Platform Billing Support before paying, especially when displayed prices are indicative or your subscription is billed in USD.
+          </p>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+          <div className="p-4 rounded-card bg-surface-secondary border border-border space-y-1">
+            <h3 className="font-bold text-text-primary">M-Pesa Paybill</h3>
+            <p className="text-text-secondary">Paybill number: <strong className="text-text-primary font-mono">400200</strong></p>
+            <p className="text-text-secondary">Account reference: your Hotel ID or hotel name</p>
+          </div>
+          <div className="p-4 rounded-card bg-surface-secondary border border-border space-y-1">
+            <h3 className="font-bold text-text-primary">Co-op Bank transfer</h3>
+            <p className="text-text-secondary">Account number: <strong className="text-text-primary font-mono">01102662965002</strong></p>
+            <p className="text-text-secondary">Payment reference: your Hotel ID or hotel name</p>
+          </div>
+        </div>
+        <p className="text-sm text-text-secondary">
+          Your Hotel ID: <code className="font-mono font-semibold text-text-primary break-all">{hotel.id}</code> • Hotel name: <strong className="text-text-primary">{hotel.name}</strong>
+        </p>
+        <p className="text-sm text-text-secondary">
+          After payment, share the transaction reference with Platform Billing Support. A platform administrator must verify and record the payment before activating or extending the subscription. Payment does not activate the subscription automatically.
+        </p>
+      </section>
 
       {/* BILLING INTERVAL TOGGLE & ANNUAL SAVINGS BANNER */}
       <div className="bg-gradient-to-r from-primary-50 via-surface to-primary-50 border border-primary-200 rounded-card p-6 flex flex-col md:flex-row items-center justify-between gap-6 shadow-sm">
@@ -336,11 +367,11 @@ export default function SubscriptionClient() {
           </h3>
           <p className="text-xs text-text-secondary mt-1 max-w-xl">
             {annualSavingsCurrent > 0 ? (
-              `Switching to an annual subscription saves your property ${currencySymbol}${annualSavingsCurrent.toLocaleString()} per year (${roundedDiscountPercent}% configured discount). Billed once annually with seamless continuity.`
+              `The annual option has indicative savings of ${currencySymbol}${annualSavingsCurrent.toLocaleString()} per year (${roundedDiscountPercent}% configured discount). Confirm the final terms with Platform Billing Support.`
             ) : roundedDiscountPercent > 0 ? (
-              `Switching to an annual subscription saves ${roundedDiscountPercent}% per year compared to monthly billing. Billed once annually with seamless continuity.`
+              `The annual option offers a configured ${roundedDiscountPercent}% discount compared to monthly billing. Confirm the final terms with Platform Billing Support.`
             ) : (
-              "Annual subscription billing provides predictable yearly budgeting billed once annually with seamless continuity."
+              "Annual subscription billing provides yearly budgeting. Confirm the final terms with Platform Billing Support."
             )}
           </p>
         </div>
@@ -641,8 +672,8 @@ export default function SubscriptionClient() {
             <p className="text-amber-800 leading-relaxed">
               {pricingSchedule?.notes || "Configurable baseline pricing schedule pending final business approval. Final prices to be set before commercial launch."}{" "}
               {!isScheduleApproved
-                ? "Prices displayed across all room bands are indicative baseline estimates pending final executive approval. Live automated billing will be activated following official schedule sign-off."
-                : "Final currency schedules are verified prior to commercial payment processing. Live payments are managed in an upcoming release."}
+                ? "Prices displayed across all room bands are indicative estimates pending approval. Confirm the amount and currency with Platform Billing Support before paying."
+                : "Confirm your amount and currency with Platform Billing Support before paying. Payments are verified and recorded manually."}
             </p>
           </div>
         </div>
