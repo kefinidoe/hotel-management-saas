@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import Decimal from "decimal.js";
 import { parseMoney } from "@/lib/billing";
 
 const id = z.string().trim().min(1).max(200);
@@ -38,7 +39,13 @@ const items = z.array(z.strictObject({
   });
 });
 const posCommon = { items, tableNumber: optionalText, idempotencyKey: z.string().optional() };
-export const paymentSchema = z.strictObject({ folioId: id, paymentMethodId: id, amount: money, reference: optionalText, idempotencyKey: z.string().optional(), cashierId: z.unknown().optional(), hotelId: z.unknown().optional(), status: z.unknown().optional() });
+const paymentMoney = numberInput.refine(value => {
+  try {
+    const amount = new Decimal(String(value));
+    return amount.isFinite() && amount.gt(0) && amount.decimalPlaces() <= 2 && amount.lte("99999999.99");
+  } catch { return false; }
+}, "Enter a positive amount with at most two decimal places.");
+export const paymentSchema = z.strictObject({ folioId: id, paymentMethodId: id, amount: paymentMoney, reference: optionalText, idempotencyKey: z.string().optional(), cashierId: z.unknown().optional(), hotelId: z.unknown().optional(), status: z.unknown().optional() });
 export const chargeSchema = z.strictObject({ ...posCommon, folioId: id });
 export const payNowSchema = z.strictObject({ ...posCommon, paymentMethodId: id, customerName: optionalText, customerPhone: optionalText, reference: optionalText });
 export const expenseSchema = z.strictObject({ category: id, description: z.string().trim().min(1).max(2000), amount: money, paymentMethod: id, supplier: optionalText, reference: optionalText, status: z.enum(["PENDING_APPROVAL", "APPROVED", "REJECTED"]).optional() });

@@ -8,6 +8,7 @@ const tests = report.testResults.flatMap((suite) => suite.assertionResults.map((
 const skipped = tests.filter((test) => ["pending", "skipped", "todo"].includes(test.status));
 const run = tests.filter((test) => !["pending", "skipped", "todo"].includes(test.status));
 console.log(`Tests run: ${run.length}; passed: ${report.numPassedTests}; failed: ${report.numFailedTests}; skipped/todo: ${skipped.length}; total: ${report.numTotalTests}`);
+console.log(`::notice::${platform} tests: ${report.numPassedTests} passed, ${report.numFailedTests} failed, ${skipped.length} skipped/todo, ${report.numTotalTests} total`);
 if (tests.length !== report.numTotalTests || skipped.length !== report.numPendingTests + report.numTodoTests) throw new Error("Incomplete or inconsistent Vitest report");
 if (skipped.length) {
   console.log("Skipped tests (full names):");

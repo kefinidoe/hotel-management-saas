@@ -283,8 +283,8 @@ export async function POST(
         );
 
         const currentTotals = folioTotals(
-          folio.items.map((item) => Number(item.total)),
-          folio.payments.map((payment) => Number(payment.amount))
+          folio.items.map((item) => String(item.total)),
+          folio.payments.map((payment) => String(payment.amount))
         );
         const required = roundMoney(currentTotals.required + additionalCharge);
 

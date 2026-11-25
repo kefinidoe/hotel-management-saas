@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { existsSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import path from "node:path";
@@ -192,6 +192,35 @@ suite("real Postgres HTTP authentication rate limiting", () => {
       return body;
     };
     await expectJson(await fetch(base + "/api/subscription", { headers }), 200);
+    // Rehearse the exact migration with legacy duplicate rows on an isolated
+    // temporary table in the already-verified disposable PostgreSQL cluster.
+    await db.query("BEGIN");
+    try {
+      await db.query('SET LOCAL search_path = pg_temp');
+      await db.query(`CREATE TEMP TABLE "Payment" (id text PRIMARY KEY, "hotelId" text NOT NULL, reference text, amount numeric(10,2) NOT NULL, status text NOT NULL, UNIQUE(id,"hotelId"))`);
+      await db.query(`INSERT INTO "Payment" (id,"hotelId",reference,amount,status) VALUES
+        ('duplicate-a','fixture-hotel',' Receipt ',10,'COMPLETED'),('duplicate-b','fixture-hotel','receipt',20,'COMPLETED'),
+        ('unique-c','fixture-hotel',' Other ',30,'COMPLETED'),('blank-d','fixture-hotel',' ',40,'COMPLETED')`);
+      const migration = readFileSync(path.resolve("prisma/migrations/20261116120000_payment_reference_reversals/migration.sql"), "utf8");
+      await db.query(migration);
+      const preserved = await db.query(`SELECT count(*)::int AS count FROM "Payment" WHERE
+        (id='duplicate-a' AND reference=' Receipt ' AND amount=10 AND status='COMPLETED' AND "normalizedReference" IS NULL) OR
+        (id='duplicate-b' AND reference='receipt' AND amount=20 AND status='COMPLETED' AND "normalizedReference" IS NULL) OR
+        (id='unique-c' AND reference=' Other ' AND amount=30 AND status='COMPLETED' AND "normalizedReference"='OTHER') OR
+        (id='blank-d' AND reference=' ' AND amount=40 AND status='COMPLETED' AND "normalizedReference" IS NULL)`);
+      expect(preserved.rows[0].count).toBe(4);
+      const duplicateGroup = await db.query(`SELECT count(*)::int AS count FROM (SELECT "hotelId",upper(btrim(reference)) FROM "Payment" WHERE NULLIF(btrim(reference),'') IS NOT NULL GROUP BY "hotelId",upper(btrim(reference)) HAVING count(*)>1) duplicates`);
+      expect(duplicateGroup.rows[0].count).toBe(1);
+    } finally { await db.query("ROLLBACK"); }
+    const report = spawnSync(process.execPath, ["scripts/payment-reference-duplicates.mjs"], {
+      cwd: process.cwd(), encoding: "utf8", env: { ...process.env,
+        SAAS_ENVIRONMENT: "saas", SAAS_DATABASE_IDENTIFIER: "hotel_saas_disposable_audit",
+        DATABASE_URL: "postgresql://postgres@127.0.0.1:55434/hotel_saas_disposable_audit",
+        DIRECT_URL: "postgresql://postgres@127.0.0.1:55434/hotel_saas_disposable_audit" },
+    });
+    expect(report.status, report.stderr).toBe(0);
+    expect(JSON.parse(report.stdout)).toEqual({ duplicateGroups: [] });
+    console.log(`::notice::Disposable duplicate-report output: ${JSON.stringify(JSON.parse(report.stdout))}`);
     const rate = await expectJson(await post(base, "/api/room-types", {
       name: `CI room ${instanceTag}`, baseRate: 1500, capacity: 2, mealPlan: "BED_ONLY",
     }, headers), 201);
@@ -279,6 +308,19 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     const raceCounts = await db.query(`SELECT (SELECT count(*) FROM "Payment" WHERE "hotelId"=$1 AND "idempotencyKey"=$2)::int AS count, (SELECT count(*) FROM "AuditLog" WHERE "hotelId"=$1 AND action='PAYMENT_RECORDED' AND "entityId"=$3)::int AS attempts`, [fixtures.hotels.a.id, concurrentRequest.idempotencyKey, winner.id]);
     expect(raceCounts.rows[0]).toMatchObject({ count: 1, attempts: 1 });
 
+    const receipt = `CI-RECEIPT-${instanceTag}`;
+    const duplicateRequests = [0, 1].map(i => post(base, "/api/payments", {
+      ...request, amount: 25, reference: i ? `  ${receipt.toLowerCase()}  ` : receipt,
+      idempotencyKey: `ci-receipt-${instanceTag}-${i}`,
+    }, headers));
+    const duplicateResponses = await Promise.all(duplicateRequests);
+    expect(duplicateResponses.map(r => r.status).sort()).toEqual([201, 409]);
+    const receiptPayment = await duplicateResponses.find(r => r.status === 201)!.json();
+    expect((await duplicateResponses.find(r => r.status === 409)!.json()).error).toMatch(/reference/i);
+    for (let i = 0; i < 2; i++) {
+      await expectJson(await post(base, "/api/payments", { ...request, amount: 10, reference: "  ", idempotencyKey: `ci-blank-${instanceTag}-${i}` }, headers), 201);
+    }
+
     const checkOutUrl = `/api/reservations/${stay.id}/check-out`;
     await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
     try {
@@ -296,6 +338,33 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     await expectJson(await post(base, checkOutUrl, { allowOutstandingBalance: true }, headers), 200);
     const checkoutAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='CHECK_OUT_WITH_BALANCE' AND "entityId"=$2`, [fixtures.hotels.a.id, stay.id]);
     expect(checkoutAudit.rows[0].count).toBe(1);
+
+    const reverse = (paymentId: string, key: string, cookie = owner) => post(base, `/api/payments/${paymentId}/reverse`, { reason: "Incorrect receipt", idempotencyKey: key }, { cookie });
+    const receptionist = await newAccount("reversal-receptionist");
+    await db.query(`INSERT INTO "HotelMembership" (id, "userId", "hotelId", role, status, "createdAt", "updatedAt")
+      SELECT $1, id, $2, 'RECEPTIONIST', 'ACTIVE', now(), now() FROM "User" WHERE email=$3`, [randomUUID(), fixtures.hotels.a.id, receptionist.email]);
+    const receptionistCookie = await signIn(receptionist);
+    expect((await reverse(receiptPayment.id, `ci-reception-${instanceTag}`, receptionistCookie)).status).toBe(403);
+    const otherHotel = randomUUID(), otherGuest = randomUUID(), otherFolio = randomUUID(), otherMethod = randomUUID(), otherPayment = randomUUID();
+    await db.query(`INSERT INTO "Hotel" (id,name,slug,"updatedAt") VALUES ($1,'Fictional other hotel',$2,now())`, [otherHotel, `ci-other-${instanceTag}`]);
+    await db.query(`INSERT INTO "Guest" (id,"hotelId","fullName","updatedAt") VALUES ($1,$2,'Fictional guest',now())`, [otherGuest, otherHotel]);
+    await db.query(`INSERT INTO "Folio" (id,"hotelId","guestId","updatedAt") VALUES ($1,$2,$3,now())`, [otherFolio, otherHotel, otherGuest]);
+    await db.query(`INSERT INTO "PaymentMethod" (id,"hotelId",name,"isActive") VALUES ($1,$2,'Fictional method',true)`, [otherMethod, otherHotel]);
+    await db.query(`INSERT INTO "Payment" (id,"hotelId","folioId","paymentMethodId",amount,status,"cashierId")
+      SELECT $1,$2,$3,$4,10,'COMPLETED',id FROM "User" WHERE email=$5`, [otherPayment, otherHotel, otherFolio, otherMethod, receptionist.email]);
+    expect((await reverse(otherPayment, `ci-cross-${instanceTag}`)).status).toBe(404);
+    const beforeReverse = await expectJson(await fetch(base + `/api/folios/${checkedIn.folioId}`, { headers }), 200);
+    const reversalRace = await Promise.all([0, 1].map(i => reverse(receiptPayment.id, `ci-reverse-${instanceTag}-${i}`)));
+    expect(reversalRace.map(r => r.status).sort()).toEqual([201, 409]);
+    const reversal = await reversalRace.find(r => r.status === 201)!.json();
+    expect((await reverse(reversal.id, `ci-reverse-reversal-${instanceTag}`)).status).toBe(409);
+    const afterReverse = await expectJson(await fetch(base + `/api/folios/${checkedIn.folioId}`, { headers }), 200);
+    expect(afterReverse.isClosed).toBe(true);
+    expect(afterReverse.balance).toBe(beforeReverse.balance + 25);
+    const reversalRow = await db.query(`SELECT count(*)::int AS count FROM "Payment" WHERE id=$1 AND "reversalOfId"=$2 AND amount=-25 AND reference IS NULL`, [reversal.id, receiptPayment.id]);
+    expect(reversalRow.rows[0].count).toBe(1);
+    const reversalAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='PAYMENT_REVERSED' AND "entityId"=$2 AND metadata->>'folioWasClosed'='true'`, [fixtures.hotels.a.id, reversal.id]);
+    expect(reversalAudit.rows[0].count).toBe(1);
     await expectJson(await fetch(base + "/api/guests", { headers }), 200);
     await expectJson(await fetch(base + "/api/inventory", { headers }), 200);
     await expectJson(await fetch(base + "/api/reservations", { headers }), 200);

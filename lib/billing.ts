@@ -1,3 +1,5 @@
+import Decimal from "decimal.js";
+
 const MAX_MONEY = 99_999_999.99;
 
 export function roundMoney(value: number): number {
@@ -31,10 +33,16 @@ export function parseMoney(
   return rounded;
 }
 
-export function folioTotals(itemTotals: readonly number[], completedPayments: readonly number[]) {
-  const required = roundMoney(itemTotals.reduce((sum, amount) => sum + amount, 0));
-  const paid = roundMoney(completedPayments.reduce((sum, amount) => sum + amount, 0));
-  return { required, paid, balance: roundMoney(required - paid) };
+export function folioTotalsExact(itemTotals: readonly (string | number)[], completedPayments: readonly (string | number)[]) {
+  const required = itemTotals.reduce<Decimal>((sum, amount) => sum.plus(amount), new Decimal(0));
+  const paid = completedPayments.reduce<Decimal>((sum, amount) => sum.plus(amount), new Decimal(0));
+  return { required, paid, balance: required.minus(paid) };
+}
+
+export function folioTotals(itemTotals: readonly (string | number)[], completedPayments: readonly (string | number)[]) {
+  // Convert only the final display/API values for compatibility with clients.
+  const { required, paid, balance } = folioTotalsExact(itemTotals, completedPayments);
+  return { required: required.toNumber(), paid: paid.toNumber(), balance: balance.toNumber() };
 }
 
 export function stayNights(checkIn: Date, checkOut: Date): number {

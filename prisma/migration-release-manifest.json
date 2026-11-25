@@ -130,6 +130,10 @@
     {
       "name": "20261115120000_append_only_audit_log",
       "sha256": "ab52d7bbf7cad416cd2e9d66406b9a4fe5d431b8c0092b98223e29edab9549f7"
+    },
+    {
+      "name": "20261116120000_payment_reference_reversals",
+      "sha256": "d5a2271d530046a710a505ce21a593c885be494d08634d83defb11f9bcb5cdd2"
     }
   ]
 }

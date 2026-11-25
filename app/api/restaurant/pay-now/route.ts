@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
+import { paymentReferenceExists } from "@/lib/payment-reference";
 import {
   cartTotal,
   computePosFingerprint,
@@ -335,6 +336,9 @@ export async function POST(req: Request) {
         );
       }
 
+      try {
+        if (await paymentReferenceExists(hotelId, reference)) return NextResponse.json({ error: "This payment reference has already been recorded for this hotel.", code: "PAYMENT_REFERENCE_ALREADY_USED", outcome: "CONFLICT" }, { status: 409 });
+      } catch (lookupError) { console.error("Failed to inspect payment reference conflict:", lookupError); }
       // Unrelated or ambiguous unique constraint violation: do not misclassify as idempotency conflict
       return NextResponse.json(
         {
@@ -347,6 +351,9 @@ export async function POST(req: Request) {
     }
 
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") {
+      try {
+        if (await paymentReferenceExists(hotelId, reference)) return NextResponse.json({ error: "This payment reference has already been recorded for this hotel.", code: "PAYMENT_REFERENCE_ALREADY_USED", outcome: "CONFLICT" }, { status: 409 });
+      } catch (lookupError) { console.error("Failed to inspect payment reference conflict:", lookupError); }
       return NextResponse.json(
         {
           error: "The inventory or payment records changed. Refresh and try again.",
