@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getTenantFromRoute, requireModule, requireRole, ROLE_GROUPS } from "@/lib/authz";
 import { recordAudit } from "@/lib/audit";
+import { prisma } from "@/lib/prisma";
 import { pricingUnavailableResponse } from "@/lib/pricing/http";
 import {
   PricingConfigError,
@@ -51,15 +52,18 @@ export async function PATCH(req: Request) {
   }
 
   try {
-    const settings = await updatePricingSettings(tenant.hotelId, body);
-    await recordAudit({
-      hotelId: tenant.hotelId,
-      userId: tenant.userId,
-      action: "PRICING_SETTINGS_UPDATED",
-      entity: "HotelPricingSettings",
-      entityId: settings.id,
-      metadata: body,
-    });
+    const settings = await prisma.$transaction(async (tx) => {
+      const saved = await updatePricingSettings(tenant.hotelId, body, tx);
+      await recordAudit({
+        hotelId: tenant.hotelId,
+        userId: tenant.userId,
+        action: "PRICING_SETTINGS_UPDATED",
+        entity: "HotelPricingSettings",
+        entityId: saved.id,
+        metadata: body,
+      }, tx, { strict: true });
+      return saved;
+    }, { isolationLevel: "Serializable" });
     return NextResponse.json({ ok: true, settings });
   } catch (error) {
     if (error instanceof PricingConfigError) {

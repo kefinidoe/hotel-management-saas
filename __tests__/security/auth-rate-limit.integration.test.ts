@@ -16,7 +16,7 @@ type Account = { email: string; password: string };
 type TestDb = {
   connect(): Promise<void>;
   end(): Promise<void>;
-  query(sql: string, values?: unknown[]): Promise<{ rows: Array<{ data_directory: string; count: number; attempts: number }> }>;
+  query(sql: string, values?: unknown[]): Promise<{ rows: Array<{ data_directory: string; count: number; attempts: number; tasks: number; occupied: number; fingerprint: string }> }>;
 };
 const { Client } = require("pg") as { Client: new (options: { host: string; port: number; user: string; database: string }) => TestDb };
 let db: TestDb;
@@ -211,6 +211,36 @@ suite("real Postgres HTTP authentication rate limiting", () => {
       roomId: room.id, tariffId: rate.id, occupancy: "SINGLE", mealPlan: "BED_ONLY", adults: 1, children: 0,
     }, headers), 201);
     expect(stay.id).toBeTruthy();
+
+    // This legacy-rate booking has no frozen snapshot by default. Seed a
+    // fictional agreement so this exercises the priced-reservation branch.
+    await db.query(`INSERT INTO "ReservationPriceSnapshot"
+      (id, "hotelId", "reservationId", version, "pricingModel", currency, "nightlyRate", nights, "roomTotal", "grandTotal", breakdown, "createdById")
+      VALUES ($1,$2,$3,1,'LEGACY_BASE_RATE','KES',1500,2,3000,3000,$4::jsonb,$5)`,
+      [randomUUID(), fixtures.hotels.a.id, stay.id, JSON.stringify({ lines: [] }), "fictional-ci-user"]);
+
+    // A schedule change to a priced reservation must not commit without its
+    // rate-review audit. Permission changes here affect only the disposable CI cluster.
+    const scheduleUrl = `/api/reservations/${stay.id}`;
+    const shiftedStart = new Date(start.getTime() + 86400000);
+    const shiftedEnd = new Date(end.getTime() + 86400000);
+    const changeSchedule = () => fetch(base + scheduleUrl, {
+      method: "PUT", headers: { ...headers, origin: base, "content-type": "application/json" },
+      body: JSON.stringify({ checkInDate: shiftedStart.toISOString(), checkOutDate: shiftedEnd.toISOString() }),
+    });
+    await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
+    try {
+      expect((await changeSchedule()).status).toBe(500);
+    } finally {
+      await db.query('GRANT INSERT ON "AuditLog" TO hotel_saas_runtime');
+    }
+    const originalSchedule = await db.query(`SELECT count(*)::int AS count FROM "Reservation" WHERE id=$1 AND "hotelId"=$2 AND "checkInDate"=$3 AND "checkOutDate"=$4`, [stay.id, fixtures.hotels.a.id, start.toISOString(), end.toISOString()]);
+    expect(originalSchedule.rows[0].count).toBe(1);
+    const moved = await expectJson(await changeSchedule(), 200);
+    expect(moved.pricingNeedsReview).toBe(true);
+    const reviewAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='RESERVATION_RATE_REVIEW_REQUIRED' AND "entityId"=$2`, [fixtures.hotels.a.id, stay.id]);
+    expect(reviewAudit.rows[0].count).toBe(1);
+
     const checkedIn = await expectJson(await post(base, `/api/reservations/${stay.id}/check-in`, {}, headers), 201);
     expect(checkedIn.folioId).toBeTruthy();
     const methodId = randomUUID();
@@ -248,9 +278,143 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     const winner = await expectJson(await post(base, "/api/payments", concurrentRequest, headers), 201);
     const raceCounts = await db.query(`SELECT (SELECT count(*) FROM "Payment" WHERE "hotelId"=$1 AND "idempotencyKey"=$2)::int AS count, (SELECT count(*) FROM "AuditLog" WHERE "hotelId"=$1 AND action='PAYMENT_RECORDED' AND "entityId"=$3)::int AS attempts`, [fixtures.hotels.a.id, concurrentRequest.idempotencyKey, winner.id]);
     expect(raceCounts.rows[0]).toMatchObject({ count: 1, attempts: 1 });
+
+    const checkOutUrl = `/api/reservations/${stay.id}/check-out`;
+    await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
+    try {
+      const denied = await post(base, checkOutUrl, { allowOutstandingBalance: true }, headers);
+      expect(denied.status).toBe(500);
+    } finally {
+      await db.query('GRANT INSERT ON "AuditLog" TO hotel_saas_runtime');
+    }
+    const unchanged = await db.query(`SELECT
+      (SELECT count(*) FROM "Reservation" WHERE id=$1 AND status='CHECKED_IN')::int AS count,
+      (SELECT count(*) FROM "Folio" WHERE id=$2 AND "isClosed"=false)::int AS attempts,
+      (SELECT count(*) FROM "HousekeepingTask" WHERE "roomId"=$3)::int AS tasks,
+      (SELECT count(*) FROM "Room" WHERE id=$3 AND status='OCCUPIED')::int AS occupied`, [stay.id, checkedIn.folioId, room.id]);
+    expect(unchanged.rows[0]).toMatchObject({ count: 1, attempts: 1, tasks: 0, occupied: 1 });
+    await expectJson(await post(base, checkOutUrl, { allowOutstandingBalance: true }, headers), 200);
+    const checkoutAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='CHECK_OUT_WITH_BALANCE' AND "entityId"=$2`, [fixtures.hotels.a.id, stay.id]);
+    expect(checkoutAudit.rows[0].count).toBe(1);
     await expectJson(await fetch(base + "/api/guests", { headers }), 200);
     await expectJson(await fetch(base + "/api/inventory", { headers }), 200);
     await expectJson(await fetch(base + "/api/reservations", { headers }), 200);
+
+    // Exercise create/update/delete and the bulk rate write against a real
+    // non-owner role, including failure after business writes have happened.
+    const entityUrl = "/api/pricing/occupancy-types";
+    const occupancyName = `CI occupancy ${instanceTag}`;
+    const pricingRequest = (method: string, url: string, body?: unknown) => fetch(base + url, {
+      method, headers: { ...headers, origin: base, "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const rejectAudit = async (request: () => Promise<Response>) => {
+      await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
+      try { expect((await request()).status).toBe(500); }
+      finally { await db.query('GRANT INSERT ON "AuditLog" TO hotel_saas_runtime'); }
+    };
+    const newOccupancy = { name: occupancyName, minAdults: 1, maxAdults: 2, maxChildren: 0 };
+    await rejectAudit(() => pricingRequest("POST", entityUrl, newOccupancy));
+    const noOccupancy = await db.query('SELECT count(*)::int AS count FROM "OccupancyType" WHERE "hotelId"=$1 AND name=$2', [fixtures.hotels.a.id, occupancyName]);
+    expect(noOccupancy.rows[0].count).toBe(0);
+    const occupancy = (await expectJson(await pricingRequest("POST", entityUrl, newOccupancy), 201)).record;
+    const renameOccupancy = { id: occupancy.id, name: `${occupancyName} updated` };
+    await rejectAudit(() => pricingRequest("PATCH", entityUrl, renameOccupancy));
+    const originalOccupancy = await db.query('SELECT count(*)::int AS count FROM "OccupancyType" WHERE id=$1 AND name=$2', [occupancy.id, occupancyName]);
+    expect(originalOccupancy.rows[0].count).toBe(1);
+    await expectJson(await pricingRequest("PATCH", entityUrl, renameOccupancy), 200);
+    const rateBody = { roomTypeId: rate.id, rates: [{ occupancyTypeId: occupancy.id, nightlyRate: 1800 }] };
+    await rejectAudit(() => pricingRequest("POST", "/api/pricing/room-rates", rateBody));
+    const absentRate = await db.query('SELECT count(*)::int AS count FROM "RoomTypeOccupancy" WHERE "roomTypeId"=$1 AND "occupancyTypeId"=$2', [rate.id, occupancy.id]);
+    expect(absentRate.rows[0].count).toBe(0);
+    const oldBaseRate = await db.query('SELECT count(*)::int AS count FROM "RoomType" WHERE id=$1 AND "baseRate"=1500', [rate.id]);
+    expect(oldBaseRate.rows[0].count).toBe(1);
+    await expectJson(await pricingRequest("POST", "/api/pricing/room-rates", rateBody), 200);
+    // An invalid later row must not leave the earlier deletion behind.
+    await expectJson(await pricingRequest("POST", "/api/pricing/room-rates", { roomTypeId: rate.id, rates: [
+      { occupancyTypeId: occupancy.id, nightlyRate: null }, { occupancyTypeId: "not-a-real-id", nightlyRate: 20 },
+    ] }), 404);
+    const rateRemains = await db.query('SELECT count(*)::int AS count FROM "RoomTypeOccupancy" WHERE "roomTypeId"=$1 AND "occupancyTypeId"=$2 AND "nightlyRate"=1800', [rate.id, occupancy.id]);
+    expect(rateRemains.rows[0].count).toBe(1);
+    await expectJson(await pricingRequest("POST", "/api/pricing/room-rates", { roomTypeId: rate.id, rates: [{ occupancyTypeId: occupancy.id, nightlyRate: null }] }), 200);
+    const deleteUrl = `${entityUrl}?id=${encodeURIComponent(occupancy.id)}`;
+    await rejectAudit(() => pricingRequest("DELETE", deleteUrl));
+    const retainedOccupancy = await db.query('SELECT count(*)::int AS count FROM "OccupancyType" WHERE id=$1', [occupancy.id]);
+    expect(retainedOccupancy.rows[0].count).toBe(1);
+    await expectJson(await pricingRequest("DELETE", deleteUrl), 200);
+    const entityAudits = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND "entityId"=$2 AND action IN ('PRICING_OCCUPANCY_TYPES_CREATED','PRICING_OCCUPANCY_TYPES_UPDATED','PRICING_OCCUPANCY_TYPES_DELETED')`, [fixtures.hotels.a.id, occupancy.id]);
+    expect(entityAudits.rows[0].count).toBe(3);
+
+    const pricingFingerprint = async () => (await db.query(`SELECT md5(COALESCE(
+      (SELECT row_to_json(p)::text FROM "HotelPricingSettings" p WHERE "hotelId"=$1), ''
+    )) AS fingerprint`, [fixtures.hotels.a.id])).rows[0].fingerprint;
+    const beforePricing = await pricingFingerprint();
+    const updatePricing = () => fetch(base + "/api/pricing", {
+      method: "PATCH", headers: { ...headers, origin: base, "content-type": "application/json" },
+      body: JSON.stringify({ useWeekendPricing: true }),
+    });
+    await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
+    try {
+      expect((await updatePricing()).status).toBe(500);
+    } finally {
+      await db.query('GRANT INSERT ON "AuditLog" TO hotel_saas_runtime');
+    }
+    expect(await pricingFingerprint()).toBe(beforePricing);
+    await expectJson(await updatePricing(), 200);
+    const pricingAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='PRICING_SETTINGS_UPDATED'`, [fixtures.hotels.a.id]);
+    expect(pricingAudit.rows[0].count).toBe(1);
+
+    const staffEmail = `runtime-new-staff-${instanceTag}@example.invalid`;
+    const staffBody = { name: "Fictional New Staff", email: staffEmail, password: fakePassword, role: "ACCOUNTANT" };
+    await rejectAudit(() => post(base, "/api/staff", staffBody, headers));
+    const noUser = await db.query('SELECT count(*)::int AS count FROM "User" WHERE email=$1', [staffEmail]);
+    expect(noUser.rows[0].count).toBe(0);
+    const staff = await expectJson(await post(base, "/api/staff", staffBody, headers), 201);
+    const staffAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='STAFF_MEMBER_ADDED' AND "entityId"=$2`, [fixtures.hotels.a.id, staff.id]);
+    expect(staffAudit.rows[0].count).toBe(1);
+    const staffUrl = `/api/staff/${staff.id}`;
+    await rejectAudit(() => pricingRequest("PATCH", staffUrl, { department: "Fictional Finance" }));
+    const originalStaff = await db.query('SELECT count(*)::int AS count FROM "HotelMembership" WHERE id=$1 AND department IS NULL', [staff.id]);
+    expect(originalStaff.rows[0].count).toBe(1);
+    await expectJson(await pricingRequest("PATCH", staffUrl, { department: "Fictional Finance" }), 200);
+    const staffUpdateAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='STAFF_MEMBERSHIP_UPDATED' AND "entityId"=$2`, [fixtures.hotels.a.id, staff.id]);
+    expect(staffUpdateAudit.rows[0].count).toBe(1);
+    // Existing activity requires suspension rather than deletion, and both
+    // branches must roll back if the audit insert is unavailable.
+    await db.query('UPDATE "HousekeepingTask" SET "assigneeId"=$1 WHERE "roomId"=$2 AND "hotelId"=$3', [staff.userId, room.id, fixtures.hotels.a.id]);
+    await rejectAudit(() => pricingRequest("DELETE", staffUrl));
+    const activeStaff = await db.query(`SELECT count(*)::int AS count FROM "HotelMembership" WHERE id=$1 AND status='ACTIVE'`, [staff.id]);
+    expect(activeStaff.rows[0].count).toBe(1);
+    expect((await expectJson(await pricingRequest("DELETE", staffUrl), 200)).mode).toBe("suspended");
+    const suspensionAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE action='STAFF_MEMBERSHIP_SUSPENDED' AND "hotelId"=$1 AND "entityId"=$2`, [fixtures.hotels.a.id, staff.id]);
+    expect(suspensionAudit.rows[0].count).toBe(1);
+    await db.query('UPDATE "HousekeepingTask" SET "assigneeId"=NULL WHERE "assigneeId"=$1 AND "hotelId"=$2', [staff.userId, fixtures.hotels.a.id]);
+    await rejectAudit(() => pricingRequest("DELETE", staffUrl));
+    const retainedStaff = await db.query('SELECT count(*)::int AS count FROM "HotelMembership" WHERE id=$1', [staff.id]);
+    expect(retainedStaff.rows[0].count).toBe(1);
+    expect((await expectJson(await pricingRequest("DELETE", staffUrl), 200)).mode).toBe("deleted");
+    const removalAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE action='STAFF_MEMBERSHIP_REMOVED' AND "hotelId"=$1 AND "entityId"=$2`, [fixtures.hotels.a.id, staff.id]);
+    expect(removalAudit.rows[0].count).toBe(1);
+
+    const settingsFingerprint = async () => (await db.query(`SELECT md5(
+      (SELECT row_to_json(h)::text FROM "Hotel" h WHERE id=$1) ||
+      COALESCE((SELECT row_to_json(s)::text FROM "Subscription" s WHERE "hotelId"=$1), '')
+    ) AS fingerprint`, [fixtures.hotels.a.id])).rows[0].fingerprint;
+    const beforeSettings = await settingsFingerprint();
+    const updateSettings = () => fetch(base + "/api/hotel/settings", {
+      method: "PATCH", headers: { ...headers, origin: base, "content-type": "application/json" },
+      body: JSON.stringify({ name: `Fictional CI Hotel ${instanceTag}`, currency: "USD" }),
+    });
+    await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
+    try {
+      expect((await updateSettings()).status).toBe(500);
+    } finally {
+      await db.query('GRANT INSERT ON "AuditLog" TO hotel_saas_runtime');
+    }
+    expect(await settingsFingerprint()).toBe(beforeSettings);
+    await expectJson(await updateSettings(), 200);
+    const settingsAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='HOTEL_SETTINGS_UPDATED'`, [fixtures.hotels.a.id]);
+    expect(settingsAudit.rows[0].count).toBe(1);
   }, 60_000);
 
   it("limits normalized login accounts atomically across two server instances with unknown IP", async () => {

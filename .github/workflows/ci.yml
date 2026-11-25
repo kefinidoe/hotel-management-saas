@@ -216,6 +216,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/migration-ledger.mjs manifest --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Validate Windows audit rehearsal safety preflight
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Get-Location) 'scripts/audit-restored-prisma-rehearsal.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
+          $fake = Join-Path $env:RUNNER_TEMP 'hms-fake-archive.dump'
+          Set-Content -LiteralPath $fake -Value 'fictional archive' -NoNewline
+          & pwsh -NoProfile -File scripts/audit-restored-prisma-rehearsal.ps1 -Archive $fake -ExpectedSha256 ('0' * 64)
+          if ($LASTEXITCODE -eq 0) { throw 'Rehearsal unexpectedly accepted a mismatched archive digest.' }
+          exit 0
       - name: TypeScript, lint, and production build
         run: |
           npx tsc --noEmit

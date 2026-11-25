@@ -97,8 +97,8 @@ function resetHotels() {
   });
 }
 
-vi.doMock("@/lib/prisma", () => ({
-  prisma: {
+vi.doMock("@/lib/prisma", () => {
+  const client = {
     hotel: {
       findUnique: async ({ where }: any) => {
         return hotels.get(where.id) || null;
@@ -111,8 +111,11 @@ vi.doMock("@/lib/prisma", () => ({
         return updated;
       },
     },
-  },
-}));
+    subscription: { findUnique: async () => null },
+    auditLog: { create: async ({ data }: any) => data },
+  };
+  return { prisma: { ...client, $transaction: async (fn: any) => fn(client) } };
+});
 
 let getSettingsRoute: any = null;
 let patchSettingsRoute: any = null;

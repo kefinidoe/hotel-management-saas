@@ -31,6 +31,8 @@ const state = vi.hoisted(() => {
   mealPlans: [] as Record<string, unknown>[],
   roomTypeOccupancies: [] as Record<string, unknown>[],
   settings: [] as Record<string, unknown>[],
+  auditFailure: false,
+  audits: [] as Record<string, unknown>[],
   /** Models the double pretends the generated client does not expose. */
   hiddenModels: [] as string[],
   /** Models whose reads the double makes fail, to exercise the error paths. */
@@ -197,7 +199,11 @@ vi.doMock("@/lib/prisma", () => {
             (room) => room.id === where.id_hotelId.id && room.hotelId === where.id_hotelId.hotelId
           ) ?? null,
       },
-      auditLog: { create: async () => ({ id: "audit-1" }) },
+      auditLog: { create: async ({ data }: { data: Record<string, unknown> }) => {
+        if (state.auditFailure) throw new Error("audit unavailable");
+        state.audits.push(data);
+        return { id: "audit-1", ...data };
+      } },
   };
 
   // Make the double behave like a generated client that may be stale or failing:
@@ -223,6 +229,19 @@ vi.doMock("@/lib/prisma", () => {
     },
   });
 
+  prismaDouble.$transaction = async (fn: (tx: typeof withFailures) => Promise<unknown>) => {
+    const settings = structuredClone(state.settings);
+    const occupancies = structuredClone(state.occupancyTypes);
+    const rates = structuredClone(state.roomTypeOccupancies);
+    const plans = structuredClone(state.mealPlans);
+    const audits = structuredClone(state.audits);
+    try { return await fn(withFailures); }
+    catch (error) {
+      state.settings = settings; state.occupancyTypes = occupancies;
+      state.roomTypeOccupancies = rates; state.mealPlans = plans; state.audits = audits;
+      throw error;
+    }
+  };
   return { prisma: withFailures };
 });
 
@@ -237,6 +256,8 @@ beforeEach(async () => {
   state.mealPlans = [];
   state.roomTypeOccupancies = [];
   state.settings = [];
+  state.auditFailure = false;
+  state.audits = [];
   state.hiddenModels = [];
   state.failingModels = {};
   state.tenant = {
@@ -341,6 +362,22 @@ describe("pricing configuration writes", () => {
     );
     expect(response.status).toBe(404);
     expect(state.roomTypeOccupancies).toHaveLength(0);
+  });
+
+  it("rolls pricing settings back when audit persistence fails, then records a successful retry", async () => {
+    const patch = () => pricingRoute.PATCH(new Request("http://localhost:3000/api/pricing", {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ useWeekendPricing: true }),
+    }));
+    state.auditFailure = true;
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try { expect((await patch()).status).toBe(500); } finally { spy.mockRestore(); }
+    expect(state.settings).toHaveLength(0);
+    expect(state.audits).toHaveLength(0);
+    state.auditFailure = false;
+    expect((await patch()).status).toBe(200);
+    expect(state.settings[0]).toMatchObject({ hotelId: "hotel-a", useWeekendPricing: true });
+    expect(state.audits).toEqual([expect.objectContaining({ hotelId: "hotel-a", action: "PRICING_SETTINGS_UPDATED" })]);
   });
 
   it("refuses to switch occupancy pricing on without a single rate", async () => {

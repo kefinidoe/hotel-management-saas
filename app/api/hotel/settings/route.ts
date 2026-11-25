@@ -124,22 +124,16 @@ export async function PATCH(req: Request) {
   }
 
   try {
-    const before = await prisma.hotel.findUnique({
-      where: { id: tenant.hotelId },
-      select: { currency: true },
-    });
-    const currencyChanges =
-      updateData.currency !== undefined && before?.currency !== updateData.currency;
-
-    // A currency change re-denominates the property. The subscription is still
-    // billed in KES or USD, so when the operation currency crosses that line the
-    // stored amount must be re-priced in the same transaction -- otherwise the
-    // hotel would keep paying the old currency's amount while every screen
-    // quotes the new one.
-    const subscriptionModel = (prisma as any).subscription;
-    const canTouchSubscription = typeof subscriptionModel?.findUnique === "function";
-
-    const applyChange = async (tx: any) => {
+    // Keep the read, hotel/subscription updates and required audit in one
+    // serializable transaction. Concurrent currency edits must not make the
+    // subscription decision using an obsolete hotel currency.
+    const { updated, repriced } = await prisma.$transaction(async (tx) => {
+      const before = await tx.hotel.findUnique({
+        where: { id: tenant.hotelId },
+        select: { currency: true },
+      });
+      const currencyChanges =
+        updateData.currency !== undefined && before?.currency !== updateData.currency;
       const updated = await tx.hotel.update({
         where: { id: tenant.hotelId },
         data: updateData,
@@ -158,7 +152,7 @@ export async function PATCH(req: Request) {
       });
 
       let repriced: { currency: string; amount: number } | null = null;
-      if (currencyChanges && canTouchSubscription) {
+      if (currencyChanges) {
         const sub = await tx.subscription.findUnique({ where: { hotelId: tenant.hotelId } });
         if (sub) {
           const nextCurrency = normaliseBillingCurrency(updated.currency);
@@ -168,7 +162,7 @@ export async function PATCH(req: Request) {
               billingInterval: sub.billingInterval ?? BillingInterval.MONTHLY,
               currency: nextCurrency,
             });
-            if (nextAmount !== null && nextAmount !== sub.amount) {
+            if (nextAmount !== null) {
               await tx.subscription.update({
                 where: { hotelId: tenant.hotelId },
                 data: { currency: nextCurrency, amount: nextAmount },
@@ -193,15 +187,12 @@ export async function PATCH(req: Request) {
             subscriptionRepriced: repriced,
           },
         },
-        tx
+        tx,
+        { strict: true }
       );
 
       return { updated, repriced };
-    };
-
-    const { updated, repriced } = canTouchSubscription
-      ? await prisma.$transaction(applyChange)
-      : { ...(await applyChange(prisma)), repriced: null };
+    }, { isolationLevel: "Serializable" });
 
     return NextResponse.json({
       hotel: updated,

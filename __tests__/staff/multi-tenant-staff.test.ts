@@ -357,9 +357,15 @@ vi.doMock("@/lib/prisma", () => ({
           },
         },
         hotelMembership: {
+          findFirst: async ({ where }: any) => {
+            const membership = db.memberships.get(where.id);
+            return membership?.hotelId === where.hotelId ? membership : null;
+          },
           count: async ({ where }: any) => Array.from(db.memberships.values()).filter((membership) =>
             (!where?.hotelId || membership.hotelId === where.hotelId) &&
-            (!where?.status || membership.status === where.status)
+            (!where?.status || membership.status === where.status) &&
+            (!where?.role || membership.role === where.role) &&
+            (!where?.id?.not || membership.id !== where.id.not)
           ).length,
           create: async ({ data }: any) => {
             const id = data.id || `mem-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -375,7 +381,16 @@ vi.doMock("@/lib/prisma", () => ({
             db.memberships.set(where.id, updated);
             return { ...updated, user: db.users.get(updated.userId) };
           },
+          delete: async ({ where }: any) => {
+            const existing = db.memberships.get(where.id);
+            db.memberships.delete(where.id);
+            return existing;
+          },
         },
+        reservation: { count: async ({ where }: any) => db.reservations.filter((r) => r.hotelId === where.hotelId && r.createdById === where.createdById).length },
+        payment: { count: async ({ where }: any) => db.payments.filter((p) => p.hotelId === where.hotelId && p.cashierId === where.cashierId).length },
+        housekeepingTask: { count: async ({ where }: any) => db.housekeeping.filter((h) => h.hotelId === where.hotelId && h.assigneeId === where.assigneeId).length },
+        maintenanceTicket: { count: async ({ where }: any) => db.maintenance.filter((m) => m.hotelId === where.hotelId && m.assigneeId === where.assigneeId).length },
       };
       return await arg(tx);
     },
