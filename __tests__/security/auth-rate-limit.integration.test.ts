@@ -287,7 +287,7 @@ suite("real Postgres HTTP authentication rate limiting", () => {
 
     // This grant change is confined to the verified disposable cluster. Restore
     // it even when an assertion fails so the other test workflows remain usable.
-    const deniedRequest = { ...request, idempotencyKey: `ci-denied-${instanceTag}` };
+    const deniedRequest = { ...request, reference: `ci-denied-ref-${instanceTag}`, idempotencyKey: `ci-denied-${instanceTag}` };
     await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
     try {
       const denied = await post(base, "/api/payments", deniedRequest, headers);
@@ -301,7 +301,7 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     const retriedAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='PAYMENT_RECORDED' AND "entityId"=$2`, [fixtures.hotels.a.id, retried.id]);
     expect(retriedAudit.rows[0].count).toBe(1);
 
-    const concurrentRequest = { ...request, amount: 50, idempotencyKey: `ci-race-${instanceTag}` };
+    const concurrentRequest = { ...request, amount: 50, reference: `ci-race-ref-${instanceTag}`, idempotencyKey: `ci-race-${instanceTag}` };
     const concurrent = await Promise.all([post(base, "/api/payments", concurrentRequest, headers), post(base, "/api/payments", concurrentRequest, headers)]);
     expect(concurrent.some(response => response.status === 201)).toBe(true);
     expect(concurrent.every(response => [201, 409].includes(response.status))).toBe(true);
