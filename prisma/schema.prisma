@@ -512,6 +512,8 @@ model Payment {
   reference       String? // e.g. M-Pesa code
   normalizedReference String? // maintained by the database trigger
   reversalOfId    String? @unique
+  reversalOf      Payment? @relation("PaymentReversal", fields: [reversalOfId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  reversal        Payment? @relation("PaymentReversal")
   reversalReason  String?
   idempotencyKey  String?
   requestFingerprint String?
