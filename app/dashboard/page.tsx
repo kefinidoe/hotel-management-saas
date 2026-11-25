@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import Decimal from "decimal.js";
 import { requirePageRole } from "@/lib/page-auth";
 import { hasRole, ROLE_GROUPS } from "@/lib/permissions";
 import Link from "next/link";
@@ -94,10 +95,7 @@ export default async function DashboardPage() {
   ]);
 
   const todaysRevenue = Number(revenueAgg._sum.amount ?? 0);
-  const outstandingBalance = Math.max(
-    0,
-    Number(allItemsAgg._sum.total ?? 0) - Number(allPaymentsAgg._sum.amount ?? 0)
-  );
+  const outstandingBalance = Decimal.max(0, new Decimal(String(allItemsAgg._sum.total ?? 0)).minus(String(allPaymentsAgg._sum.amount ?? 0))).toNumber();
   const occupancyPct = totalRooms > 0 ? Math.round((occupiedRooms / totalRooms) * 100) : 0;
 
   const kpis = [
