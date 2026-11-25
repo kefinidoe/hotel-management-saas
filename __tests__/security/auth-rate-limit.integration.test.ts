@@ -396,6 +396,28 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     const removalAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE action='STAFF_MEMBERSHIP_REMOVED' AND "hotelId"=$1 AND "entityId"=$2`, [fixtures.hotels.a.id, staff.id]);
     expect(removalAudit.rows[0].count).toBe(1);
 
+    // Denying the room update after the ticket write proves both operations
+    // roll back together. The grant change is limited to the disposable cluster.
+    const ticketTitle = `CI repair ${instanceTag}`;
+    const createTicket = () => post(base, "/api/maintenance", { title: ticketTitle, roomId: room.id, takeOutOfService: true }, headers);
+    await db.query('REVOKE UPDATE ON "Room" FROM hotel_saas_runtime');
+    try { expect((await createTicket()).status).toBe(500); }
+    finally { await db.query('GRANT UPDATE ON "Room" TO hotel_saas_runtime'); }
+    const noTicket = await db.query('SELECT count(*)::int AS count FROM "MaintenanceTicket" WHERE "hotelId"=$1 AND title=$2', [fixtures.hotels.a.id, ticketTitle]);
+    expect(noTicket.rows[0].count).toBe(0);
+    const ticket = await expectJson(await createTicket(), 201);
+    const finishTicket = () => pricingRequest("PUT", `/api/maintenance/${ticket.id}`, { status: "COMPLETED" });
+    await db.query('REVOKE UPDATE ON "Room" FROM hotel_saas_runtime');
+    try { expect((await finishTicket()).status).toBe(500); }
+    finally { await db.query('GRANT UPDATE ON "Room" TO hotel_saas_runtime'); }
+    const rollbackTicket = await db.query(`SELECT (SELECT count(*) FROM "MaintenanceTicket" WHERE id=$1 AND status='OPEN')::int AS count,
+      (SELECT count(*) FROM "Room" WHERE id=$2 AND status='MAINTENANCE')::int AS attempts`, [ticket.id, room.id]);
+    expect(rollbackTicket.rows[0]).toMatchObject({ count: 1, attempts: 1 });
+    await expectJson(await finishTicket(), 200);
+    const finishedTicket = await db.query(`SELECT (SELECT count(*) FROM "MaintenanceTicket" WHERE id=$1 AND status='COMPLETED')::int AS count,
+      (SELECT count(*) FROM "Room" WHERE id=$2 AND status='AVAILABLE')::int AS attempts`, [ticket.id, room.id]);
+    expect(finishedTicket.rows[0]).toMatchObject({ count: 1, attempts: 1 });
+
     const settingsFingerprint = async () => (await db.query(`SELECT md5(
       (SELECT row_to_json(h)::text FROM "Hotel" h WHERE id=$1) ||
       COALESCE((SELECT row_to_json(s)::text FROM "Subscription" s WHERE "hotelId"=$1), '')
