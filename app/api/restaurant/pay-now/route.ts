@@ -1,16 +1,16 @@
 import { validateIdempotencyKey, validateFinancialMutation, payNowSchema } from "@/lib/financial-mutation-validation";
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
+import Decimal from "decimal.js";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 import { paymentReferenceExists } from "@/lib/payment-reference";
 import {
-  cartTotal,
+  cartTotalExact,
   computePosFingerprint,
   type CartLine,
   readCartRequest,
   resolveCartLines,
-  round2,
 } from "@/lib/restaurant";
 import { deductRecipeStock } from "@/lib/recipe-stock";
 import { syncLowStockAlerts } from "@/lib/notifications";
@@ -191,7 +191,7 @@ export async function POST(req: Request) {
           // business-rule failures are definitively rolled back and safe to clear.
           throw new PosNotCommittedError(error instanceof Error ? error.message : "The order items are invalid.");
         }
-        const total = cartTotal(lines);
+        const total = cartTotalExact(lines);
 
         const method = await tx.paymentMethod.findUnique({
           where: { id_hotelId: { id: paymentMethodId, hotelId } },
@@ -228,7 +228,7 @@ export async function POST(req: Request) {
               quantity: line.quantity,
               unitPrice: line.unitPrice,
               taxRate: 0,
-              total: round2(line.quantity * line.unitPrice),
+              total: new Decimal(String(line.unitPrice)).mul(line.quantity).toDecimalPlaces(2).toFixed(2),
             },
           });
         }
@@ -238,7 +238,7 @@ export async function POST(req: Request) {
             hotelId,
             folioId: folio.id,
             paymentMethodId: method.id,
-            amount: total,
+            amount: total.toFixed(2),
             reference: reference || null,
             idempotencyKey,
             requestFingerprint: fingerprint,
@@ -253,7 +253,7 @@ export async function POST(req: Request) {
           guestName: guest.fullName,
           folioId: folio.id,
           paymentId: payment.id,
-          total,
+          total: total.toNumber(),
           method: method.name,
         };
       },

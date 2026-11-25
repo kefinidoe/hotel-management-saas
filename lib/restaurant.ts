@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 import { roundMoney } from "@/lib/billing";
+import Decimal from "decimal.js";
 
 export type CartLine = {
   menuItemId: string;
@@ -97,22 +98,28 @@ export async function resolveCartLines(
       throw new Error("One or more menu items are unavailable. Refresh the menu and try again.");
     }
 
-    const unitPrice = Number(item.price);
-    if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+    let unitPrice: Decimal;
+    try { unitPrice = new Decimal(item.price === null ? 0 : String(item.price)); }
+    catch { throw new Error(`The configured price for "${item.name}" is invalid.`); }
+    if (!unitPrice.isFinite() || unitPrice.isNegative()) {
       throw new Error(`The configured price for "${item.name}" is invalid.`);
     }
 
     return {
       menuItemId: item.id,
       name: item.name,
-      unitPrice: round2(unitPrice),
+      unitPrice: unitPrice.toDecimalPlaces(2).toNumber(),
       quantity: line.quantity,
     };
   });
 }
 
+export function cartTotalExact(lines: CartLine[]): Decimal {
+  return lines.reduce((sum, line) => sum.plus(new Decimal(String(line.unitPrice)).mul(line.quantity)), new Decimal(0)).toDecimalPlaces(2);
+}
+
 export function cartSubtotal(lines: CartLine[]): number {
-  return round2(lines.reduce((sum, line) => sum + line.unitPrice * line.quantity, 0));
+  return cartTotalExact(lines).toNumber();
 }
 
 export function cartTotal(lines: CartLine[]): number {
