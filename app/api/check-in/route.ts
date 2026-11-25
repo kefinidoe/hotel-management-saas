@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { getTenantFromRoute, requireModule } from "@/lib/authz";
 import { CheckInError, executeCheckIn } from "@/lib/stay-service";
+import { paymentReferenceSchema } from "@/lib/financial-mutation-validation";
 import { paymentReferenceExists } from "@/lib/payment-reference";
 
 export async function POST(req: Request) {
@@ -20,6 +21,10 @@ export async function POST(req: Request) {
   const reservationId = typeof body?.reservationId === "string" ? body.reservationId.trim() : "";
   if (!reservationId) {
     return NextResponse.json({ error: "Reservation is required." }, { status: 400 });
+  }
+
+  if (!paymentReferenceSchema.safeParse(body?.reference).success) {
+    return NextResponse.json({ error: "Invalid payment reference." }, { status: 400 });
   }
 
   try {

@@ -5,15 +5,15 @@ ALTER TABLE "Payment" ADD COLUMN "reversalOfId" TEXT;
 ALTER TABLE "Payment" ADD COLUMN "reversalReason" TEXT;
 
 WITH unique_references AS (
-  SELECT "hotelId", upper(btrim(reference)) AS normalized
+  SELECT "hotelId", NULLIF(translate(translate(reference, ' ' || chr(9) || chr(10) || chr(11) || chr(12) || chr(13), ''), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '') AS normalized
   FROM "Payment"
-  WHERE NULLIF(btrim(reference), '') IS NOT NULL
-  GROUP BY "hotelId", upper(btrim(reference))
+  WHERE NULLIF(translate(translate(reference, ' ' || chr(9) || chr(10) || chr(11) || chr(12) || chr(13), ''), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '') IS NOT NULL
+  GROUP BY "hotelId", NULLIF(translate(translate(reference, ' ' || chr(9) || chr(10) || chr(11) || chr(12) || chr(13), ''), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '')
   HAVING count(*) = 1
 )
 UPDATE "Payment" p SET "normalizedReference" = u.normalized
 FROM unique_references u
-WHERE p."hotelId" = u."hotelId" AND upper(btrim(p.reference)) = u.normalized;
+WHERE p."hotelId" = u."hotelId" AND NULLIF(translate(translate(p.reference, ' ' || chr(9) || chr(10) || chr(11) || chr(12) || chr(13), ''), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '') = u.normalized;
 
 CREATE UNIQUE INDEX "Payment_hotel_normalized_reference_unique"
   ON "Payment" ("hotelId", "normalizedReference") WHERE "normalizedReference" IS NOT NULL;
@@ -26,11 +26,11 @@ ALTER TABLE "Payment" ADD CONSTRAINT "Payment_reversal_original_fkey"
 -- The unique index arbitrates concurrent new references.
 CREATE FUNCTION "payment_reference_normalize"() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  NEW."normalizedReference" := NULLIF(upper(btrim(NEW.reference)), '');
+  NEW."normalizedReference" := NULLIF(translate(translate(NEW.reference, ' ' || chr(9) || chr(10) || chr(11) || chr(12) || chr(13), ''), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '');
   IF NEW."normalizedReference" IS NOT NULL AND EXISTS (
     SELECT 1 FROM "Payment" p WHERE p."hotelId" = NEW."hotelId"
       AND p."normalizedReference" IS NULL
-      AND NULLIF(upper(btrim(p.reference)), '') = NEW."normalizedReference"
+      AND NULLIF(translate(translate(p.reference, ' ' || chr(9) || chr(10) || chr(11) || chr(12) || chr(13), ''), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '') = NEW."normalizedReference"
       AND p.id <> NEW.id
   ) THEN
     RAISE EXCEPTION 'Payment reference is already used by this hotel'

@@ -201,17 +201,21 @@ suite("real Postgres HTTP authentication rate limiting", () => {
       await db.query(`CREATE TABLE "Payment" (id text PRIMARY KEY, "hotelId" text NOT NULL, reference text, amount numeric(10,2) NOT NULL, status text NOT NULL, UNIQUE(id,"hotelId"))`);
       await db.query(`INSERT INTO "Payment" (id,"hotelId",reference,amount,status) VALUES
         ('duplicate-a','fixture-hotel',' Receipt ',10,'COMPLETED'),('duplicate-b','fixture-hotel','receipt',20,'COMPLETED'),
-        ('unique-c','fixture-hotel',' Other ',30,'COMPLETED'),('blank-d','fixture-hotel',' ',40,'COMPLETED')`);
+        ('unique-c','fixture-hotel',E' \tOt her ',30,'COMPLETED'),('blank-d','fixture-hotel',' ',40,'COMPLETED')`);
       const migration = readFileSync(path.resolve("prisma/migrations/20261116120000_payment_reference_reversals/migration.sql"), "utf8");
       await db.query(migration);
       const preserved = await db.query(`SELECT count(*)::int AS count FROM "Payment" WHERE
         (id='duplicate-a' AND reference=' Receipt ' AND amount=10 AND status='COMPLETED' AND "normalizedReference" IS NULL) OR
         (id='duplicate-b' AND reference='receipt' AND amount=20 AND status='COMPLETED' AND "normalizedReference" IS NULL) OR
-        (id='unique-c' AND reference=' Other ' AND amount=30 AND status='COMPLETED' AND "normalizedReference"='OTHER') OR
+        (id='unique-c' AND reference=E' \tOt her ' AND amount=30 AND status='COMPLETED' AND "normalizedReference"='OTHER') OR
         (id='blank-d' AND reference=' ' AND amount=40 AND status='COMPLETED' AND "normalizedReference" IS NULL)`);
       expect(preserved.rows[0].count).toBe(4);
-      const duplicateGroup = await db.query(`SELECT count(*)::int AS count FROM (SELECT "hotelId",upper(btrim(reference)) FROM "Payment" WHERE NULLIF(btrim(reference),'') IS NOT NULL GROUP BY "hotelId",upper(btrim(reference)) HAVING count(*)>1) duplicates`);
-      expect(duplicateGroup.rows[0].count).toBe(1);
+      await db.query(`INSERT INTO "Payment" (id,"hotelId",reference,amount,status) VALUES ('trigger-e','other-hotel',E' \tOt her ',50,'COMPLETED')`);
+      const same = await db.query(`SELECT count(*)::int AS count FROM "Payment" WHERE id IN ('unique-c','trigger-e') AND "normalizedReference"='OTHER'`);
+      expect(same.rows[0].count).toBe(2);
+      const { DUPLICATE_REFERENCE_SQL } = await import("../../scripts/payment-reference-duplicates.mjs");
+      const duplicateGroup = await db.query(DUPLICATE_REFERENCE_SQL);
+      expect(duplicateGroup.rows).toEqual([{ hotelId: "fixture-hotel", reference: "RECEIPT", paymentIds: ["duplicate-a", "duplicate-b"] }]);
     } finally { await db.query("ROLLBACK"); }
     const report = spawnSync(process.execPath, ["scripts/payment-reference-duplicates.mjs"], {
       cwd: process.cwd(), encoding: "utf8", env: { ...process.env,
@@ -311,7 +315,7 @@ suite("real Postgres HTTP authentication rate limiting", () => {
 
     const receipt = `CI-RECEIPT-${instanceTag}`;
     const duplicateRequests = [0, 1].map(i => post(base, "/api/payments", {
-      ...request, amount: 25, reference: i ? `  ${receipt.toLowerCase()}  ` : receipt,
+      ...request, amount: 25, reference: i ? ` \t${receipt.toLowerCase().slice(0, 5)} \t${receipt.toLowerCase().slice(5)}  ` : receipt,
       idempotencyKey: `ci-receipt-${instanceTag}-${i}`,
     }, headers));
     const duplicateResponses = await Promise.all(duplicateRequests);
@@ -319,8 +323,11 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     const receiptPayment = await duplicateResponses.find(r => r.status === 201)!.json();
     expect((await duplicateResponses.find(r => r.status === 409)!.json()).error).toMatch(/reference/i);
     for (let i = 0; i < 2; i++) {
-      await expectJson(await post(base, "/api/payments", { ...request, amount: 10, reference: "  ", idempotencyKey: `ci-blank-${instanceTag}-${i}` }, headers), 201);
+      const blank = await expectJson(await post(base, "/api/payments", { ...request, amount: 10, reference: i ? " \t " : "  ", idempotencyKey: `ci-blank-${instanceTag}-${i}` }, headers), 201);
+      const stored = await db.query('SELECT count(*)::int AS count FROM "Payment" WHERE id=$1 AND reference IS NULL AND "normalizedReference" IS NULL', [blank.id]);
+      expect(stored.rows[0].count).toBe(1);
     }
+    expect((await post(base, "/api/payments", { ...request, reference: "référence", idempotencyKey: `ci-invalid-ref-${instanceTag}` }, headers)).status).toBe(400);
 
     const checkOutUrl = `/api/reservations/${stay.id}/check-out`;
     await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');

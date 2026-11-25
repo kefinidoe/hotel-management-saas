@@ -7,6 +7,13 @@ import { parseMoney } from "@/lib/billing";
 const id = z.string().trim().min(1).max(200);
 const text = z.string().max(2000);
 const optionalText = text.nullable().optional();
+// Tab is explicitly allowed as reference whitespace; other control characters
+// are rejected. Empty/whitespace-only references are optional and may repeat.
+export const paymentReferenceSchema = z.string().refine(value => {
+  if (!/^[\x20-\x7e\t]*$/.test(value)) return false;
+  if (/^[ \t]*$/.test(value)) return true;
+  return value.length >= 4 && value.length <= 40;
+}, "Reference must be 4–40 printable ASCII characters (tabs are allowed), or blank.").nullable().optional();
 const numberInput = z.union([z.number().finite(), z.string().trim().min(1).max(100)]);
 const money = numberInput.superRefine((value, ctx) => {
   try { parseMoney(value, "Amount"); }
@@ -45,9 +52,9 @@ const paymentMoney = numberInput.refine(value => {
     return amount.isFinite() && amount.gt(0) && amount.decimalPlaces() <= 2 && amount.lte("99999999.99");
   } catch { return false; }
 }, "Enter a positive amount with at most two decimal places.");
-export const paymentSchema = z.strictObject({ folioId: id, paymentMethodId: id, amount: paymentMoney, reference: optionalText, idempotencyKey: z.string().optional(), cashierId: z.unknown().optional(), hotelId: z.unknown().optional(), status: z.unknown().optional() });
+export const paymentSchema = z.strictObject({ folioId: id, paymentMethodId: id, amount: paymentMoney, reference: paymentReferenceSchema, idempotencyKey: z.string().optional(), cashierId: z.unknown().optional(), hotelId: z.unknown().optional(), status: z.unknown().optional() });
 export const chargeSchema = z.strictObject({ ...posCommon, folioId: id });
-export const payNowSchema = z.strictObject({ ...posCommon, paymentMethodId: id, customerName: optionalText, customerPhone: optionalText, reference: optionalText });
+export const payNowSchema = z.strictObject({ ...posCommon, paymentMethodId: id, customerName: optionalText, customerPhone: optionalText, reference: paymentReferenceSchema });
 export const expenseSchema = z.strictObject({ category: id, description: z.string().trim().min(1).max(2000), amount: money, paymentMethod: id, supplier: optionalText, reference: optionalText, status: z.enum(["PENDING_APPROVAL", "APPROVED", "REJECTED"]).optional() });
 export const expenseReviewSchema = z.strictObject({ status: z.enum(["APPROVED", "REJECTED"]) });
 export const purchaseSchema = z.strictObject({ inventoryItemId: id, supplier: id, invoiceNumber: optionalText, quantity: decimal(2, false, "9999999999.99"), unitCost: decimal(4, true, "999999.9999"), purchaseDate: date.optional() }).superRefine((body, ctx) => {

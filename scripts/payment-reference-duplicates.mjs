@@ -7,10 +7,10 @@ import { loadEnvFiles } from "./env-file.mjs";
 import { assertDatabaseTarget } from "./database-target-safety.mjs";
 import { sanitiseForPgTools } from "./pg-url.mjs";
 
-export const DUPLICATE_REFERENCE_SQL = `SELECT "hotelId", upper(btrim(reference)) AS reference,
+export const DUPLICATE_REFERENCE_SQL = `SELECT "hotelId", NULLIF(translate(translate(reference, ' ' || chr(9) || chr(10) || chr(11) || chr(12) || chr(13), ''), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '') AS reference,
   array_agg(id ORDER BY id) AS "paymentIds"
-  FROM "Payment" WHERE NULLIF(btrim(reference), '') IS NOT NULL
-  GROUP BY "hotelId", upper(btrim(reference)) HAVING count(*) > 1
+  FROM "Payment" WHERE NULLIF(translate(translate(reference, ' ' || chr(9) || chr(10) || chr(11) || chr(12) || chr(13), ''), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '') IS NOT NULL
+  GROUP BY "hotelId", NULLIF(translate(translate(reference, ' ' || chr(9) || chr(10) || chr(11) || chr(12) || chr(13), ''), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '') HAVING count(*) > 1
   ORDER BY "hotelId", reference`;
 
 async function main() {

@@ -7,7 +7,7 @@ export async function paymentReferenceExists(hotelId: string, reference: string)
   if (!reference.trim()) return false;
   const rows = await prisma.$queryRaw<Array<{ found: boolean }>>`
     SELECT EXISTS (SELECT 1 FROM "Payment" WHERE "hotelId" = ${hotelId}
-      AND NULLIF(upper(btrim(reference)), '') = NULLIF(upper(btrim(${reference})), '')) AS found
+      AND NULLIF(translate(translate(reference, ' ' || chr(9) || chr(10) || chr(11) || chr(12) || chr(13), ''), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '') = NULLIF(translate(translate(${reference}, ' ' || chr(9) || chr(10) || chr(11) || chr(12) || chr(13), ''), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '')) AS found
   `;
   return rows[0]?.found === true;
 }
