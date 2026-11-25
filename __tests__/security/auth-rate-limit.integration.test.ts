@@ -196,8 +196,9 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     // temporary table in the already-verified disposable PostgreSQL cluster.
     await db.query("BEGIN");
     try {
-      await db.query('SET LOCAL search_path = pg_temp');
-      await db.query(`CREATE TEMP TABLE "Payment" (id text PRIMARY KEY, "hotelId" text NOT NULL, reference text, amount numeric(10,2) NOT NULL, status text NOT NULL, UNIQUE(id,"hotelId"))`);
+      await db.query('CREATE SCHEMA ci_payment_migration_fixture');
+      await db.query('SET LOCAL search_path = ci_payment_migration_fixture');
+      await db.query(`CREATE TABLE "Payment" (id text PRIMARY KEY, "hotelId" text NOT NULL, reference text, amount numeric(10,2) NOT NULL, status text NOT NULL, UNIQUE(id,"hotelId"))`);
       await db.query(`INSERT INTO "Payment" (id,"hotelId",reference,amount,status) VALUES
         ('duplicate-a','fixture-hotel',' Receipt ',10,'COMPLETED'),('duplicate-b','fixture-hotel','receipt',20,'COMPLETED'),
         ('unique-c','fixture-hotel',' Other ',30,'COMPLETED'),('blank-d','fixture-hotel',' ',40,'COMPLETED')`);
