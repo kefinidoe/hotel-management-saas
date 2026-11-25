@@ -313,6 +313,17 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     const raceCounts = await db.query(`SELECT (SELECT count(*) FROM "Payment" WHERE "hotelId"=$1 AND "idempotencyKey"=$2)::int AS count, (SELECT count(*) FROM "AuditLog" WHERE "hotelId"=$1 AND action='PAYMENT_RECORDED' AND "entityId"=$3)::int AS attempts`, [fixtures.hotels.a.id, concurrentRequest.idempotencyKey, winner.id]);
     expect(raceCounts.rows[0]).toMatchObject({ count: 1, attempts: 1 });
 
+    const decimalFolio = randomUUID();
+    await db.query(`INSERT INTO "Folio" (id,"hotelId","guestId","updatedAt") SELECT $1,"hotelId","guestId",now() FROM "Folio" WHERE id=$2 AND "hotelId"=$3`, [decimalFolio, checkedIn.folioId, fixtures.hotels.a.id]);
+    await db.query(`INSERT INTO "FolioItem" (id,"folioId",type,description,quantity,"unitPrice",total) VALUES ($1,$2,'OTHER_SERVICE','decimal test',1,0.30,0.30)`, [randomUUID(), decimalFolio]);
+    for (const [i, amount] of ["0.1", "0.2"].entries()) {
+      await expectJson(await post(base, "/api/payments", { ...request, folioId: decimalFolio, amount, reference: null, idempotencyKey: `ci-decimal-${instanceTag}-${i}` }, headers), 201);
+    }
+    const decimalBalance = await expectJson(await fetch(base + `/api/folios/${decimalFolio}`, { headers }), 200);
+    expect(decimalBalance.balance).toBe(0);
+    expect((await post(base, "/api/payments", { ...request, folioId: decimalFolio, amount: "0.01", reference: null, idempotencyKey: `ci-overpay-${instanceTag}` }, headers)).status).toBe(400);
+    expect((await post(base, "/api/payments", { ...request, folioId: decimalFolio, amount: "0.001", reference: null, idempotencyKey: `ci-third-decimal-${instanceTag}` }, headers)).status).toBe(400);
+
     const receipt = `CI-RECEIPT-${instanceTag.slice(0, 12)}`;
     const duplicateRequests = [0, 1].map(i => post(base, "/api/payments", {
       ...request, amount: 25, reference: i ? ` \t${receipt.toLowerCase().slice(0, 5)} \t${receipt.toLowerCase().slice(5)}  ` : receipt,
@@ -362,9 +373,18 @@ suite("real Postgres HTTP authentication rate limiting", () => {
       SELECT $1,$2,$3,$4,10,'COMPLETED',id FROM "User" WHERE email=$5`, [otherPayment, otherHotel, otherFolio, otherMethod, receptionist.email]);
     expect((await reverse(otherPayment, `ci-cross-${instanceTag}`)).status).toBe(404);
     const beforeReverse = await expectJson(await fetch(base + `/api/folios/${checkedIn.folioId}`, { headers }), 200);
+    await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
+    try {
+      expect((await reverse(receiptPayment.id, `ci-reversal-audit-denied-${instanceTag}`)).status).toBe(500);
+    } finally { await db.query('GRANT INSERT ON "AuditLog" TO hotel_saas_runtime'); }
+    const noReversal = await db.query('SELECT count(*)::int AS count FROM "Payment" WHERE "hotelId"=$1 AND "reversalOfId"=$2', [fixtures.hotels.a.id, receiptPayment.id]);
+    expect(noReversal.rows[0].count).toBe(0);
     const reversalRace = await Promise.all([0, 1].map(i => reverse(receiptPayment.id, `ci-reverse-${instanceTag}-${i}`)));
     expect(reversalRace.map(r => r.status).sort()).toEqual([201, 409]);
-    const reversal = await reversalRace.find(r => r.status === 201)!.json();
+    const winningIndex = reversalRace.findIndex(r => r.status === 201);
+    const reversal = await reversalRace[winningIndex].json();
+    const reversalReplay = await expectJson(await reverse(receiptPayment.id, `ci-reverse-${instanceTag}-${winningIndex}`), 200);
+    expect(reversalReplay.id).toBe(reversal.id);
     expect((await reverse(reversal.id, `ci-reverse-reversal-${instanceTag}`)).status).toBe(409);
     const afterReverse = await expectJson(await fetch(base + `/api/folios/${checkedIn.folioId}`, { headers }), 200);
     expect(afterReverse.isClosed).toBe(true);
