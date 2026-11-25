@@ -49,7 +49,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       if (existing) throw new ReversalError("This payment has already been reversed.", 409);
       const sum = await tx.payment.aggregate({ where: { hotelId, folioId: original.folioId, status: "COMPLETED" }, _sum: { amount: true } });
       const paid = sum._sum.amount ?? new Prisma.Decimal(0);
-      if (paid.minus(original.amount).lt(0)) throw new ReversalError("This reversal would make the total paid negative.", 409);
+      const paidAfter = paid.minus(original.amount);
+      if (paidAfter.lt(0)) throw new ReversalError("This reversal would make the total paid negative.", 409);
+      const charges = await tx.folioItem.aggregate({ where: { folioId: original.folioId, folio: { hotelId } }, _sum: { total: true } });
+      const balanceAfter = (charges._sum.total ?? new Prisma.Decimal(0)).minus(paidAfter);
       const reversed = await tx.payment.create({ data: {
         hotelId, folioId: original.folioId, paymentMethodId: original.paymentMethodId,
         amount: original.amount.negated(), reference: null, reversalOfId: original.id,
@@ -57,7 +60,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         status: "COMPLETED", cashierId: tenant.userId,
       } });
       await recordAudit({ hotelId, userId: tenant.userId, action: "PAYMENT_REVERSED", entity: "Payment", entityId: reversed.id,
-        metadata: { originalPaymentId: original.id, folioId: original.folioId, reason, amount: reversed.amount.toFixed(2), folioWasClosed: original.folio.isClosed } }, tx, { strict: true });
+        metadata: { originalPaymentId: original.id, folioId: original.folioId, reason, amount: reversed.amount.toFixed(2), folioWasClosed: original.folio.isClosed, balanceAfter: balanceAfter.toFixed(2) } }, tx, { strict: true });
       return { id: reversed.id, replay: false, folioId: original.folioId, closed: original.folio.isClosed };
     }, { isolationLevel: "Serializable", timeout: 10_000 });
     return NextResponse.json(result, { status: result.replay ? 200 : 201 });

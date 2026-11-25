@@ -371,7 +371,7 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     expect(afterReverse.balance).toBe(beforeReverse.balance + 25);
     const reversalRow = await db.query(`SELECT count(*)::int AS count FROM "Payment" WHERE id=$1 AND "reversalOfId"=$2 AND amount=-25 AND reference IS NULL`, [reversal.id, receiptPayment.id]);
     expect(reversalRow.rows[0].count).toBe(1);
-    const reversalAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='PAYMENT_REVERSED' AND "entityId"=$2 AND metadata->>'folioWasClosed'='true'`, [fixtures.hotels.a.id, reversal.id]);
+    const reversalAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='PAYMENT_REVERSED' AND "entityId"=$2 AND metadata->>'folioWasClosed'='true' AND (metadata->>'balanceAfter')::numeric=$3`, [fixtures.hotels.a.id, reversal.id, afterReverse.balance]);
     expect(reversalAudit.rows[0].count).toBe(1);
     await expectJson(await fetch(base + "/api/guests", { headers }), 200);
     await expectJson(await fetch(base + "/api/inventory", { headers }), 200);

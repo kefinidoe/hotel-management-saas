@@ -39,5 +39,5 @@ BEGIN
   RETURN NEW;
 END;
 $$;
-CREATE TRIGGER "Payment_reference_normalize" BEFORE INSERT OR UPDATE OF reference, "hotelId", "normalizedReference"
+CREATE TRIGGER "Payment_reference_normalize" BEFORE INSERT OR UPDATE
   ON "Payment" FOR EACH ROW EXECUTE FUNCTION "payment_reference_normalize"();
