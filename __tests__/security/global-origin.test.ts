@@ -53,6 +53,7 @@ const reviewed = [
   "POST api/menu",
   "POST api/menu/categories",
   "POST api/payments",
+  "POST api/payments/[id]/reverse",
   "POST api/pricing/[entity]",
   "POST api/pricing/room-rates",
   "POST api/profile/password",

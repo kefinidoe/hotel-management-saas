@@ -59,35 +59,37 @@ export async function POST(req: Request) {
   }
 
   const roomId = typeof body.roomId === "string" && body.roomId ? body.roomId : null;
-  if (roomId) {
-    const activeRoom = await prisma.room.findFirst({
-      where: { id: roomId, hotelId: tenant.hotelId, isActive: true },
-      select: { id: true },
-    });
-    if (!activeRoom) {
-      return NextResponse.json(
-        { error: "That room is no longer part of the active hotel inventory." },
-        { status: 400 }
-      );
+  const ticket = await prisma.$transaction(async (tx) => {
+    if (roomId) {
+      const activeRoom = await tx.room.findFirst({
+        where: { id: roomId, hotelId: tenant.hotelId, isActive: true },
+        select: { id: true },
+      });
+      if (!activeRoom) return null;
     }
-  }
-
-  const ticket = await prisma.maintenanceTicket.create({
-    data: {
-      hotelId: tenant.hotelId,
-      title: body.title,
-      description: body.description || null,
-      priority: body.priority || "normal",
-      roomId,
-      status: "OPEN",
-    },
-  });
-
-  if (roomId && body.takeOutOfService) {
-    await prisma.room.update({
-      where: { id_hotelId: { id: roomId, hotelId: tenant.hotelId } },
-      data: { status: "MAINTENANCE" },
+    const created = await tx.maintenanceTicket.create({
+      data: {
+        hotelId: tenant.hotelId,
+        title: body.title,
+        description: body.description || null,
+        priority: body.priority || "normal",
+        roomId,
+        status: "OPEN",
+      },
     });
+    if (roomId && body.takeOutOfService) {
+      await tx.room.update({
+        where: { id_hotelId: { id: roomId, hotelId: tenant.hotelId } },
+        data: { status: "MAINTENANCE" },
+      });
+    }
+    return created;
+  }, { isolationLevel: "Serializable" });
+  if (!ticket) {
+    return NextResponse.json(
+      { error: "That room is no longer part of the active hotel inventory." },
+      { status: 400 }
+    );
   }
 
   // Whoever raised the ticket knows about it; the point of the notification is

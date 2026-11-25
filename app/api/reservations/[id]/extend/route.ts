@@ -4,7 +4,7 @@ import { reservationExtensionSchema } from "@/lib/reservation-extension-validati
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
-import { folioTotals, roundMoney, stayNights } from "@/lib/billing";
+import { folioTotalsExact, roundMoney, stayNights } from "@/lib/billing";
 import { prisma } from "@/lib/prisma";
 import { formatDisplayDate } from "@/lib/dates";
 import { AuditPersistenceError, recordAudit } from "@/lib/audit";
@@ -282,11 +282,11 @@ export async function POST(
           { strict: true }
         );
 
-        const currentTotals = folioTotals(
-          folio.items.map((item) => Number(item.total)),
-          folio.payments.map((payment) => Number(payment.amount))
+        const currentTotals = folioTotalsExact(
+          folio.items.map((item) => String(item.total)),
+          folio.payments.map((payment) => String(payment.amount))
         );
-        const required = roundMoney(currentTotals.required + additionalCharge);
+        const required = currentTotals.required.plus(String(additionalCharge));
 
         return {
           extensionId: extension.id,
@@ -296,9 +296,9 @@ export async function POST(
           nightlyRate: rooms[0].nightlyRate,
           currency,
           previousCheckOut: reservation.checkOutDate.toISOString(),
-          required,
-          paid: currentTotals.paid,
-          balance: roundMoney(required - currentTotals.paid),
+          required: required.toNumber(),
+          paid: currentTotals.paid.toNumber(),
+          balance: required.minus(currentTotals.paid).toNumber(),
           checkOutDate: newCheckOut.toISOString(),
           priceVersion: bookingVersion?.version ?? null,
         };

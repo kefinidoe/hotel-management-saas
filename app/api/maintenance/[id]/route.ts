@@ -52,19 +52,19 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
       },
     });
     if (updated.count !== 1) return null;
-    return tx.maintenanceTicket.findFirst({
+    const saved = await tx.maintenanceTicket.findFirst({
       where: { id, hotelId: tenant.hotelId },
     });
+    if (saved && body.status === "COMPLETED" && saved.roomId) {
+      await tx.room.update({
+        where: { id_hotelId: { id: saved.roomId, hotelId: tenant.hotelId } },
+        data: { status: "AVAILABLE" },
+      });
+    }
+    return saved;
   }, { isolationLevel: "Serializable" });
   if (!ticket) {
     return NextResponse.json({ error: "Choose an active staff member from this hotel." }, { status: 400 });
-  }
-
-  if (body.status === "COMPLETED" && ticket.roomId) {
-    await prisma.room.update({
-      where: { id_hotelId: { id: ticket.roomId, hotelId: tenant.hotelId } },
-      data: { status: "AVAILABLE" },
-    });
   }
 
   return NextResponse.json(ticket);

@@ -57,8 +57,8 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     })),
     folios: guest.folios.map((folio) => {
       const totals = folioTotals(
-        folio.items.map((item) => Number(item.total)),
-        folio.payments.map((payment) => Number(payment.amount))
+        folio.items.map((item) => String(item.total)),
+        folio.payments.map((payment) => String(payment.amount))
       );
       return {
         id: folio.id,

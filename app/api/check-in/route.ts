@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { getTenantFromRoute, requireModule } from "@/lib/authz";
 import { CheckInError, executeCheckIn } from "@/lib/stay-service";
+import { paymentReferenceSchema } from "@/lib/financial-mutation-validation";
+import { paymentReferenceExists } from "@/lib/payment-reference";
 
 export async function POST(req: Request) {
   const tenant = await getTenantFromRoute();
@@ -21,6 +23,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Reservation is required." }, { status: 400 });
   }
 
+  if (!paymentReferenceSchema.safeParse(body?.reference).success) {
+    return NextResponse.json({ error: "Invalid payment reference." }, { status: 400 });
+  }
+
   try {
     const result = await executeCheckIn(tenant, {
       reservationId,
@@ -36,6 +42,11 @@ export async function POST(req: Request) {
   } catch (error) {
     if (error instanceof CheckInError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
+    }
+    if (error instanceof Prisma.PrismaClientKnownRequestError && ["P2002", "P2034"].includes(error.code) && typeof body?.reference === "string") {
+      try {
+        if (await paymentReferenceExists(tenant.hotelId, body.reference)) return NextResponse.json({ error: "This payment reference has already been recorded for this hotel." }, { status: 409 });
+      } catch (lookupError) { console.error("Failed to inspect payment reference conflict:", lookupError); }
     }
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") {
       return NextResponse.json(

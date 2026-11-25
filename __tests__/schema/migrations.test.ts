@@ -187,9 +187,18 @@ describe("Prisma migration history", () => {
     // Prisma cannot express a partial expression index in schema.prisma. This
     // database-native safety constraint is verified separately below.
     expectedIndexes.add("AuditLog_manual_payment_reference_unique");
+    expectedIndexes.add("Payment_hotel_normalized_reference_unique");
     for (const name of expectedIndexes) if (!dbIndexes.has(name)) problems.push(`missing index: ${name}`);
     for (const name of dbIndexes) if (!expectedIndexes.has(name)) problems.push(`extra index: ${name}`);
     expect(problems).toEqual([]);
+  });
+
+  it("keeps normalized payment references unique per hotel only when present", async () => {
+    const result = await db.query<{ indexdef: string }>(`SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'Payment_hotel_normalized_reference_unique'`);
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0].indexdef).toMatch(/CREATE UNIQUE INDEX/i);
+    expect(result.rows[0].indexdef).toContain('"hotelId", "normalizedReference"');
+    expect(result.rows[0].indexdef).toMatch(/WHERE.*"normalizedReference" IS NOT NULL/i);
   });
 
   it("keeps the manual payment reference index unique and scoped to subscription payment audit records", async () => {

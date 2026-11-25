@@ -510,6 +510,11 @@ model Payment {
   paymentMethod   PaymentMethod @relation(fields: [paymentMethodId, hotelId], references: [id, hotelId])
   amount          Decimal       @db.Decimal(10, 2)
   reference       String? // e.g. M-Pesa code
+  normalizedReference String? // maintained by the database trigger
+  reversalOfId    String? @unique
+  reversalOf      Payment? @relation("PaymentReversal", fields: [reversalOfId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  reversal        Payment? @relation("PaymentReversal")
+  reversalReason  String?
   idempotencyKey  String?
   requestFingerprint String?
   status          PaymentStatus @default(COMPLETED)

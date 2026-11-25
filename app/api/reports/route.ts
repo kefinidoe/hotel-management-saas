@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
+import Decimal from "decimal.js";
 import { prisma } from "@/lib/prisma";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
-import { accommodationRequired, roundMoney, stayNights } from "@/lib/billing";
+import { accommodationRequired, folioTotalsExact, roundMoney, stayNights } from "@/lib/billing";
 import { getStockStatus } from "@/lib/inventory";
 import {
   getReportRange,
@@ -285,7 +286,7 @@ export async function GET(req: Request) {
       otherSpent: roundMoney(otherSpent),
       totalBilled: roundMoney(totalBilled),
       amountPaid: roundMoney(amountPaid),
-      balance: roundMoney(totalBilled - amountPaid),
+      balance: folioTotalsExact(reservation.folios.flatMap(f => f.items.map(i => String(i.total))), reservation.folios.flatMap(f => f.payments.map(p => String(p.amount)))).balance.toNumber(),
       folioCount: reservation.folios.length,
       foliosClosed:
         reservation.folios.length > 0 &&
@@ -314,12 +315,8 @@ export async function GET(req: Request) {
     amountPaid: roundMoney(
       bookingHistory.reduce((sum, booking) => sum + booking.amountPaid, 0)
     ),
-    balanceDue: roundMoney(
-      bookingHistory.reduce((sum, booking) => sum + Math.max(0, booking.balance), 0)
-    ),
-    creditBalance: roundMoney(
-      bookingHistory.reduce((sum, booking) => sum + Math.max(0, -booking.balance), 0)
-    ),
+    balanceDue: bookingHistory.reduce((sum, booking) => sum.plus(Decimal.max(0, String(booking.balance))), new Decimal(0)).toNumber(),
+    creditBalance: bookingHistory.reduce((sum, booking) => sum.plus(Decimal.max(0, new Decimal(String(booking.balance)).negated())), new Decimal(0)).toNumber(),
   };
 
   // A restaurant folio item is created only after a POS transaction succeeds.

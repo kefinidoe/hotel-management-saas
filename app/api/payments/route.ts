@@ -1,11 +1,13 @@
 import { validateIdempotencyKey, validateFinancialMutation, paymentSchema } from "@/lib/financial-mutation-validation";
 import { createHash } from "node:crypto";
+import Decimal from "decimal.js";
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { recordAudit } from "@/lib/audit";
+import { paymentReferenceExists } from "@/lib/payment-reference";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
-import { folioTotals, parseMoney, roundMoney } from "@/lib/billing";
+import { folioTotals, folioTotalsExact } from "@/lib/billing";
 
 class PaymentError extends Error {
   constructor(message: string, readonly status = 400) {
@@ -17,7 +19,7 @@ type PaymentRequest = {
   hotelId: string;
   folioId: string;
   paymentMethodId: string;
-  amount: number;
+  amount: Decimal;
   reference: string;
 };
 
@@ -53,7 +55,7 @@ function isSamePaymentRequest(
   return (
     existing.folioId === request.folioId &&
     existing.paymentMethodId === request.paymentMethodId &&
-    Math.abs(Number(existing.amount) - request.amount) < 0.001 &&
+    new Decimal(String(existing.amount)).eq(request.amount) &&
     (existing.reference ?? null) === (request.reference || null)
   );
 }
@@ -96,14 +98,12 @@ export async function POST(req: Request) {
     );
   }
 
-  let amount: number;
+  let amount: Decimal;
   try {
-    amount = parseMoney(body?.amount, "Payment amount");
-  } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Payment amount is invalid." },
-      { status: 400 }
-    );
+    amount = new Decimal(String(body.amount));
+    if (!amount.isFinite() || amount.lte(0) || amount.decimalPlaces() > 2 || amount.gt("99999999.99")) throw new Error("Payment amount is invalid.");
+  } catch {
+    return NextResponse.json({ error: "Payment amount is invalid." }, { status: 400 });
   }
 
   const rawIdempotencyKey =
@@ -168,8 +168,8 @@ export async function POST(req: Request) {
 
             // Return original recorded result without creating duplicate payment
             const totals = folioTotals(
-              folio.items.map((item) => Number(item.total)),
-              folio.payments.map((payment) => Number(payment.amount))
+              folio.items.map((item) => String(item.total)),
+              folio.payments.map((payment) => String(payment.amount))
             );
 
             return {
@@ -191,16 +191,16 @@ export async function POST(req: Request) {
           throw new PaymentError("That payment method is unavailable in this hotel.", 400);
         }
 
-        const totals = folioTotals(
-          folio.items.map((item) => Number(item.total)),
-          folio.payments.map((payment) => Number(payment.amount))
+        const totals = folioTotalsExact(
+          folio.items.map((item) => String(item.total)),
+          folio.payments.map((payment) => String(payment.amount))
         );
-        if (totals.balance <= 0) {
+        if (totals.balance.lte(0)) {
           throw new PaymentError("This folio has no outstanding balance.");
         }
-        if (amount > totals.balance) {
+        if (amount.gt(totals.balance)) {
           throw new PaymentError(
-            `Payment cannot exceed the outstanding balance of KSh ${totals.balance.toLocaleString()}.`
+            `Payment cannot exceed the outstanding balance of KSh ${totals.balance.toFixed(2)}.`
           );
         }
 
@@ -209,7 +209,7 @@ export async function POST(req: Request) {
             hotelId,
             folioId,
             paymentMethodId: method.id,
-            amount,
+            amount: amount.toFixed(2),
             reference: reference || null,
             idempotencyKey: idempotencyKey || null,
             requestFingerprint: idempotencyKey ? requestFingerprint : null,
@@ -227,14 +227,14 @@ export async function POST(req: Request) {
           action: "PAYMENT_RECORDED",
           entity: "Payment",
           entityId: payment.id,
-          metadata: { folioId, amount, reference: reference || null },
+          metadata: { folioId, amount: amount.toFixed(2), reference: reference || null },
         }, tx, { strict: true });
 
         return {
           id: payment.id,
-          required: totals.required,
-          paid: roundMoney(totals.paid + amount),
-          balance: roundMoney(totals.balance - amount),
+          required: totals.required.toNumber(),
+          paid: totals.paid.plus(amount).toNumber(),
+          balance: totals.balance.minus(amount).toNumber(),
         };
       },
       {
@@ -275,8 +275,8 @@ export async function POST(req: Request) {
               });
               if (winnerFolio) {
                 const totals = folioTotals(
-                  winnerFolio.items.map((item) => Number(item.total)),
-                  winnerFolio.payments.map((payment) => Number(payment.amount))
+                  winnerFolio.items.map((item) => String(item.total)),
+                  winnerFolio.payments.map((payment) => String(payment.amount))
                 );
                 return NextResponse.json(
                   {
@@ -294,12 +294,18 @@ export async function POST(req: Request) {
             console.error("Failed to resolve payment idempotency race:", lookupError);
           }
         }
+        try {
+          if (await paymentReferenceExists(hotelId, reference)) return NextResponse.json({ error: "This payment reference has already been recorded for this hotel." }, { status: 409 });
+        } catch (lookupError) { console.error("Failed to inspect payment reference conflict:", lookupError); }
         return NextResponse.json(
           { error: "A payment with this idempotency key was submitted concurrently. Refresh and verify." },
           { status: 409 }
         );
       }
       if (error.code === "P2034") {
+        try {
+          if (await paymentReferenceExists(hotelId, reference)) return NextResponse.json({ error: "This payment reference has already been recorded for this hotel." }, { status: 409 });
+        } catch (lookupError) { console.error("Failed to inspect payment reference conflict:", lookupError); }
         return NextResponse.json(
           { error: "The folio changed while recording payment. Refresh and try again." },
           { status: 409 }

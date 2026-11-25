@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { existsSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import path from "node:path";
@@ -192,6 +192,40 @@ suite("real Postgres HTTP authentication rate limiting", () => {
       return body;
     };
     await expectJson(await fetch(base + "/api/subscription", { headers }), 200);
+    // Rehearse the exact migration with legacy duplicate rows on an isolated
+    // temporary table in the already-verified disposable PostgreSQL cluster.
+    await db.query("BEGIN");
+    try {
+      await db.query('CREATE SCHEMA ci_payment_migration_fixture');
+      await db.query('SET LOCAL search_path = ci_payment_migration_fixture');
+      await db.query(`CREATE TABLE "Payment" (id text PRIMARY KEY, "hotelId" text NOT NULL, reference text, amount numeric(10,2) NOT NULL, status text NOT NULL, UNIQUE(id,"hotelId"))`);
+      await db.query(`INSERT INTO "Payment" (id,"hotelId",reference,amount,status) VALUES
+        ('duplicate-a','fixture-hotel',' Receipt ',10,'COMPLETED'),('duplicate-b','fixture-hotel','receipt',20,'COMPLETED'),
+        ('unique-c','fixture-hotel',E' \tOt her ',30,'COMPLETED'),('blank-d','fixture-hotel',' ',40,'COMPLETED')`);
+      const migration = readFileSync(path.resolve("prisma/migrations/20261116120000_payment_reference_reversals/migration.sql"), "utf8");
+      await db.query(migration);
+      const preserved = await db.query(`SELECT count(*)::int AS count FROM "Payment" WHERE
+        (id='duplicate-a' AND reference=' Receipt ' AND amount=10 AND status='COMPLETED' AND "normalizedReference" IS NULL) OR
+        (id='duplicate-b' AND reference='receipt' AND amount=20 AND status='COMPLETED' AND "normalizedReference" IS NULL) OR
+        (id='unique-c' AND reference=E' \tOt her ' AND amount=30 AND status='COMPLETED' AND "normalizedReference"='OTHER') OR
+        (id='blank-d' AND reference=' ' AND amount=40 AND status='COMPLETED' AND "normalizedReference" IS NULL)`);
+      expect(preserved.rows[0].count).toBe(4);
+      await db.query(`INSERT INTO "Payment" (id,"hotelId",reference,amount,status) VALUES ('trigger-e','other-hotel',E' \tOt her ',50,'COMPLETED')`);
+      const same = await db.query(`SELECT count(*)::int AS count FROM "Payment" WHERE id IN ('unique-c','trigger-e') AND "normalizedReference"='OTHER'`);
+      expect(same.rows[0].count).toBe(2);
+      const { DUPLICATE_REFERENCE_SQL } = await import("../../scripts/payment-reference-duplicates.mjs");
+      const duplicateGroup = await db.query(DUPLICATE_REFERENCE_SQL);
+      expect(duplicateGroup.rows).toEqual([{ hotelId: "fixture-hotel", reference: "RECEIPT", paymentIds: ["duplicate-a", "duplicate-b"] }]);
+    } finally { await db.query("ROLLBACK"); }
+    const report = spawnSync(process.execPath, ["scripts/payment-reference-duplicates.mjs"], {
+      cwd: process.cwd(), encoding: "utf8", env: { ...process.env,
+        SAAS_ENVIRONMENT: "saas", SAAS_DATABASE_IDENTIFIER: "hotel_saas_disposable_audit",
+        DATABASE_URL: "postgresql://postgres@127.0.0.1:55434/hotel_saas_disposable_audit",
+        DIRECT_URL: "postgresql://postgres@127.0.0.1:55434/hotel_saas_disposable_audit" },
+    });
+    expect(report.status, report.stderr).toBe(0);
+    expect(JSON.parse(report.stdout)).toEqual({ duplicateGroups: [] });
+    console.log(`::notice::Disposable duplicate-report output: ${JSON.stringify(JSON.parse(report.stdout))}`);
     const rate = await expectJson(await post(base, "/api/room-types", {
       name: `CI room ${instanceTag}`, baseRate: 1500, capacity: 2, mealPlan: "BED_ONLY",
     }, headers), 201);
@@ -257,7 +291,7 @@ suite("real Postgres HTTP authentication rate limiting", () => {
 
     // This grant change is confined to the verified disposable cluster. Restore
     // it even when an assertion fails so the other test workflows remain usable.
-    const deniedRequest = { ...request, idempotencyKey: `ci-denied-${instanceTag}` };
+    const deniedRequest = { ...request, reference: `ci-denied-ref-${instanceTag.slice(0, 12)}`, idempotencyKey: `ci-denied-${instanceTag}` };
     await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
     try {
       const denied = await post(base, "/api/payments", deniedRequest, headers);
@@ -271,13 +305,40 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     const retriedAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='PAYMENT_RECORDED' AND "entityId"=$2`, [fixtures.hotels.a.id, retried.id]);
     expect(retriedAudit.rows[0].count).toBe(1);
 
-    const concurrentRequest = { ...request, amount: 50, idempotencyKey: `ci-race-${instanceTag}` };
+    const concurrentRequest = { ...request, amount: 50, reference: `ci-race-ref-${instanceTag.slice(0, 12)}`, idempotencyKey: `ci-race-${instanceTag}` };
     const concurrent = await Promise.all([post(base, "/api/payments", concurrentRequest, headers), post(base, "/api/payments", concurrentRequest, headers)]);
     expect(concurrent.some(response => response.status === 201)).toBe(true);
     expect(concurrent.every(response => [201, 409].includes(response.status))).toBe(true);
     const winner = await expectJson(await post(base, "/api/payments", concurrentRequest, headers), 201);
     const raceCounts = await db.query(`SELECT (SELECT count(*) FROM "Payment" WHERE "hotelId"=$1 AND "idempotencyKey"=$2)::int AS count, (SELECT count(*) FROM "AuditLog" WHERE "hotelId"=$1 AND action='PAYMENT_RECORDED' AND "entityId"=$3)::int AS attempts`, [fixtures.hotels.a.id, concurrentRequest.idempotencyKey, winner.id]);
     expect(raceCounts.rows[0]).toMatchObject({ count: 1, attempts: 1 });
+
+    const decimalFolio = randomUUID();
+    await db.query(`INSERT INTO "Folio" (id,"hotelId","guestId","updatedAt") SELECT $1,"hotelId","guestId",now() FROM "Folio" WHERE id=$2 AND "hotelId"=$3`, [decimalFolio, checkedIn.folioId, fixtures.hotels.a.id]);
+    await db.query(`INSERT INTO "FolioItem" (id,"folioId",type,description,quantity,"unitPrice",total) VALUES ($1,$2,'OTHER_SERVICE','decimal test',1,0.30,0.30)`, [randomUUID(), decimalFolio]);
+    for (const [i, amount] of ["0.1", "0.2"].entries()) {
+      await expectJson(await post(base, "/api/payments", { ...request, folioId: decimalFolio, amount, reference: null, idempotencyKey: `ci-decimal-${instanceTag}-${i}` }, headers), 201);
+    }
+    const decimalBalance = await expectJson(await fetch(base + `/api/folios/${decimalFolio}`, { headers }), 200);
+    expect(decimalBalance.balance).toBe(0);
+    expect((await post(base, "/api/payments", { ...request, folioId: decimalFolio, amount: "0.01", reference: null, idempotencyKey: `ci-overpay-${instanceTag}` }, headers)).status).toBe(400);
+    expect((await post(base, "/api/payments", { ...request, folioId: decimalFolio, amount: "0.001", reference: null, idempotencyKey: `ci-third-decimal-${instanceTag}` }, headers)).status).toBe(400);
+
+    const receipt = `CI-RECEIPT-${instanceTag.slice(0, 12)}`;
+    const duplicateRequests = [0, 1].map(i => post(base, "/api/payments", {
+      ...request, amount: 25, reference: i ? ` \t${receipt.toLowerCase().slice(0, 5)} \t${receipt.toLowerCase().slice(5)}  ` : receipt,
+      idempotencyKey: `ci-receipt-${instanceTag}-${i}`,
+    }, headers));
+    const duplicateResponses = await Promise.all(duplicateRequests);
+    expect(duplicateResponses.map(r => r.status).sort()).toEqual([201, 409]);
+    const receiptPayment = await duplicateResponses.find(r => r.status === 201)!.json();
+    expect((await duplicateResponses.find(r => r.status === 409)!.json()).error).toMatch(/reference/i);
+    for (let i = 0; i < 2; i++) {
+      const blank = await expectJson(await post(base, "/api/payments", { ...request, amount: 10, reference: i ? " \t " : "  ", idempotencyKey: `ci-blank-${instanceTag}-${i}` }, headers), 201);
+      const stored = await db.query('SELECT count(*)::int AS count FROM "Payment" WHERE id=$1 AND reference IS NULL AND "normalizedReference" IS NULL', [blank.id]);
+      expect(stored.rows[0].count).toBe(1);
+    }
+    expect((await post(base, "/api/payments", { ...request, reference: "référence", idempotencyKey: `ci-invalid-ref-${instanceTag}` }, headers)).status).toBe(400);
 
     const checkOutUrl = `/api/reservations/${stay.id}/check-out`;
     await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
@@ -296,6 +357,42 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     await expectJson(await post(base, checkOutUrl, { allowOutstandingBalance: true }, headers), 200);
     const checkoutAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='CHECK_OUT_WITH_BALANCE' AND "entityId"=$2`, [fixtures.hotels.a.id, stay.id]);
     expect(checkoutAudit.rows[0].count).toBe(1);
+
+    const reverse = (paymentId: string, key: string, cookie = owner) => post(base, `/api/payments/${paymentId}/reverse`, { reason: "Incorrect receipt", idempotencyKey: key }, { cookie });
+    const receptionist = await newAccount("reversal-receptionist");
+    await db.query(`INSERT INTO "HotelMembership" (id, "userId", "hotelId", role, status, "createdAt", "updatedAt")
+      SELECT $1, id, $2, 'RECEPTIONIST', 'ACTIVE', now(), now() FROM "User" WHERE email=$3`, [randomUUID(), fixtures.hotels.a.id, receptionist.email]);
+    const receptionistCookie = await signIn(receptionist);
+    expect((await reverse(receiptPayment.id, `ci-reception-${instanceTag}`, receptionistCookie)).status).toBe(403);
+    const otherHotel = randomUUID(), otherGuest = randomUUID(), otherFolio = randomUUID(), otherMethod = randomUUID(), otherPayment = randomUUID();
+    await db.query(`INSERT INTO "Hotel" (id,name,slug,"updatedAt") VALUES ($1,'Fictional other hotel',$2,now())`, [otherHotel, `ci-other-${instanceTag}`]);
+    await db.query(`INSERT INTO "Guest" (id,"hotelId","fullName","updatedAt") VALUES ($1,$2,'Fictional guest',now())`, [otherGuest, otherHotel]);
+    await db.query(`INSERT INTO "Folio" (id,"hotelId","guestId","updatedAt") VALUES ($1,$2,$3,now())`, [otherFolio, otherHotel, otherGuest]);
+    await db.query(`INSERT INTO "PaymentMethod" (id,"hotelId",name,"isActive") VALUES ($1,$2,'Fictional method',true)`, [otherMethod, otherHotel]);
+    await db.query(`INSERT INTO "Payment" (id,"hotelId","folioId","paymentMethodId",amount,status,"cashierId")
+      SELECT $1,$2,$3,$4,10,'COMPLETED',id FROM "User" WHERE email=$5`, [otherPayment, otherHotel, otherFolio, otherMethod, receptionist.email]);
+    expect((await reverse(otherPayment, `ci-cross-${instanceTag}`)).status).toBe(404);
+    const beforeReverse = await expectJson(await fetch(base + `/api/folios/${checkedIn.folioId}`, { headers }), 200);
+    await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
+    try {
+      expect((await reverse(receiptPayment.id, `ci-reversal-audit-denied-${instanceTag}`)).status).toBe(500);
+    } finally { await db.query('GRANT INSERT ON "AuditLog" TO hotel_saas_runtime'); }
+    const noReversal = await db.query('SELECT count(*)::int AS count FROM "Payment" WHERE "hotelId"=$1 AND "reversalOfId"=$2', [fixtures.hotels.a.id, receiptPayment.id]);
+    expect(noReversal.rows[0].count).toBe(0);
+    const reversalRace = await Promise.all([0, 1].map(i => reverse(receiptPayment.id, `ci-reverse-${instanceTag}-${i}`)));
+    expect(reversalRace.map(r => r.status).sort()).toEqual([201, 409]);
+    const winningIndex = reversalRace.findIndex(r => r.status === 201);
+    const reversal = await reversalRace[winningIndex].json();
+    const reversalReplay = await expectJson(await reverse(receiptPayment.id, `ci-reverse-${instanceTag}-${winningIndex}`), 200);
+    expect(reversalReplay.id).toBe(reversal.id);
+    expect((await reverse(reversal.id, `ci-reverse-reversal-${instanceTag}`)).status).toBe(409);
+    const afterReverse = await expectJson(await fetch(base + `/api/folios/${checkedIn.folioId}`, { headers }), 200);
+    expect(afterReverse.isClosed).toBe(true);
+    expect(afterReverse.balance).toBe(beforeReverse.balance + 25);
+    const reversalRow = await db.query(`SELECT count(*)::int AS count FROM "Payment" WHERE id=$1 AND "reversalOfId"=$2 AND amount=-25 AND reference IS NULL`, [reversal.id, receiptPayment.id]);
+    expect(reversalRow.rows[0].count).toBe(1);
+    const reversalAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action='PAYMENT_REVERSED' AND "entityId"=$2 AND metadata->>'folioWasClosed'='true' AND (metadata->>'balanceAfter')::numeric=$3`, [fixtures.hotels.a.id, reversal.id, afterReverse.balance]);
+    expect(reversalAudit.rows[0].count).toBe(1);
     await expectJson(await fetch(base + "/api/guests", { headers }), 200);
     await expectJson(await fetch(base + "/api/inventory", { headers }), 200);
     await expectJson(await fetch(base + "/api/reservations", { headers }), 200);
@@ -395,6 +492,28 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     expect((await expectJson(await pricingRequest("DELETE", staffUrl), 200)).mode).toBe("deleted");
     const removalAudit = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE action='STAFF_MEMBERSHIP_REMOVED' AND "hotelId"=$1 AND "entityId"=$2`, [fixtures.hotels.a.id, staff.id]);
     expect(removalAudit.rows[0].count).toBe(1);
+
+    // Denying the room update after the ticket write proves both operations
+    // roll back together. The grant change is limited to the disposable cluster.
+    const ticketTitle = `CI repair ${instanceTag}`;
+    const createTicket = () => post(base, "/api/maintenance", { title: ticketTitle, roomId: room.id, takeOutOfService: true }, headers);
+    await db.query('REVOKE UPDATE ON "Room" FROM hotel_saas_runtime');
+    try { expect((await createTicket()).status).toBe(500); }
+    finally { await db.query('GRANT UPDATE ON "Room" TO hotel_saas_runtime'); }
+    const noTicket = await db.query('SELECT count(*)::int AS count FROM "MaintenanceTicket" WHERE "hotelId"=$1 AND title=$2', [fixtures.hotels.a.id, ticketTitle]);
+    expect(noTicket.rows[0].count).toBe(0);
+    const ticket = await expectJson(await createTicket(), 201);
+    const finishTicket = () => pricingRequest("PUT", `/api/maintenance/${ticket.id}`, { status: "COMPLETED" });
+    await db.query('REVOKE UPDATE ON "Room" FROM hotel_saas_runtime');
+    try { expect((await finishTicket()).status).toBe(500); }
+    finally { await db.query('GRANT UPDATE ON "Room" TO hotel_saas_runtime'); }
+    const rollbackTicket = await db.query(`SELECT (SELECT count(*) FROM "MaintenanceTicket" WHERE id=$1 AND status='OPEN')::int AS count,
+      (SELECT count(*) FROM "Room" WHERE id=$2 AND status='MAINTENANCE')::int AS attempts`, [ticket.id, room.id]);
+    expect(rollbackTicket.rows[0]).toMatchObject({ count: 1, attempts: 1 });
+    await expectJson(await finishTicket(), 200);
+    const finishedTicket = await db.query(`SELECT (SELECT count(*) FROM "MaintenanceTicket" WHERE id=$1 AND status='COMPLETED')::int AS count,
+      (SELECT count(*) FROM "Room" WHERE id=$2 AND status='AVAILABLE')::int AS attempts`, [ticket.id, room.id]);
+    expect(finishedTicket.rows[0]).toMatchObject({ count: 1, attempts: 1 });
 
     const settingsFingerprint = async () => (await db.query(`SELECT md5(
       (SELECT row_to_json(h)::text FROM "Hotel" h WHERE id=$1) ||

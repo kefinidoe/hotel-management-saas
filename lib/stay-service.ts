@@ -383,8 +383,8 @@ export async function executeCheckOut(tenant: TenantContext, options: CheckOutOp
       }
 
       const totals = folioTotals(
-        openFolio.items.map((item) => Number(item.total)),
-        openFolio.payments.map((payment) => Number(payment.amount))
+        openFolio.items.map((item) => String(item.total)),
+        openFolio.payments.map((payment) => String(payment.amount))
       );
 
       if (totals.balance > 0) {

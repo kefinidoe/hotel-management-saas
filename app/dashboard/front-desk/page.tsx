@@ -57,8 +57,8 @@ function serializeReservation(reservation: FrontDeskReservation) {
   const snapshot = reservation.priceSnapshots?.[0];
   const totals = openFolio
     ? folioTotals(
-        openFolio.items.map((item) => Number(item.total)),
-        openFolio.payments.map((payment) => Number(payment.amount))
+        openFolio.items.map((item) => String(item.total)),
+        openFolio.payments.map((payment) => String(payment.amount))
       )
     : (() => {
         const required = snapshot ? Number(snapshot.grandTotal) : accommodationRequired(
