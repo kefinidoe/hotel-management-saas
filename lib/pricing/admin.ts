@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
-import { parseMoney } from "@/lib/billing";
+import Decimal from "decimal.js";
+import { parseMoney, parseMoneyDecimal, roundMoneyDecimal } from "@/lib/billing";
 import { assertPricingDelegates } from "./delegates";
 
 /**
@@ -753,24 +754,52 @@ function daysOfWeek(value: unknown): number[] {
 }
 
 function adjustmentAmount(body: Record<string, unknown>): number {
-  const amount = Number(body.amount ?? 0);
-  if (!Number.isFinite(amount)) throw new PricingConfigError("Amount must be a number.");
+  const raw = body.amount ?? 0;
   if (body.adjustmentType === "PERCENT") {
-    if (amount < -100 || amount > 500) {
+    if (
+      (typeof raw !== "number" && typeof raw !== "string") ||
+      (typeof raw === "string" && raw.trim() === "") ||
+      (typeof raw === "number" && !Number.isFinite(raw))
+    ) {
+      throw new PricingConfigError("Amount must be a number.");
+    }
+    let parsed: Decimal;
+    try {
+      parsed = new Decimal(typeof raw === "string" ? raw.trim() : raw);
+    } catch {
+      throw new PricingConfigError("Amount must be a number.");
+    }
+    if (!parsed.isFinite()) throw new PricingConfigError("Amount must be a number.");
+    if (parsed.lt(-100) || parsed.gt(500)) {
       throw new PricingConfigError("A percentage adjustment must be between -100 and 500.");
     }
-    return Math.round(amount * 100) / 100;
+    return roundMoneyDecimal(parsed).toNumber();
   }
-  return parseMoney(amount, "Amount", { allowZero: true });
+  return parseMoneyDecimal(raw, "Amount", { allowZero: true }).toNumber();
 }
 
 function taxAmount(body: Record<string, unknown>): number {
-  const amount = Number(body.amount ?? 0);
-  if (!Number.isFinite(amount) || amount < 0) throw new PricingConfigError("Amount must be zero or more.");
-  if (body.basis === "PERCENT" && amount > 100) {
+  const raw = body.amount ?? 0;
+  if (
+    (typeof raw !== "number" && typeof raw !== "string") ||
+    (typeof raw === "string" && raw.trim() === "") ||
+    (typeof raw === "number" && !Number.isFinite(raw))
+  ) {
+    throw new PricingConfigError("Amount must be zero or more.");
+  }
+  let parsed: Decimal;
+  try {
+    parsed = new Decimal(typeof raw === "string" ? raw.trim() : raw);
+  } catch {
+    throw new PricingConfigError("Amount must be zero or more.");
+  }
+  if (!parsed.isFinite() || parsed.isNegative()) {
+    throw new PricingConfigError("Amount must be zero or more.");
+  }
+  if (body.basis === "PERCENT" && parsed.gt(100)) {
     throw new PricingConfigError("A percentage tax cannot exceed 100.");
   }
-  return Math.round(amount * 100) / 100;
+  return roundMoneyDecimal(parsed).toNumber();
 }
 
 async function assertRoomTypes(hotelId: string, roomTypeIds: unknown, client: Prisma.TransactionClient): Promise<string[]> {

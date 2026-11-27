@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
+import Decimal from "decimal.js";
+import { roundMoneyDecimal } from "@/lib/billing";
 import { inventoryRequest } from "@/lib/inventory-idempotency";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { getStockStatus } from "@/lib/inventory";
@@ -43,8 +45,10 @@ export async function GET(req: Request) {
         costPerUnit,
         supplier: i.supplier,
         isActive: i.isActive,
-        stockValue: Math.round(currentStock * costPerUnit),
-        status: getStockStatus(currentStock, reorderLevel),
+        stockValue: roundMoneyDecimal(
+          new Decimal(String(i.currentStock)).mul(String(i.costPerUnit))
+        ).toNumber(),
+        status: getStockStatus(String(i.currentStock), String(i.reorderLevel)),
       };
     })
   );
@@ -76,15 +80,29 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Unit must be g, ml, or pcs." }, { status: 400 });
   }
 
-  const opening = currentStock == null || currentStock === "" ? 0 : Number(currentStock);
-  if (!Number.isFinite(opening) || opening < 0 || !new Prisma.Decimal(opening).mul(100).isInteger()) {
+  const parseDecimalInput = (raw: unknown, fallback = "0"): Prisma.Decimal | null => {
+    if (raw == null || raw === "") return new Prisma.Decimal(fallback);
+    if (typeof raw !== "number" && typeof raw !== "string") return null;
+    const value = typeof raw === "string" ? raw.trim() : raw;
+    if (typeof value === "number" && !Number.isFinite(value)) return null;
+    if (value === "") return new Prisma.Decimal(fallback);
+    try {
+      const parsed = new Prisma.Decimal(value);
+      return parsed.isFinite() ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const opening = parseDecimalInput(currentStock);
+  if (!opening || opening.isNegative() || opening.decimalPlaces() > 2) {
     return NextResponse.json({ error: "Opening stock must be non-negative with at most two decimal places." }, { status: 400 });
   }
 
-  const reorder = reorderLevel == null || reorderLevel === "" ? 0 : Number(reorderLevel);
-  const cost = costPerUnit == null || costPerUnit === "" ? 0 : Number(costPerUnit);
-  if (!Number.isFinite(reorder) || reorder < 0 || !new Prisma.Decimal(reorder).mul(100).isInteger() ||
-      !Number.isFinite(cost) || cost < 0 || !new Prisma.Decimal(cost).mul(10000).isInteger()) {
+  const reorder = parseDecimalInput(reorderLevel);
+  const cost = parseDecimalInput(costPerUnit);
+  if (!reorder || reorder.isNegative() || reorder.decimalPlaces() > 2 ||
+      !cost || cost.isNegative() || cost.decimalPlaces() > 4) {
     return NextResponse.json({ error: "Reorder level or unit cost is invalid." }, { status: 400 });
   }
 
@@ -104,7 +122,7 @@ export async function POST(req: Request) {
         },
       });
 
-      if (opening > 0) {
+      if (opening.gt(0)) {
         await tx.stockMovement.create({
           data: {
             hotelId: tenant.hotelId,

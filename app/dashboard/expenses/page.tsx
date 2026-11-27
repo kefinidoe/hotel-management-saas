@@ -1,3 +1,5 @@
+import Decimal from "decimal.js";
+import { roundMoneyDecimal } from "@/lib/billing";
 import { DurableMutationProvider } from "@/components/recovery/DurableMutationProvider";
 import { prisma } from "@/lib/prisma";
 import ExpensesClient from "@/components/expenses/ExpensesClient";
@@ -48,9 +50,11 @@ export default async function ExpensesPage() {
   startOfMonth.setDate(1);
   startOfMonth.setHours(0, 0, 0, 0);
 
-  const approvedThisMonth = initialExpenses
-    .filter((e) => e.status === "APPROVED" && new Date(e.createdAt) >= startOfMonth)
-    .reduce((s, e) => s + e.amount, 0);
+  const approvedThisMonth = roundMoneyDecimal(
+    expenses
+      .filter((e) => e.status === "APPROVED" && e.createdAt >= startOfMonth)
+      .reduce((sum, e) => sum.plus(String(e.amount)), new Decimal(0))
+  ).toNumber();
   const pendingCount = initialExpenses.filter((e) => e.status === "PENDING_APPROVAL").length;
 
   return (

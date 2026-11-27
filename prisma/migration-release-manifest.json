@@ -134,6 +134,10 @@
     {
       "name": "20261116120000_payment_reference_reversals",
       "sha256": "52fbef7758bdf7e456b46ba7578bad15e1eb332aa9c8400a4fab25ca7458b527"
+    },
+    {
+      "name": "20261117120000_subscription_lifecycle_and_invoices",
+      "sha256": "87a4bb30ca85cd2f7b4312a18c93a04547e0bc146df28a76d69f6e9d495a93b0"
     }
   ]
 }

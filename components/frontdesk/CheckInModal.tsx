@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type { RoomStatus } from "@prisma/client";
 import { X } from "lucide-react";
-import { roundMoney } from "@/lib/billing";
+import Decimal from "decimal.js";
+import { roundMoneyDecimal } from "@/lib/billing";
 import { apiErrorMessage, requestJson } from "@/lib/client-api";
 import {
   blocksGuestPlacement,
@@ -55,7 +56,13 @@ export default function CheckInModal({
   const [newRoomId, setNewRoomId] = useState("");
   const [methods, setMethods] = useState<PaymentMethod[]>([]);
   const [methodId, setMethodId] = useState("");
-  const remaining = roundMoney(Math.max(0, reservation.requiredAmount - (reservation.paidAmount ?? 0)));
+  const remainingDecimal = Decimal.max(
+    0,
+    roundMoneyDecimal(
+      new Decimal(String(reservation.requiredAmount)).minus(String(reservation.paidAmount ?? 0))
+    )
+  );
+  const remaining = remainingDecimal.toNumber();
   const [amountPaid, setAmountPaid] = useState(String(remaining));
   const [reference, setReference] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -106,24 +113,38 @@ export default function CheckInModal({
     [rooms, reservation.roomId]
   );
 
-  const numericPaid = Number(amountPaid);
-  const previewPaid = Number.isFinite(numericPaid) && numericPaid >= 0 ? numericPaid : 0;
-  const balance = roundMoney(Math.max(0, remaining - previewPaid));
-  const paymentRequired = previewPaid > 0;
+  let paidDecimal: Decimal | null = null;
+  try {
+    const trimmed = amountPaid.trim();
+    if (trimmed !== "") {
+      const parsed = new Decimal(trimmed);
+      if (parsed.isFinite()) paidDecimal = parsed;
+    }
+  } catch {
+    paidDecimal = null;
+  }
+  const previewPaidDecimal = paidDecimal && paidDecimal.gte(0) ? paidDecimal : new Decimal(0);
+  const previewPaid = roundMoneyDecimal(previewPaidDecimal).toNumber();
+  const balance = Decimal.max(
+    0,
+    roundMoneyDecimal(remainingDecimal.minus(previewPaidDecimal))
+  ).toNumber();
+  const paymentRequired = previewPaidDecimal.gt(0);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setError(null);
 
-    if (!Number.isFinite(numericPaid) || numericPaid < 0) {
+    if (!paidDecimal || paidDecimal.isNegative()) {
       setError("Enter a valid amount paid.");
       return;
     }
-    if (numericPaid > remaining) {
+    if (paidDecimal.gt(remainingDecimal)) {
       setError("Amount paid cannot exceed the remaining amount.");
       return;
     }
-    if (numericPaid > 0 && !methodId) {
+    const numericPaid = roundMoneyDecimal(paidDecimal).toNumber();
+    if (paidDecimal.gt(0) && !methodId) {
       setError("Choose a payment method.");
       return;
     }

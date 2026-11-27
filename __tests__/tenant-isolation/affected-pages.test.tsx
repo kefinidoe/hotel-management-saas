@@ -54,12 +54,16 @@ vi.mock("@/components/inventory/InventoryClient", () => ({ default: () => null }
 vi.mock("@/components/rooms/RoomsClient", () => ({ default: () => null }));
 vi.mock("@/components/reservations/ReservationsClient", () => ({ default: () => null }));
 vi.mock("@/lib/room-status", () => ({ isBookableToday: () => true }));
-vi.mock("@/lib/billing", () => ({
-  accommodationRequired: () => 100,
-  folioTotals: () => ({ required: 100, paid: 0, balance: 100 }),
-  roundMoney: (value: number) => value,
-  stayNights: () => 1,
-}));
+vi.mock("@/lib/billing", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/billing")>();
+  return {
+    ...actual,
+    accommodationRequired: () => 100,
+    folioTotals: () => ({ required: 100, paid: 0, balance: 100 }),
+    roundMoney: (value: number) => value,
+    stayNights: () => 1,
+  };
+});
 vi.mock("@/lib/inventory", () => ({ getStockStatus: () => "IN_STOCK" }));
 
 import ExpensesPage from "@/app/dashboard/expenses/page";

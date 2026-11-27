@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { Plus, X } from "lucide-react";
+import Decimal from "decimal.js";
+import { roundMoneyDecimal } from "@/lib/billing";
 import { useDurableMutation } from "@/components/recovery/DurableMutationProvider";
 import type { InventoryItemRow } from "./InventoryClient";
 import { formatDisplayDate } from "@/lib/dates";
@@ -118,7 +120,16 @@ function RecordPurchaseModal({
   const { submit: submitDurable } = useDurableMutation();
 
   const item = inventoryItems.find((i) => i.id === inventoryItemId);
-  const totalCost = (Number(quantity) || 0) * (Number(unitCost) || 0);
+  let totalCost = 0;
+  try {
+    if (quantity.trim() && unitCost.trim()) {
+      totalCost = roundMoneyDecimal(
+        new Decimal(quantity.trim()).mul(unitCost.trim())
+      ).toNumber();
+    }
+  } catch {
+    totalCost = 0;
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();

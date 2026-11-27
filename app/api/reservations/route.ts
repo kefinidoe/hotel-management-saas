@@ -4,7 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { ROOM_BLOCKING_RESERVATION_STATUSES } from "@/lib/reservation-status";
 import { rangesOverlap } from "@/lib/dates";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
-import { accommodationRequired, parseMoney, roundMoney, stayNights } from "@/lib/billing";
+import Decimal from "decimal.js";
+import { accommodationRequiredExact, parseMoney, parseMoneyDecimal, roundMoneyDecimal, stayNights } from "@/lib/billing";
 import { hasRole } from "@/lib/permissions";
 import { nextReservationCode } from "@/lib/reservation-code";
 import { isMealPlan, isOccupancy, tariffPricesStay } from "@/lib/tariffs";
@@ -256,7 +257,14 @@ export async function POST(req: Request) {
             if (error instanceof CustomPricingError) throw new ReservationError(error.message);
             throw error;
           }
-          if (Math.abs(priceSnapshot.effectiveNightlyRate - body.approvedRate) > 0.000001) throw new ReservationError("The approved price changed. Refresh the quote and try again.", 409);
+          if (
+            new Decimal(String(priceSnapshot.effectiveNightlyRate))
+              .minus(String(body.approvedRate))
+              .abs()
+              .gt("0.000001")
+          ) {
+            throw new ReservationError("The approved price changed. Refresh the quote and try again.", 409);
+          }
           rate = priceSnapshot.nightlyRate;
         } else if (modular) {
           const roomType = await tx.roomType.findUnique({
@@ -298,7 +306,11 @@ export async function POST(req: Request) {
           // ReservationRoom.rate stays the per-night room cost (room + seasonal
           // adjustments); meals, extras and taxes live in the snapshot and are
           // written to the folio at check-in.
-          rate = roundMoney((priced.totals.room + priced.totals.adjustments) / priced.nights);
+          rate = roundMoneyDecimal(
+            new Decimal(String(priced.totals.room))
+              .plus(String(priced.totals.adjustments))
+              .div(priced.nights)
+          ).toNumber();
           if (rate <= 0) {
             throw new ReservationError(
               "This room has no nightly rate configured. Set a rate on the Pricing page before selling it."
@@ -320,17 +332,18 @@ export async function POST(req: Request) {
           }
 
           try {
-            rate = parseMoney(Number(tariff.baseRate), "Configured nightly rate", {
+            const rateDecimal = parseMoneyDecimal(String(tariff.baseRate), "Configured nightly rate", {
               allowZero: true,
             });
-            if (rate <= 0) {
+            if (rateDecimal.lte(0)) {
               // A hotel that never set a rate must not be able to give rooms away
               // silently: say what is wrong and where to fix it.
               throw new ReservationError(
                 "This room has no nightly rate configured. Set a rate on the Rooms page before selling it."
               );
             }
-            accommodationRequired([rate], nights, discount);
+            rate = rateDecimal.toNumber();
+            accommodationRequiredExact([rateDecimal], nights, discount);
           } catch (error) {
             if (error instanceof ReservationError) throw error;
             throw new ReservationError(
@@ -444,7 +457,9 @@ export async function POST(req: Request) {
           id: reservation.id,
           code: reservation.code,
           currency: pricingConfig?.currency ?? tenant.hotel.currency,
-          total: priceSnapshot ? priceSnapshot.totals.grandTotal : roundMoney(rate * nights - discount),
+          total: priceSnapshot
+            ? priceSnapshot.totals.grandTotal
+            : accommodationRequiredExact([rate], nights, discount).toNumber(),
           nightlyRate: rate,
           nights,
         };

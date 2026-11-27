@@ -1,3 +1,4 @@
+import Decimal from "decimal.js";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { currentPriceVersion } from "@/lib/pricing/versions";
@@ -5,7 +6,13 @@ import { recordAudit } from "@/lib/audit";
 import { ROOM_BLOCKING_RESERVATION_STATUSES } from "@/lib/reservation-status";
 import { rangesOverlap } from "@/lib/dates";
 import { blocksGuestPlacement, isBookableToday, ROOM_STATUS_LABELS } from "@/lib/room-status";
-import { accommodationRequired, folioTotals, parseMoney, roundMoney, stayNights } from "@/lib/billing";
+import {
+  accommodationRequiredExact,
+  folioTotalsExact,
+  parseMoneyDecimal,
+  roundMoneyDecimal,
+  stayNights,
+} from "@/lib/billing";
 import { hasRole } from "@/lib/permissions";
 import { requireRole, ROLE_GROUPS } from "@/lib/authz";
 import type { TenantContext } from "@/lib/tenant-context";
@@ -42,9 +49,9 @@ export async function executeCheckIn(tenant: TenantContext, options: CheckInOpti
     throw new CheckInError("Reservation is required.", 400);
   }
 
-  let amountPaid: number;
+  let amountPaid: Decimal;
   try {
-    amountPaid = parseMoney(options.amountPaid ?? 0, "Amount paid", { allowZero: true });
+    amountPaid = parseMoneyDecimal(options.amountPaid ?? 0, "Amount paid", { allowZero: true });
   } catch (error) {
     throw new CheckInError(error instanceof Error ? error.message : "Amount paid is invalid.", 400);
   }
@@ -159,19 +166,23 @@ export async function executeCheckIn(tenant: TenantContext, options: CheckInOpti
       }
 
       let nights: number;
-      let required: number;
-      const discount = Number(reservation.discount ?? 0);
+      let required: Decimal;
+      let discount: Decimal;
       const snapshot = currentPriceVersion(reservation.priceSnapshots);
       try {
+        discount = new Decimal(String(reservation.discount ?? 0));
+        if (!discount.isFinite() || discount.isNegative()) {
+          throw new Error("The reservation discount is invalid.");
+        }
         nights = stayNights(reservation.checkInDate, reservation.checkOutDate);
         required = snapshot
-          ? Number(snapshot.grandTotal)
-          : accommodationRequired(
-              reservation.rooms.map((room) => Number(room.rate)),
+          ? new Decimal(String(snapshot.grandTotal))
+          : accommodationRequiredExact(
+              reservation.rooms.map((room) => String(room.rate)),
               nights,
               discount
             );
-        if (!Number.isFinite(required) || required < 0) {
+        if (!required.isFinite() || required.isNegative()) {
           throw new Error("The reservation charges are invalid.");
         }
       } catch (error) {
@@ -181,20 +192,20 @@ export async function executeCheckIn(tenant: TenantContext, options: CheckInOpti
         );
       }
 
-      if (amountPaid > required) {
+      if (amountPaid.gt(required)) {
         throw new CheckInError(
-          `Amount paid cannot exceed the required amount of KSh ${required.toLocaleString()}.`,
+          `Amount paid cannot exceed the required amount of KSh ${required.toNumber().toLocaleString()}.`,
           400
         );
       }
 
       const method =
-        amountPaid > 0
+        amountPaid.gt(0)
           ? await tx.paymentMethod.findFirst({
               where: { id: paymentMethodId, hotelId, isActive: true },
             })
           : null;
-      if (amountPaid > 0 && !method) {
+      if (amountPaid.gt(0) && !method) {
         throw new CheckInError("Choose an active payment method for the check-in payment.", 400);
       }
 
@@ -206,19 +217,23 @@ export async function executeCheckIn(tenant: TenantContext, options: CheckInOpti
         },
       });
 
-      let postedTotal = 0;
+      let postedTotal = new Decimal(0);
       for (const reservationRoom of reservation.rooms) {
-        const unitPrice = Number(reservationRoom.rate);
+        const unitPriceDecimal = new Decimal(String(reservationRoom.rate));
+        const unitPrice = unitPriceDecimal.toNumber();
         const roomNumber =
           assignedRoom && reservationRoom.roomId === reservation.rooms[0]?.roomId
             ? assignedRoom.number
             : reservationRoom.room.number;
         // The stored nightly rate is rounded to cents, which can lose pennies
         // over a multi-night stay. The frozen total is authoritative.
-        const roomTotal = snapshot && reservation.rooms.length === 1
-          ? roundMoney(Number(snapshot.roomTotal) + Number(snapshot.adjustmentsTotal))
-          : roundMoney(unitPrice * nights);
-        postedTotal = roundMoney(postedTotal + roomTotal);
+        const roomTotal =
+          snapshot && reservation.rooms.length === 1
+            ? roundMoneyDecimal(
+                new Decimal(String(snapshot.roomTotal)).plus(String(snapshot.adjustmentsTotal))
+              )
+            : roundMoneyDecimal(unitPriceDecimal.mul(nights));
+        postedTotal = roundMoneyDecimal(postedTotal.plus(roomTotal));
         await tx.folioItem.create({
           data: {
             folioId: folio.id,
@@ -227,7 +242,7 @@ export async function executeCheckIn(tenant: TenantContext, options: CheckInOpti
             quantity: nights,
             unitPrice,
             taxRate: 0,
-            total: roomTotal,
+            total: roomTotal.toNumber(),
           },
         });
       }
@@ -247,8 +262,9 @@ export async function executeCheckIn(tenant: TenantContext, options: CheckInOpti
           // Inclusive tax lines are informational; the amount is already in the
           // room/meal charge. Exclusive tax lines still become folio charges.
           if (line.kind === "TAX" && line.label.endsWith(" (included)")) continue;
-          if (line.amount === 0) continue;
-          postedTotal = roundMoney(postedTotal + line.amount);
+          const lineAmount = roundMoneyDecimal(new Decimal(String(line.amount)));
+          if (lineAmount.isZero()) continue;
+          postedTotal = roundMoneyDecimal(postedTotal.plus(lineAmount));
           await tx.folioItem.create({
             data: {
               folioId: folio.id,
@@ -258,39 +274,41 @@ export async function executeCheckIn(tenant: TenantContext, options: CheckInOpti
               unitPrice: Number(line.unitPrice) || 0,
               // taxTotal is a monetary amount, not a percentage.
               taxRate: 0,
-              total: Number(line.amount),
+              total: lineAmount.toNumber(),
             },
           });
         }
       }
 
-      const billingDiscount = snapshot ? Number(snapshot.discountTotal) : discount;
-      if (billingDiscount > 0) {
-        postedTotal = roundMoney(postedTotal - billingDiscount);
+      const billingDiscount = snapshot
+        ? roundMoneyDecimal(String(snapshot.discountTotal))
+        : roundMoneyDecimal(discount);
+      if (billingDiscount.gt(0)) {
+        postedTotal = roundMoneyDecimal(postedTotal.minus(billingDiscount));
         await tx.folioItem.create({
           data: {
             folioId: folio.id,
             type: "DISCOUNT",
             description: "Discount",
             quantity: 1,
-            unitPrice: billingDiscount,
+            unitPrice: billingDiscount.toNumber(),
             taxRate: 0,
-            total: -billingDiscount,
+            total: billingDiscount.neg().toNumber(),
           },
         });
       }
 
-      if (!Number.isFinite(postedTotal) || Math.abs(roundMoney(postedTotal - required)) > 0.001) {
+      if (!postedTotal.isFinite() || postedTotal.minus(required).abs().gt("0.001")) {
         throw new CheckInError("The frozen price does not match the folio charges. Check-in was not completed.", 409);
       }
 
-      if (amountPaid > 0 && method) {
+      if (amountPaid.gt(0) && method) {
         await tx.payment.create({
           data: {
             hotelId,
             folioId: folio.id,
             paymentMethodId: method.id,
-            amount: amountPaid,
+            amount: amountPaid.toNumber(),
             reference: reference || null,
             status: "COMPLETED",
             cashierId: tenant.userId,
@@ -319,9 +337,9 @@ export async function executeCheckIn(tenant: TenantContext, options: CheckInOpti
 
       return {
         folioId: folio.id,
-        required,
-        paid: amountPaid,
-        balance: roundMoney(required - amountPaid),
+        required: required.toNumber(),
+        paid: amountPaid.toNumber(),
+        balance: roundMoneyDecimal(required.minus(amountPaid)).toNumber(),
       };
     },
     {
@@ -382,12 +400,17 @@ export async function executeCheckOut(tenant: TenantContext, options: CheckOutOp
         throw new CheckOutError("No open folio was found for this reservation.", 400);
       }
 
-      const totals = folioTotals(
+      const exactTotals = folioTotalsExact(
         openFolio.items.map((item) => String(item.total)),
         openFolio.payments.map((payment) => String(payment.amount))
       );
+      const totals = {
+        required: exactTotals.required.toNumber(),
+        paid: exactTotals.paid.toNumber(),
+        balance: exactTotals.balance.toNumber(),
+      };
 
-      if (totals.balance > 0) {
+      if (exactTotals.balance.gt(0)) {
         if (!allowOutstandingBalance) {
           throw new CheckOutError(
             `KSh ${totals.balance.toLocaleString()} is still due before checkout.`,
