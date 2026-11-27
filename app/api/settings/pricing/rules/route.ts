@@ -4,10 +4,11 @@ import { getTenantFromRoute, requireModule, requireRole, ROLE_GROUPS } from "@/l
 import { hasRole } from "@/lib/permissions";
 import { recordAudit } from "@/lib/audit";
 import { prisma } from "@/lib/prisma";
+import { hasMaxDecimalPlaces } from "@/lib/billing";
 import { readMutationBody, validateMutation } from "@/lib/staff-settings-validation";
 
 const amount = z.number().finite().min(0).max(99_999_999.99)
-  .refine((n) => Math.abs(n * 100 - Math.round(n * 100)) < 0.00001, "Use at most two decimal places.");
+  .refine((n) => hasMaxDecimalPlaces(n, 2), "Use at most two decimal places.");
 const code = z.string().trim().min(1).max(60).regex(/^[A-Za-z0-9_-]+$/, "Use letters, numbers, underscores or hyphens.");
 const label = z.string().trim().min(1).max(100);
 const id = z.string().trim().min(1).max(200);

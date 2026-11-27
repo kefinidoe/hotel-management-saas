@@ -1,3 +1,5 @@
+import Decimal from "decimal.js";
+import { roundMoneyDecimal } from "@/lib/billing";
 import { DurableMutationProvider } from "@/components/recovery/DurableMutationProvider";
 import { prisma } from "@/lib/prisma";
 import { getStockStatus } from "@/lib/inventory";
@@ -51,25 +53,39 @@ export default async function InventoryPage() {
       reorderLevel,
       costPerUnit,
       supplier: item.supplier,
-      stockValue: Math.round(currentStock * costPerUnit),
-      status: getStockStatus(currentStock, reorderLevel),
+      stockValue: roundMoneyDecimal(
+        new Decimal(String(item.currentStock)).mul(String(item.costPerUnit))
+      ).toNumber(),
+      status: getStockStatus(String(item.currentStock), String(item.reorderLevel)),
     };
   });
 
-  const todaysConsumption = Math.round(
+  const todaysConsumption = roundMoneyDecimal(
     todaysMovements.reduce(
       (sum, movement) =>
-        sum + Math.abs(Number(movement.quantity)) * Number(movement.inventoryItem.costPerUnit),
-      0
+        sum.plus(
+          new Decimal(String(movement.quantity))
+            .abs()
+            .mul(String(movement.inventoryItem.costPerUnit))
+        ),
+      new Decimal(0)
     )
-  );
-  const todaysPurchasesValue = Math.round(
-    todaysPurchases.reduce((sum, purchase) => sum + Number(purchase.totalCost), 0)
-  );
+  ).toNumber();
+  const todaysPurchasesValue = roundMoneyDecimal(
+    todaysPurchases.reduce(
+      (sum, purchase) => sum.plus(String(purchase.totalCost)),
+      new Decimal(0)
+    )
+  ).toNumber();
 
   const kpis = {
     totalItems: initialItems.length,
-    totalValue: initialItems.reduce((sum, item) => sum + item.stockValue, 0),
+    totalValue: roundMoneyDecimal(
+      items.reduce(
+        (sum, item) => sum.plus(roundMoneyDecimal(new Decimal(String(item.currentStock)).mul(String(item.costPerUnit)))),
+        new Decimal(0)
+      )
+    ).toNumber(),
     lowStock: initialItems.filter((item) => item.status === "LOW_STOCK" || item.status === "CRITICAL").length,
     outOfStock: initialItems.filter((item) => item.status === "OUT_OF_STOCK").length,
     todaysConsumption,

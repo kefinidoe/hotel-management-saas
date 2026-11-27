@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import Decimal from "decimal.js";
 import { getPlatformAdminFromRoute } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 import {
@@ -38,6 +39,8 @@ export async function GET(req: Request) {
     let missingCount = 0;
     let activeCount = 0;
     let pastDueCount = 0;
+    let restrictedCount = 0;
+    let readOnlyCount = 0;
     let suspendedCount = 0;
     let cancelledCount = 0;
     let expiringSoonCount = 0;
@@ -45,9 +48,18 @@ export async function GET(req: Request) {
     let payingCount = 0;
     let nonPayingOrTrialCount = 0;
 
-    const mrrByCurrency: Record<string, number> = { KES: 0, USD: 0 };
-    const arrByCurrency: Record<string, number> = { KES: 0, USD: 0 };
-    const pastDueAtRiskByCurrency: Record<string, number> = { KES: 0, USD: 0 };
+    const mrrByCurrencyDecimals: Record<string, Decimal> = {
+      KES: new Decimal(0),
+      USD: new Decimal(0),
+    };
+    const arrByCurrencyDecimals: Record<string, Decimal> = {
+      KES: new Decimal(0),
+      USD: new Decimal(0),
+    };
+    const pastDueAtRiskByCurrencyDecimals: Record<string, Decimal> = {
+      KES: new Decimal(0),
+      USD: new Decimal(0),
+    };
 
     const enriched = hotels.map((h) => {
       const sub = h.subscription;
@@ -66,14 +78,16 @@ export async function GET(req: Request) {
           };
 
       const currency = (sub?.currency || h.currency || "KES").toUpperCase();
-      if (mrrByCurrency[currency] === undefined) mrrByCurrency[currency] = 0;
-      if (arrByCurrency[currency] === undefined) arrByCurrency[currency] = 0;
-      if (pastDueAtRiskByCurrency[currency] === undefined) pastDueAtRiskByCurrency[currency] = 0;
+      if (!mrrByCurrencyDecimals[currency]) mrrByCurrencyDecimals[currency] = new Decimal(0);
+      if (!arrByCurrencyDecimals[currency]) arrByCurrencyDecimals[currency] = new Decimal(0);
+      if (!pastDueAtRiskByCurrencyDecimals[currency]) {
+        pastDueAtRiskByCurrencyDecimals[currency] = new Decimal(0);
+      }
 
-      const subAmount = sub ? Number(sub.amount) : 0;
+      const subAmountDecimal = sub ? new Decimal(String(sub.amount)) : new Decimal(0);
       const isYearly = sub?.billingInterval === "YEARLY";
-      const monthlyEquivalent = isYearly ? subAmount / 12 : subAmount;
-      const yearlyEquivalent = isYearly ? subAmount : subAmount * 12;
+      const monthlyEquivalent = isYearly ? subAmountDecimal.div(12) : subAmountDecimal;
+      const yearlyEquivalent = isYearly ? subAmountDecimal : subAmountDecimal.mul(12);
 
       // Aggregates
       if (evalResult.effectiveStatus === "TRIALING") {
@@ -81,18 +95,33 @@ export async function GET(req: Request) {
         nonPayingOrTrialCount++;
       } else if (evalResult.effectiveStatus === "ACTIVE") {
         activeCount++;
-        if (subAmount > 0) {
+        if (subAmountDecimal.gt(0)) {
           payingCount++;
-          mrrByCurrency[currency] = Math.round((mrrByCurrency[currency] + monthlyEquivalent) * 100) / 100;
-          arrByCurrency[currency] = Math.round((arrByCurrency[currency] + yearlyEquivalent) * 100) / 100;
+          mrrByCurrencyDecimals[currency] = mrrByCurrencyDecimals[currency].plus(monthlyEquivalent);
+          arrByCurrencyDecimals[currency] = arrByCurrencyDecimals[currency].plus(yearlyEquivalent);
         } else {
           nonPayingOrTrialCount++;
         }
       } else if (evalResult.effectiveStatus === "PAST_DUE" || evalResult.effectiveStatus === "TRIAL_EXPIRED") {
         pastDueCount++;
         nonPayingOrTrialCount++;
-        if (subAmount > 0 && evalResult.effectiveStatus === "PAST_DUE") {
-          pastDueAtRiskByCurrency[currency] = Math.round((pastDueAtRiskByCurrency[currency] + monthlyEquivalent) * 100) / 100;
+        if (subAmountDecimal.gt(0) && evalResult.effectiveStatus === "PAST_DUE") {
+          pastDueAtRiskByCurrencyDecimals[currency] =
+            pastDueAtRiskByCurrencyDecimals[currency].plus(monthlyEquivalent);
+        }
+      } else if (evalResult.effectiveStatus === "RESTRICTED") {
+        restrictedCount++;
+        nonPayingOrTrialCount++;
+        if (subAmountDecimal.gt(0)) {
+          pastDueAtRiskByCurrencyDecimals[currency] =
+            pastDueAtRiskByCurrencyDecimals[currency].plus(monthlyEquivalent);
+        }
+      } else if (evalResult.effectiveStatus === "READ_ONLY") {
+        readOnlyCount++;
+        nonPayingOrTrialCount++;
+        if (subAmountDecimal.gt(0)) {
+          pastDueAtRiskByCurrencyDecimals[currency] =
+            pastDueAtRiskByCurrencyDecimals[currency].plus(monthlyEquivalent);
         }
       } else if (evalResult.effectiveStatus === "SUSPENDED") {
         suspendedCount++;
@@ -192,12 +221,22 @@ export async function GET(req: Request) {
       return true;
     });
 
+    const roundCurrencyMap = (map: Record<string, Decimal>): Record<string, number> =>
+      Object.fromEntries(
+        Object.entries(map).map(([currency, total]) => [
+          currency,
+          total.toDecimalPlaces(2, Decimal.ROUND_HALF_UP).toNumber(),
+        ])
+      );
+
     return NextResponse.json({
       summary: {
         totalHotels: hotels.length,
         trialingCount,
         activeCount,
         pastDueCount,
+        restrictedCount,
+        readOnlyCount,
         suspendedCount,
         cancelledCount,
         missingCount,
@@ -205,13 +244,13 @@ export async function GET(req: Request) {
         overdueCount,
         payingCount,
         nonPayingOrTrialCount,
-        mrrByCurrency,
-        arrByCurrency,
-        pastDueAtRiskByCurrency,
+        mrrByCurrency: roundCurrencyMap(mrrByCurrencyDecimals),
+        arrByCurrency: roundCurrencyMap(arrByCurrencyDecimals),
+        pastDueAtRiskByCurrency: roundCurrencyMap(pastDueAtRiskByCurrencyDecimals),
         revenueReportingPolicy: {
           normalization: "Annual subscriptions normalized to monthly equivalents (amount / 12) for MRR.",
-          exclusions: "Trials (active or expired), suspended accounts, cancelled accounts, and $0 accounts are strictly excluded from paid MRR.",
-          pastDueHandling: "Past-due accounts are excluded from active paid MRR and reported under pastDueAtRiskByCurrency.",
+          exclusions: "Trials (active or expired), restricted, read-only, suspended, cancelled, and $0 accounts are strictly excluded from paid MRR.",
+          pastDueHandling: "Past-due, restricted, and read-only accounts are excluded from active paid MRR and reported under pastDueAtRiskByCurrency.",
           currencySeparation: "Revenues are tracked discretely by currency (KES, USD) without synthetic exchange rate conversions.",
         },
       },

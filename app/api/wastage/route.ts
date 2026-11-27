@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { Prisma, type WastageReason } from "@prisma/client";
+import Decimal from "decimal.js";
+import { roundMoneyDecimal } from "@/lib/billing";
 import { prisma } from "@/lib/prisma";
 import { syncLowStockAlerts } from "@/lib/notifications";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
@@ -52,9 +54,9 @@ export async function GET() {
       accountableName: wastage.accountableName ?? "Not recorded (legacy entry)",
       recordedByName: staffNamesByUserId.get(wastage.recordedById) ?? "Former hotel staff",
       createdAt: wastage.createdAt,
-      value: Math.round(
-        Number(wastage.quantity) * Number(wastage.inventoryItem.costPerUnit)
-      ),
+      value: roundMoneyDecimal(
+        new Decimal(String(wastage.quantity)).mul(String(wastage.inventoryItem.costPerUnit))
+      ).toNumber(),
     }))
   );
 }
@@ -82,7 +84,19 @@ export async function POST(req: Request) {
   }
   const inventoryItemId =
     typeof body.inventoryItemId === "string" ? body.inventoryItemId.trim() : "";
-  const quantity = Number(body.quantity);
+  let parsedQty: Prisma.Decimal | null = null;
+  try {
+    if (
+      (typeof body.quantity === "number" && Number.isFinite(body.quantity)) ||
+      (typeof body.quantity === "string" && body.quantity.trim() !== "")
+    ) {
+      parsedQty = new Prisma.Decimal(
+        typeof body.quantity === "string" ? body.quantity.trim() : body.quantity
+      );
+    }
+  } catch {
+    parsedQty = null;
+  }
   const reason = typeof body.reason === "string" ? body.reason.trim() : "";
   const department =
     typeof body.department === "string" ? body.department.trim() : "";
@@ -95,9 +109,10 @@ export async function POST(req: Request) {
 
   if (
     !inventoryItemId ||
-    !Number.isFinite(quantity) ||
-    quantity <= 0 ||
-    !new Prisma.Decimal(quantity).mul(100).isInteger() ||
+    !parsedQty ||
+    !parsedQty.isFinite() ||
+    parsedQty.lte(0) ||
+    parsedQty.decimalPlaces() > 2 ||
     !WASTAGE_REASONS.has(reason as WastageReason)
   ) {
     return NextResponse.json(
@@ -113,7 +128,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Accountable name or department is too long." }, { status: 400 });
   }
 
-  const amount = new Prisma.Decimal(quantity);
+  const amount = parsedQty;
   // The conditional decrement locks the item row and rechecks the balance in
   // the database. All related records use that same transaction and row lock.
   const response = await inventoryRequest(req, tenant.hotelId, tenant.userId, "WASTAGE", body, async (tx) => {

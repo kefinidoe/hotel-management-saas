@@ -4,10 +4,11 @@ import { getTenantFromRoute, requireModule, requireRole, ROLE_GROUPS } from "@/l
 import { recordAudit } from "@/lib/audit";
 import { prisma } from "@/lib/prisma";
 import { UNIVERSAL_MEAL_PLANS } from "@/lib/pricing";
+import { hasMaxDecimalPlaces } from "@/lib/billing";
 import { readMutationBody, validateMutation } from "@/lib/staff-settings-validation";
 
 const amount = z.number().finite().min(0).max(99_999_999.99)
-  .refine((value) => Math.abs(value * 100 - Math.round(value * 100)) < 0.00001, "At most two decimal places are allowed.");
+  .refine((value) => hasMaxDecimalPlaces(value, 2), "At most two decimal places are allowed.");
 const mealSchema = z.strictObject({
   mealPlan: z.enum(UNIVERSAL_MEAL_PLANS),
   adultSurcharge: amount,

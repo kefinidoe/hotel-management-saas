@@ -1,5 +1,7 @@
 import { strToU8, zipSync } from "fflate";
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
+import Decimal from "decimal.js";
+import { roundMoneyDecimal } from "@/lib/billing";
 import { HOTEL_TIMEZONE } from "@/lib/dates";
 import { BRAND_COLORS, PRODUCT_NAME } from "@/lib/brand";
 
@@ -641,7 +643,12 @@ export async function buildReportsPdf(data: ReportExportData) {
     inventory,
     "Highest Stock Usage and Wastage Cost",
     data.inventory.items
-      .map((item) => ({ label: item.name, value: item.usageCost + item.wastageCost }))
+      .map((item) => ({
+        label: item.name,
+        value: roundMoneyDecimal(
+          new Decimal(String(item.usageCost)).plus(String(item.wastageCost))
+        ).toNumber(),
+      }))
       .sort((a, b) => b.value - a.value),
     455,
     150

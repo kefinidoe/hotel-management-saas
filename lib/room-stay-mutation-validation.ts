@@ -2,6 +2,7 @@ import { z } from "zod";
 import { NextResponse } from "next/server";
 import { RoomStatus } from "@prisma/client";
 import { MEAL_PLANS } from "@/lib/tariffs";
+import { hasMaxDecimalPlaces } from "@/lib/billing";
 
 const id = z.string().trim().min(1).max(200);
 const optionalText = z.string().max(2000).nullable().optional();
@@ -16,7 +17,7 @@ const fields = {
   capacity: z.number().int().positive().max(1000).optional(),
   maxAdults: z.number().int().min(1).max(1000).optional(),
   maxChildren: z.number().int().min(0).max(1000).optional(),
-  extraAdultFee: rate.refine(value => value <= 99_999_999.99 && Math.abs(value * 100 - Math.round(value * 100)) < 0.00001, "Amount must fit currency precision and range.").optional(),
+  extraAdultFee: rate.refine(value => value <= 99_999_999.99 && hasMaxDecimalPlaces(value, 2), "Amount must fit currency precision and range.").optional(),
   mealPlan: z.enum(MEAL_PLANS).nullable().optional(),
 };
 export const roomTypeCreateSchema = z.strictObject(fields);

@@ -94,18 +94,26 @@ export async function PATCH(
   }
 
   if (body.newQuantity !== undefined) {
-    const afterNumber = Number(body.newQuantity);
-    const expectedNumber = Number(body.expectedQuantity);
     const expectedVersion = body.expectedVersion;
-    if (body.newQuantity === null || body.expectedQuantity === undefined || body.expectedQuantity === null ||
-        !Number.isFinite(afterNumber) || afterNumber < 0 || !new Prisma.Decimal(afterNumber).mul(100).isInteger() ||
+    const parseStockDecimal = (raw: unknown): Prisma.Decimal | null => {
+      if (typeof raw !== "number" && typeof raw !== "string") return null;
+      if (typeof raw === "number" && !Number.isFinite(raw)) return null;
+      if (typeof raw === "string" && raw.trim() === "") return null;
+      try {
+        const parsed = new Prisma.Decimal(typeof raw === "string" ? raw.trim() : raw);
+        return parsed.isFinite() ? parsed : null;
+      } catch {
+        return null;
+      }
+    };
+    const after = parseStockDecimal(body.newQuantity);
+    const before = parseStockDecimal(body.expectedQuantity);
+    if (!after || after.isNegative() || after.decimalPlaces() > 2 ||
         !Number.isInteger(expectedVersion) || expectedVersion < 0 ||
-        !Number.isFinite(expectedNumber) || !new Prisma.Decimal(expectedNumber).mul(100).isInteger() ||
+        !before || before.decimalPlaces() > 2 ||
         (body.reason !== undefined && typeof body.reason !== "string")) {
       return NextResponse.json({ error: "Valid non-negative quantities with at most two decimals and the expected stock balance are required." }, { status: 400 });
     }
-    const after = new Prisma.Decimal(afterNumber);
-    const before = new Prisma.Decimal(expectedNumber);
     // A stocktake is an absolute count, not a delta. Compare against the
     // balance displayed to the user so concurrent activity cannot be erased.
     const response = await inventoryRequest(req, tenant.hotelId, tenant.userId, "ADJUSTMENT", { id, body }, async (tx) => {

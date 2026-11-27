@@ -19,6 +19,7 @@ GRANT USAGE ON SCHEMA public TO hotel_saas_runtime;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
   public."Hotel",
   public."Subscription",
+  public."SubscriptionInvoice",
   public."HotelMembership",
   public."User",
   public."HotelMealPricing",

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
+import { parseMoneyDecimal } from "@/lib/billing";
 import { computeAvailablePortions } from "@/lib/inventory";
 import { sortMenuCategories } from "@/lib/menu-categories";
 
@@ -38,8 +39,8 @@ export async function GET() {
           inventoryItemId: ri.inventoryItemId,
           name: ri.inventoryItem.name,
           unit: ri.inventoryItem.unit,
-          quantityPerBatch: Number(ri.quantity),
-          currentStock: Number(ri.inventoryItem.currentStock),
+          quantityPerBatch: String(ri.quantity),
+          currentStock: String(ri.inventoryItem.currentStock),
         }));
         const { portions } = computeAvailablePortions(ingredients, i.recipe.portions);
         return { id: i.id, name: i.name, price: Number(i.price), availablePortions: portions };
@@ -60,13 +61,19 @@ export async function POST(req: Request) {
 
   const body = await req.json();
   const name = typeof body.name === "string" ? body.name.trim() : "";
-  const price = Number(body.price);
   const categoryId = body.categoryId;
 
   if (!name) return NextResponse.json({ error: "Item name is required." }, { status: 400 });
   if (!categoryId) return NextResponse.json({ error: "Choose a category." }, { status: 400 });
-  if (!Number.isFinite(price) || price < 0) {
-    return NextResponse.json({ error: "Enter a valid price." }, { status: 400 });
+
+  let price: string;
+  try {
+    price = parseMoneyDecimal(body.price, "Price", { allowZero: true }).toFixed(2);
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Enter a valid price." },
+      { status: 400 }
+    );
   }
 
   const item = await prisma.menuItem.create({

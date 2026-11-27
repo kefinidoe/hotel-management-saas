@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { addDays, isoDay } from "@/lib/dates";
-import { roundMoney, stayNights } from "@/lib/billing";
+import Decimal from "decimal.js";
+import { roundMoneyDecimal, stayNights } from "@/lib/billing";
 import { formatDisplayDate } from "@/lib/dates";
 
 type ExtendableStay = {
@@ -78,9 +79,18 @@ export default function ExtendStayModal({
     additionalNights = 0;
   }
 
-  const additionalCharge = roundMoney(additionalNights * reservation.nightlyRateTotal);
-  const newRequired = roundMoney(reservation.requiredAmount + additionalCharge);
-  const newBalance = roundMoney(newRequired - reservation.paidAmount);
+  const additionalChargeDecimal = roundMoneyDecimal(
+    new Decimal(String(reservation.nightlyRateTotal)).mul(additionalNights)
+  );
+  const newRequiredDecimal = roundMoneyDecimal(
+    new Decimal(String(reservation.requiredAmount)).plus(additionalChargeDecimal)
+  );
+  const newBalanceDecimal = roundMoneyDecimal(
+    newRequiredDecimal.minus(String(reservation.paidAmount))
+  );
+  const additionalCharge = additionalChargeDecimal.toNumber();
+  const newRequired = newRequiredDecimal.toNumber();
+  const newBalance = newBalanceDecimal.toNumber();
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();

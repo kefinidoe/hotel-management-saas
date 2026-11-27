@@ -4,27 +4,39 @@
 // only handle turning that base-unit number into something readable.
 
 
+import Decimal from "decimal.js";
+
 export type BaseUnit = "g" | "ml" | "pcs";
 
-/** Human-friendly display of a base-unit quantity, e.g. 2000 "g" -> "2.0 kg". */
-export function formatQty(quantity: number, unit: string): string {
-  const n = Number(quantity);
+export type QuantityValue = number | string | { toString(): string };
+
+function toDecimal(value: QuantityValue): Decimal {
+  if (value instanceof Decimal) return value;
+  const raw = typeof value === "number" ? value : String(value).trim();
+  return new Decimal(raw);
+}
+
+/** Human-friendly display of a base-unit quantity, e.g. 2000 "g" -> "2.00 kg". */
+export function formatQty(quantity: QuantityValue, unit: string): string {
+  const n = toDecimal(quantity);
   if (unit === "g") {
-    return n >= 1000 ? `${(n / 1000).toFixed(2)} kg` : `${n.toFixed(0)} g`;
+    return n.gte(1000) ? `${n.div(1000).toFixed(2)} kg` : `${n.toFixed(0)} g`;
   }
   if (unit === "ml") {
-    return n >= 1000 ? `${(n / 1000).toFixed(2)} L` : `${n.toFixed(0)} ml`;
+    return n.gte(1000) ? `${n.div(1000).toFixed(2)} L` : `${n.toFixed(0)} ml`;
   }
-  return `${n.toFixed(n % 1 === 0 ? 0 : 2)} pcs`;
+  return `${n.isInteger() ? n.toFixed(0) : n.toFixed(2)} pcs`;
 }
 
 export type StockStatus = "OUT_OF_STOCK" | "CRITICAL" | "LOW_STOCK" | "IN_STOCK";
 
 /** Critical = below half the reorder level; Low = at/below reorder level. */
-export function getStockStatus(currentStock: number, reorderLevel: number): StockStatus {
-  if (currentStock <= 0) return "OUT_OF_STOCK";
-  if (reorderLevel > 0 && currentStock <= reorderLevel / 2) return "CRITICAL";
-  if (reorderLevel > 0 && currentStock <= reorderLevel) return "LOW_STOCK";
+export function getStockStatus(currentStock: QuantityValue, reorderLevel: QuantityValue): StockStatus {
+  const stock = toDecimal(currentStock);
+  const reorder = toDecimal(reorderLevel);
+  if (stock.lte(0)) return "OUT_OF_STOCK";
+  if (reorder.gt(0) && stock.lte(reorder.div(2))) return "CRITICAL";
+  if (reorder.gt(0) && stock.lte(reorder)) return "LOW_STOCK";
   return "IN_STOCK";
 }
 
@@ -56,18 +68,42 @@ export type IngredientLine = {
  * currently be prepared, and which ingredient is the bottleneck.
  */
 export function computeAvailablePortions(
-  ingredients: IngredientLine[],
-  portionsPerBatch: number
+  ingredients: ReadonlyArray<{
+    inventoryItemId: string;
+    name: string;
+    unit: string;
+    quantityPerBatch: QuantityValue;
+    currentStock: QuantityValue;
+  }>,
+  portionsPerBatch: QuantityValue
 ): { portions: number; limitingItem: string | null } {
   if (ingredients.length === 0) return { portions: 0, limitingItem: null };
+
+  let batchPortions: Decimal;
+  try {
+    batchPortions = toDecimal(portionsPerBatch);
+  } catch {
+    return { portions: 0, limitingItem: null };
+  }
+  if (!batchPortions.isFinite() || batchPortions.lte(0)) {
+    return { portions: 0, limitingItem: null };
+  }
 
   let minPortions = Infinity;
   let limitingItem: string | null = null;
 
   for (const ing of ingredients) {
-    if (ing.quantityPerBatch <= 0) continue;
-    const perPortion = ing.quantityPerBatch / portionsPerBatch;
-    const possible = Math.floor(ing.currentStock / perPortion);
+    let qtyPerBatch: Decimal;
+    let stock: Decimal;
+    try {
+      qtyPerBatch = toDecimal(ing.quantityPerBatch);
+      stock = toDecimal(ing.currentStock);
+    } catch {
+      continue;
+    }
+    if (!qtyPerBatch.isFinite() || qtyPerBatch.lte(0) || !stock.isFinite()) continue;
+
+    const possible = stock.mul(batchPortions).div(qtyPerBatch).floor().toNumber();
     if (possible < minPortions) {
       minPortions = possible;
       limitingItem = ing.name;

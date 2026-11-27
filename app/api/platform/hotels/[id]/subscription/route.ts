@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import {
   getPlan,
   SUBSCRIPTION_PLANS,
-  isPlanAvailableForNewSub,
+  priceForSubscription,
   SubscriptionStatus,
   BillingInterval,
 } from "@/lib/plans";
@@ -14,15 +14,44 @@ import {
 } from "@/lib/entitlements";
 import { PlatformRole, Prisma } from "@prisma/client";
 import { z } from "zod";
+import { hasMaxDecimalPlaces } from "@/lib/billing";
 import { manualSubscriptionPaymentSchema } from "@/lib/manual-subscription-payment";
 import { activateManualSubscription, ManualPaymentConflictError, ManualSubscriptionNotFoundError, ManualActivationForbiddenError } from "@/lib/activate-manual-subscription";
 import { hotelStatusForSubscription } from "@/lib/platform-lifecycle";
+import { getBillingHistoryForHotel, issueSubscriptionInvoice } from "@/lib/subscription-invoices";
 
 class LifecycleChangedError extends Error {}
 class LifecycleForbiddenError extends Error {}
 class LifecycleAlreadySetError extends Error {}
 
 export const dynamic = "force-dynamic";
+
+const issueInvoiceSchema = z.strictObject({
+  action: z.literal("ISSUE_INVOICE"),
+  amount: z
+    .number()
+    .finite()
+    .nonnegative()
+    .max(99_999_999.99)
+    .refine((v) => hasMaxDecimalPlaces(v, 2), "Amount must have at most two decimal places.")
+    .optional(),
+  taxAmount: z
+    .number()
+    .finite()
+    .nonnegative()
+    .max(99_999_999.99)
+    .refine((v) => hasMaxDecimalPlaces(v, 2), "Tax amount must have at most two decimal places.")
+    .optional(),
+  dueDays: z.number().int().positive().max(365).optional(),
+  periodDays: z.number().int().positive().max(3650).optional(),
+  reason: z.string().trim().min(5).max(1000),
+});
+
+const voidInvoiceSchema = z.strictObject({
+  action: z.literal("MARK_INVOICE_VOID"),
+  invoiceId: z.string().trim().min(1).max(200),
+  reason: z.string().trim().min(5).max(1000),
+});
 
 export async function GET(
   req: Request,
@@ -49,18 +78,26 @@ export async function GET(
     }
 
     const usageDetails = await getHotelUsageAndSubscription(hotelId);
+    const invoices = await getBillingHistoryForHotel(hotelId, {
+      id: usageDetails.subscription.id,
+      planId: usageDetails.subscription.planId,
+      planName: usageDetails.subscription.plan.name,
+      billingInterval: usageDetails.subscription.billingInterval,
+      currency: usageDetails.subscription.currency,
+      metadata: hotel.subscription?.metadata ?? null,
+    });
 
     // Fetch recent administrative logs for this hotel's subscription
     const auditLogs = await prisma.auditLog.findMany({
       where: {
         hotelId,
-        entity: "Subscription",
+        entity: { in: ["Subscription", "SubscriptionInvoice"] },
       },
       include: {
         user: { select: { name: true, email: true, platformRole: true } },
       },
       orderBy: { createdAt: "desc" },
-      take: 20,
+      take: 25,
     });
 
     return NextResponse.json({
@@ -73,6 +110,7 @@ export async function GET(
       },
       subscription: usageDetails.subscription,
       usage: usageDetails.usage,
+      invoices,
       auditLogs: auditLogs.map((l) => ({
         id: l.id,
         action: l.action,
@@ -132,11 +170,18 @@ export async function PATCH(
     }
     try {
       const updated = await activateManualSubscription(id.data, admin, parsed.data);
-      return NextResponse.json({ success: true, subscription: {
-        id: updated.id, hotelId: updated.hotelId, status: updated.status,
-        currentPeriodStartsAt: updated.currentPeriodStartsAt.toISOString(),
-        currentPeriodEndsAt: updated.currentPeriodEndsAt?.toISOString() ?? null,
-      } });
+      return NextResponse.json({
+        success: true,
+        invoiceId: updated.invoiceId,
+        invoiceNumber: updated.invoiceNumber,
+        subscription: {
+          id: updated.id,
+          hotelId: updated.hotelId,
+          status: updated.status,
+          currentPeriodStartsAt: updated.currentPeriodStartsAt.toISOString(),
+          currentPeriodEndsAt: updated.currentPeriodEndsAt?.toISOString() ?? null,
+        },
+      });
     } catch (error) {
       if (error instanceof ManualPaymentConflictError || (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002")) {
         return NextResponse.json({ error: "DUPLICATE_PAYMENT_REFERENCE", message: "This payment reference has already been recorded." }, { status: 409 });
@@ -145,6 +190,127 @@ export async function PATCH(
       if (error instanceof ManualActivationForbiddenError) return NextResponse.json({ error: "FORBIDDEN", message: error.message }, { status: 403 });
       console.error("Failed to activate manual subscription payment:", error);
       return NextResponse.json({ error: "SERVER_ERROR", message: "Failed to record manual payment." }, { status: 500 });
+    }
+  }
+
+  if (body.action === "ISSUE_INVOICE") {
+    const id = z.string().trim().min(1).max(200).safeParse(hotelId);
+    const parsed = issueInvoiceSchema.safeParse(body);
+    if (!id.success || !parsed.success) {
+      return NextResponse.json(
+        {
+          error: "INVALID_REQUEST",
+          message: "Valid invoice amount, due days, and reason (min 5 chars) are required.",
+          issues: [
+            ...(!id.success ? id.error.issues : []),
+            ...(!parsed.success ? parsed.error.issues : []),
+          ],
+        },
+        { status: 400 }
+      );
+    }
+
+    try {
+      const existingSub = await prisma.subscription.findUnique({
+        where: { hotelId: id.data },
+        select: { id: true },
+      });
+      if (!existingSub) {
+        return NextResponse.json(
+          { error: "NOT_FOUND", message: "Subscription record not found." },
+          { status: 404 }
+        );
+      }
+      const invoice = await issueSubscriptionInvoice({
+        hotelId: id.data,
+        adminUserId: admin.userId,
+        adminRole: admin.platformRole,
+        amount: parsed.data.amount,
+        taxAmount: parsed.data.taxAmount,
+        dueDays: parsed.data.dueDays,
+        periodDays: parsed.data.periodDays,
+        notes: parsed.data.reason,
+      });
+      return NextResponse.json({ success: true, invoice });
+    } catch (error) {
+      console.error("Failed to issue subscription invoice:", error);
+      return NextResponse.json(
+        { error: "SERVER_ERROR", message: "Failed to issue subscription invoice." },
+        { status: 500 }
+      );
+    }
+  }
+
+  if (body.action === "MARK_INVOICE_VOID") {
+    const parsed = voidInvoiceSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json(
+        {
+          error: "INVALID_REQUEST",
+          message: "invoiceId and reason (min 5 chars) are required.",
+          issues: parsed.error.issues,
+        },
+        { status: 400 }
+      );
+    }
+
+    try {
+      const updated = await prisma.$transaction(async (tx) => {
+        const existing = await tx.subscriptionInvoice.findFirst({
+          where: { id: parsed.data.invoiceId, hotelId },
+        });
+        if (!existing) {
+          throw new Error("INVOICE_NOT_FOUND");
+        }
+        if (existing.status === "PAID") {
+          throw new Error("INVOICE_ALREADY_PAID");
+        }
+        if (existing.status === "VOID") {
+          throw new Error("INVOICE_ALREADY_VOID");
+        }
+
+        const voided = await tx.subscriptionInvoice.update({
+          where: { id: existing.id },
+          data: {
+            status: "VOID",
+            notes: `${existing.notes ? `${existing.notes} | ` : ""}Voided: ${parsed.data.reason}`,
+          },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            hotelId,
+            userId: admin.userId,
+            action: "PLATFORM_SUBSCRIPTION_INVOICE_VOIDED",
+            entity: "SubscriptionInvoice",
+            entityId: existing.id,
+            metadata: {
+              invoiceNumber: existing.invoiceNumber,
+              reason: parsed.data.reason,
+              adminRole: admin.platformRole,
+            },
+          },
+        });
+
+        return voided;
+      });
+
+      return NextResponse.json({
+        success: true,
+        invoice: { id: updated.id, invoiceNumber: updated.invoiceNumber, status: updated.status },
+      });
+    } catch (error: any) {
+      if (error?.message === "INVOICE_NOT_FOUND") {
+        return NextResponse.json({ error: "NOT_FOUND", message: "Invoice not found for this hotel." }, { status: 404 });
+      }
+      if (error?.message === "INVOICE_ALREADY_PAID") {
+        return NextResponse.json({ error: "INVOICE_ALREADY_PAID", message: "Paid invoices cannot be voided." }, { status: 409 });
+      }
+      if (error?.message === "INVOICE_ALREADY_VOID") {
+        return NextResponse.json({ error: "ALREADY_VOID", message: "Invoice is already void." }, { status: 400 });
+      }
+      console.error("Failed to void subscription invoice:", error);
+      return NextResponse.json({ error: "SERVER_ERROR", message: "Failed to void invoice." }, { status: 500 });
     }
   }
 
@@ -184,7 +350,7 @@ export async function PATCH(
 
     let updateData: any = {};
     let auditAction = "PLATFORM_SUBSCRIPTION_UPDATED";
-    let auditDetails: Record<string, any> = {
+    const auditDetails: Record<string, any> = {
       adminUserId: admin.userId,
       adminRole: admin.platformRole,
       reason: reason.trim(),
@@ -225,12 +391,13 @@ export async function PATCH(
         );
       }
 
-      const isUSD = (currentSub.currency || currentHotel.currency || "KES").toUpperCase() === "USD";
+      const resolvedPrice = priceForSubscription({
+        planId: targetPlan.id,
+        billingInterval: currentSub.billingInterval as BillingInterval,
+        currency: currentSub.currency || currentHotel.currency,
+      });
       updateData.planId = targetPlan.id;
-      updateData.amount =
-        currentSub.billingInterval === BillingInterval.YEARLY
-          ? (isUSD ? targetPlan.yearlyPriceUSD : targetPlan.yearlyPriceKES)
-          : (isUSD ? targetPlan.monthlyPriceUSD : targetPlan.monthlyPriceKES);
+      updateData.amount = resolvedPrice ?? (targetPlan.isCustomQuote ? 0 : currentSub.amount);
 
       updateData.metadata = {
         ...(typeof currentSub.metadata === "object" && currentSub.metadata ? (currentSub.metadata as any) : {}),
@@ -297,19 +464,25 @@ export async function PATCH(
       updateData.status = newStatus;
       if (newStatus !== SubscriptionStatus.SUSPENDED) { updateData.suspendedAt = null; updateData.suspensionReason = null; }
       if (newStatus !== SubscriptionStatus.CANCELLED) updateData.canceledAt = null;
+      const now = new Date();
 
       if (newStatus === SubscriptionStatus.SUSPENDED) {
-        updateData.suspendedAt = new Date();
+        updateData.suspendedAt = now;
         updateData.suspensionReason = reason.trim();
       } else if (newStatus === SubscriptionStatus.CANCELLED) {
-        updateData.canceledAt = new Date();
+        updateData.canceledAt = now;
+        updateData.cancelAtPeriodEnd = true;
+        updateData.suspensionReason = reason.trim();
+      } else if (newStatus === SubscriptionStatus.RESTRICTED || newStatus === SubscriptionStatus.READ_ONLY) {
+        updateData.suspensionReason = reason.trim();
       } else if (newStatus === SubscriptionStatus.ACTIVE) {
+        const periodDays = currentSub.billingInterval === BillingInterval.YEARLY ? 365 : 30;
         updateData.suspendedAt = null;
+        updateData.canceledAt = null;
         updateData.suspensionReason = null;
-        // If activating, set current period to 30 days from now if not already set
-        const now = new Date();
+        updateData.cancelAtPeriodEnd = false;
         updateData.currentPeriodStartsAt = now;
-        updateData.currentPeriodEndsAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+        updateData.currentPeriodEndsAt = new Date(now.getTime() + periodDays * 24 * 60 * 60 * 1000);
       }
 
       auditAction = "PLATFORM_SUBSCRIPTION_STATUS_CHANGED";
@@ -318,17 +491,30 @@ export async function PATCH(
     } else if (action === "ADJUST_BILLING") {
       if (billingInterval && Object.values(BillingInterval).includes(billingInterval as BillingInterval)) {
         updateData.billingInterval = billingInterval;
-        const plan = getPlan(currentSub.planId);
-        const isUSD = (currentSub.currency || currentHotel.currency || "KES").toUpperCase() === "USD";
-        updateData.amount = billingInterval === BillingInterval.YEARLY
-          ? (isUSD ? plan.yearlyPriceUSD : plan.yearlyPriceKES)
-          : (isUSD ? plan.monthlyPriceUSD : plan.monthlyPriceKES);
+        const resolvedPrice = priceForSubscription({
+          planId: currentSub.planId,
+          billingInterval: billingInterval as BillingInterval,
+          currency: currentSub.currency || currentHotel.currency,
+        });
+        if (resolvedPrice !== null) {
+          updateData.amount = resolvedPrice;
+        }
         auditDetails.billingInterval = billingInterval;
+        auditDetails.currency = currentSub.currency;
+      } else {
+        return NextResponse.json(
+          { error: "INVALID_BILLING_INTERVAL", message: "Billing interval must be MONTHLY or YEARLY." },
+          { status: 400 }
+        );
       }
       auditAction = "PLATFORM_BILLING_INTERVAL_ADJUSTED";
     } else {
       return NextResponse.json(
-        { error: "INVALID_ACTION", message: "Supported actions: CHANGE_PLAN, EXTEND_TRIAL, CHANGE_STATUS, ADJUST_BILLING." },
+        {
+          error: "INVALID_ACTION",
+          message:
+            "Supported actions: CHANGE_PLAN, EXTEND_TRIAL, CHANGE_STATUS, ADJUST_BILLING, ACTIVATE_MANUAL_PAYMENT, ISSUE_INVOICE, MARK_INVOICE_VOID.",
+        },
         { status: 400 }
       );
     }
@@ -399,6 +585,7 @@ export async function PATCH(
         currentPeriodEndsAt: updatedSub.currentPeriodEndsAt ? updatedSub.currentPeriodEndsAt.toISOString() : null,
         daysRemaining: evaluated.daysRemaining,
         billingInterval: updatedSub.billingInterval,
+        currency: updatedSub.currency,
         amount: Number(updatedSub.amount),
         suspensionReason: updatedSub.suspensionReason,
       },

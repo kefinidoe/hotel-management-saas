@@ -60,17 +60,32 @@ export async function POST(req: Request) {
   if (invalidKey) return invalidKey;
 
   const { inventoryItemId, supplier, invoiceNumber, quantity, unitCost, purchaseDate } = body;
-  const amount = Number(quantity);
-  const cost = Number(unitCost);
   const date = purchaseDate ? new Date(purchaseDate) : new Date();
+  let qty: Prisma.Decimal | null = null;
+  let price: Prisma.Decimal | null = null;
+  try {
+    if (
+      (typeof quantity === "number" && Number.isFinite(quantity)) ||
+      (typeof quantity === "string" && quantity.trim() !== "")
+    ) {
+      qty = new Prisma.Decimal(typeof quantity === "string" ? quantity.trim() : quantity);
+    }
+    if (
+      (typeof unitCost === "number" && Number.isFinite(unitCost)) ||
+      (typeof unitCost === "string" && unitCost.trim() !== "")
+    ) {
+      price = new Prisma.Decimal(typeof unitCost === "string" ? unitCost.trim() : unitCost);
+    }
+  } catch {
+    qty = null;
+    price = null;
+  }
   if (typeof inventoryItemId !== "string" || !inventoryItemId.trim() || typeof supplier !== "string" || !supplier.trim() ||
-      !Number.isFinite(amount) || amount <= 0 || !new Prisma.Decimal(amount).mul(100).isInteger() ||
-      unitCost === undefined || unitCost === null || !Number.isFinite(cost) || cost < 0 || !new Prisma.Decimal(cost).mul(10000).isInteger() ||
+      !qty || !qty.isFinite() || qty.lte(0) || qty.decimalPlaces() > 2 ||
+      !price || !price.isFinite() || price.isNegative() || price.decimalPlaces() > 4 ||
       !Number.isFinite(date.getTime()) || (invoiceNumber != null && typeof invoiceNumber !== "string")) {
     return NextResponse.json({ error: "Provide a valid item, supplier, quantity (two decimals), cost (four decimals), and date." }, { status: 400 });
   }
-  const qty = new Prisma.Decimal(amount);
-  const price = new Prisma.Decimal(cost);
   const response = await inventoryRequest(req, tenant.hotelId, tenant.userId, "PURCHASE", body, async (tx) => {
     const changed = await tx.inventoryItem.updateMany({
       where: { id: inventoryItemId.trim(), hotelId: tenant.hotelId, currentStock: { gte: 0 } },

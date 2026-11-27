@@ -15,8 +15,26 @@ import {
   TrendingDown,
   RefreshCw,
   HelpCircle,
+  Download,
+  FileText,
+  Lock,
+  ShieldAlert,
 } from "lucide-react";
 import clsx from "clsx";
+import Decimal from "decimal.js";
+
+function formatCurrencyAmount(amount: number, currency: string) {
+  const code = (currency || "KES").toUpperCase();
+  const symbol = code === "USD" ? "$" : "KSh ";
+  const formatted = new Decimal(String(amount || 0))
+    .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+    .toNumber()
+    .toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2,
+    });
+  return `${symbol}${formatted}`;
+}
 
 export default function SubscriptionClient() {
   const [loading, setLoading] = useState(true);
@@ -79,7 +97,11 @@ export default function SubscriptionClient() {
   }
 
   const { hotel, subscription, billableBreakdown, pricingSchedule, roomBands } = data;
-  const isUSD = (subscription?.currency || hotel?.currency || "KES").toUpperCase() === "USD";
+  const lifecycle = data.lifecycle ?? null;
+  const billingHistory: any[] = Array.isArray(data.billingHistory) ? data.billingHistory : [];
+
+  const subscriptionCurrency = (subscription?.currency || hotel?.currency || "KES").toUpperCase();
+  const isUSD = subscriptionCurrency === "USD";
   const currencySymbol = isUSD ? "$" : "KSh ";
 
   const activeRooms = billableBreakdown?.billableActiveRooms ?? 0;
@@ -100,6 +122,18 @@ export default function SubscriptionClient() {
   const maintenanceRooms = billableBreakdown?.statusBreakdown?.maintenance ?? 0;
   const outOfServiceTotal = outOfOrderRooms + maintenanceRooms;
   const operationalInServiceRooms = Math.max(0, activeRooms - outOfServiceTotal);
+
+  const effectiveStatus: string = subscription?.effectiveStatus || "TRIALING";
+  const statusBadgeClass =
+    effectiveStatus === "ACTIVE"
+      ? "bg-emerald-100 text-emerald-800"
+      : effectiveStatus === "TRIALING"
+      ? "bg-blue-100 text-blue-800"
+      : effectiveStatus === "SUSPENDED" || effectiveStatus === "CANCELLED"
+      ? "bg-red-100 text-red-800"
+      : effectiveStatus === "READ_ONLY" || effectiveStatus === "RESTRICTED"
+      ? "bg-orange-100 text-orange-800"
+      : "bg-amber-100 text-amber-800";
 
   return (
     <div className="max-w-6xl mx-auto space-y-8 pb-16">
@@ -137,19 +171,108 @@ export default function SubscriptionClient() {
             <span
               className={clsx(
                 "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide",
-                subscription.effectiveStatus === "ACTIVE"
-                  ? "bg-emerald-100 text-emerald-800"
-                  : subscription.effectiveStatus === "TRIALING"
-                  ? "bg-blue-100 text-blue-800"
-                  : "bg-amber-100 text-amber-800"
+                statusBadgeClass
               )}
             >
               <span className="w-2 h-2 rounded-full bg-current" />
-              {subscription.effectiveStatus}
+              {effectiveStatus}
             </span>
           </div>
         </div>
       </div>
+
+      {/* LIFECYCLE ACCESS & RECOVERY BANNER */}
+      {lifecycle && (
+        <section
+          aria-labelledby="lifecycle-status-heading"
+          className={clsx(
+            "card p-5 border rounded-card space-y-3 shadow-sm",
+            lifecycle.accessMode === "FULL"
+              ? "bg-emerald-50/40 border-emerald-200"
+              : lifecycle.accessMode === "GRACE"
+              ? "bg-amber-50/60 border-amber-300"
+              : lifecycle.accessMode === "READ_ONLY"
+              ? "bg-orange-50/70 border-orange-300"
+              : "bg-red-50/70 border-red-300"
+          )}
+        >
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="flex items-start gap-3">
+              {lifecycle.accessMode === "FULL" ? (
+                <ShieldCheck className="text-emerald-600 shrink-0 mt-0.5" size={20} />
+              ) : lifecycle.accessMode === "BILLING_EXPORT_ONLY" ? (
+                <Lock className="text-red-600 shrink-0 mt-0.5" size={20} />
+              ) : (
+                <ShieldAlert className="text-amber-600 shrink-0 mt-0.5" size={20} />
+              )}
+              <div>
+                <h2 id="lifecycle-status-heading" className="text-sm font-bold text-text-primary">
+                  Lifecycle Access: {lifecycle.stage} ({lifecycle.accessMode.replaceAll("_", " ")})
+                </h2>
+                <p className="text-xs text-text-secondary mt-1 leading-relaxed">
+                  {lifecycle.summaryMessage}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2 text-[11px] font-semibold shrink-0">
+              <span
+                className={clsx(
+                  "px-2.5 py-1 rounded border",
+                  lifecycle.canReadOperations
+                    ? "bg-emerald-100 text-emerald-800 border-emerald-200"
+                    : "bg-gray-100 text-gray-600 border-gray-200"
+                )}
+              >
+                Operations Read: {lifecycle.canReadOperations ? "Allowed" : "Locked"}
+              </span>
+              <span
+                className={clsx(
+                  "px-2.5 py-1 rounded border",
+                  lifecycle.canWriteOperations
+                    ? "bg-emerald-100 text-emerald-800 border-emerald-200"
+                    : "bg-red-100 text-red-800 border-red-200"
+                )}
+              >
+                Operations Write: {lifecycle.canWriteOperations ? "Allowed" : "Blocked"}
+              </span>
+              <span className="px-2.5 py-1 rounded border bg-blue-100 text-blue-800 border-blue-200">
+                Data Export & Billing: Always Open
+              </span>
+            </div>
+          </div>
+
+          {(lifecycle.overdueDays > 0 || lifecycle.nextStage) && (
+            <div className="text-xs text-text-secondary flex flex-wrap items-center gap-4 pt-2 border-t border-border/60">
+              {lifecycle.overdueDays > 0 && (
+                <span>
+                  Overdue duration: <strong className="text-text-primary">{lifecycle.overdueDays} day(s)</strong>
+                </span>
+              )}
+              {lifecycle.nextStage && lifecycle.daysUntilNextStage !== null && (
+                <span>
+                  Next scheduled transition: <strong className="text-text-primary">{lifecycle.nextStage}</strong> in{" "}
+                  <strong className="text-text-primary">{lifecycle.daysUntilNextStage} day(s)</strong>
+                  {lifecycle.nextTransitionAt ? ` (${new Date(lifecycle.nextTransitionAt).toLocaleDateString()})` : ""}
+                </span>
+              )}
+            </div>
+          )}
+
+          {lifecycle.accessMode !== "FULL" && Array.isArray(lifecycle.recoverySteps) && (
+            <div className="pt-2 border-t border-border/60">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-text-primary block mb-1">
+                Recovery & Reactivation Steps
+              </span>
+              <ol className="list-decimal list-inside space-y-0.5 text-xs text-text-secondary">
+                {lifecycle.recoverySteps.map((step: string, idx: number) => (
+                  <li key={idx}>{step}</li>
+                ))}
+              </ol>
+            </div>
+          )}
+        </section>
+      )}
 
       {/* TOP SUMMARY METRICS & BILLABLE BREAKDOWN */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -289,7 +412,11 @@ export default function SubscriptionClient() {
             )}
             <p className="text-xs text-text-muted mt-1">
               {subscription.billingInterval === "YEARLY"
-                ? `Normalized MRR: ${currencySymbol}${Math.round((subscription.amount || 0) / 12).toLocaleString()}/month`
+                ? `Normalized MRR: ${currencySymbol}${new Decimal(String(subscription.amount || 0))
+                    .div(12)
+                    .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+                    .toNumber()
+                    .toLocaleString()}/month`
                 : "Standard monthly billing interval"}
             </p>
           </div>
@@ -344,6 +471,138 @@ export default function SubscriptionClient() {
         <p className="text-sm text-text-secondary">
           After payment, share the transaction reference with Platform Billing Support. A platform administrator must verify and record the payment before activating or extending the subscription. Payment does not activate the subscription automatically.
         </p>
+      </section>
+
+      {/* INVOICES & BILLING HISTORY */}
+      <section aria-labelledby="billing-history-heading" className="card p-6 border border-border space-y-4 shadow-sm bg-surface">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <h2 id="billing-history-heading" className="text-lg font-bold text-text-primary flex items-center gap-2">
+              <FileText className="text-primary-500" size={20} />
+              Subscription Invoices &amp; Billing History
+            </h2>
+            <p className="text-xs text-text-secondary mt-1">
+              Issued subscription invoices, verified manual payment receipts, and billing periods for {hotel.name}.
+            </p>
+          </div>
+          <span className="text-xs font-mono text-text-muted">
+            {billingHistory.length} record(s)
+          </span>
+        </div>
+
+        {billingHistory.length === 0 ? (
+          <div className="p-4 rounded-card bg-surface-secondary border border-border text-xs text-text-secondary">
+            No subscription invoices or verified payment receipts have been recorded yet.
+          </div>
+        ) : (
+          <div className="overflow-x-auto border border-border rounded-card">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-surface-secondary border-b border-border text-text-secondary uppercase">
+                <tr>
+                  <th className="py-2.5 px-3 font-semibold">Invoice #</th>
+                  <th className="py-2.5 px-3 font-semibold">Period</th>
+                  <th className="py-2.5 px-3 font-semibold">Status</th>
+                  <th className="py-2.5 px-3 font-semibold">Reference</th>
+                  <th className="py-2.5 px-3 font-semibold text-right">Amount</th>
+                  <th className="py-2.5 px-3 font-semibold text-right">Balance</th>
+                  <th className="py-2.5 px-3 font-semibold text-right">Receipt / PDF</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {billingHistory.map((inv: any) => (
+                  <tr key={inv.id} className="hover:bg-surface-secondary/50">
+                    <td className="py-2.5 px-3 font-mono font-semibold text-text-primary">
+                      {inv.invoiceNumber}
+                      <span className="block text-[10px] font-sans font-normal text-text-muted">
+                        Issued {new Date(inv.issuedAt).toLocaleDateString()}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-3 text-text-secondary whitespace-nowrap">
+                      {new Date(inv.periodStartsAt).toLocaleDateString()} –{" "}
+                      {new Date(inv.periodEndsAt).toLocaleDateString()}
+                    </td>
+                    <td className="py-2.5 px-3">
+                      <span
+                        className={clsx(
+                          "inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase",
+                          inv.status === "PAID"
+                            ? "bg-emerald-100 text-emerald-800"
+                            : inv.status === "PAST_DUE"
+                            ? "bg-red-100 text-red-800"
+                            : inv.status === "VOID"
+                            ? "bg-gray-100 text-gray-600"
+                            : "bg-amber-100 text-amber-800"
+                        )}
+                      >
+                        {inv.status}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-3 font-mono text-text-secondary">
+                      {inv.paymentReference || "Manual settlement pending"}
+                    </td>
+                    <td className="py-2.5 px-3 text-right font-mono font-semibold text-text-primary">
+                      {formatCurrencyAmount(inv.amount, inv.currency)}
+                    </td>
+                    <td className="py-2.5 px-3 text-right font-mono text-text-secondary">
+                      {formatCurrencyAmount(inv.balanceDue ?? 0, inv.currency)}
+                    </td>
+                    <td className="py-2.5 px-3 text-right">
+                      {inv.downloadPdfUrl ? (
+                        <a
+                          href={inv.downloadPdfUrl}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-control border border-border bg-surface hover:bg-surface-secondary font-semibold text-primary-700"
+                        >
+                          <Download size={12} />
+                          PDF
+                        </a>
+                      ) : (
+                        <span className="text-[11px] text-text-muted">Legacy receipt</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* WORKSPACE DATA BACKUP & EXPORT */}
+      <section aria-labelledby="data-export-heading" className="card p-6 border border-border space-y-4 shadow-sm bg-surface">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div>
+            <h2 id="data-export-heading" className="text-lg font-bold text-text-primary flex items-center gap-2">
+              <Download className="text-primary-500" size={20} />
+              Workspace Data Export &amp; Backup
+            </h2>
+            <p className="text-xs text-text-secondary mt-1 max-w-2xl">
+              Download a full property backup (rooms, guests, reservations, folio payments, expenses, and subscription billing history). Export access remains open for hotel owners and admins across overdue, restricted, read-only, suspended, and cancelled states.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <a
+              href="/api/subscription/export?format=json"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-control border border-border bg-surface-secondary hover:bg-surface text-xs font-semibold text-text-primary"
+            >
+              <Download size={13} />
+              Export JSON
+            </a>
+            <a
+              href="/api/subscription/export?format=xlsx"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-control border border-primary-300 bg-primary-50 hover:bg-primary-100 text-xs font-semibold text-primary-800"
+            >
+              <Download size={13} />
+              Export Excel (.xlsx)
+            </a>
+            <a
+              href="/api/subscription/export?format=pdf"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-control border border-border bg-surface-secondary hover:bg-surface text-xs font-semibold text-text-primary"
+            >
+              <Download size={13} />
+              Summary PDF
+            </a>
+          </div>
+        </div>
       </section>
 
       {/* BILLING INTERVAL TOGGLE & ANNUAL SAVINGS BANNER */}
@@ -446,10 +705,17 @@ export default function SubscriptionClient() {
             const displayPrice = isAnnual ? yearlyPrice : monthlyPrice;
 
             const monthlyEquiv = isAnnual && !band.isCustomQuote
-              ? Math.round(displayPrice / 12)
+              ? new Decimal(String(displayPrice))
+                  .div(12)
+                  .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+                  .toNumber()
               : displayPrice;
 
-            const bandSavings = (monthlyPrice * 12) - yearlyPrice;
+            const bandSavings = new Decimal(String(monthlyPrice))
+              .mul(12)
+              .minus(String(yearlyPrice))
+              .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+              .toNumber();
             const bandDiscount = Math.round(band.annualDiscountPercentage || configuredDiscountPercent);
 
             return (

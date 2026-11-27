@@ -24,10 +24,34 @@ export type EvaluatedSubscriptionState =
   | "TRIAL_EXPIRED"
   | "ACTIVE"
   | "PAST_DUE"
+  | "RESTRICTED"
+  | "READ_ONLY"
   | "SUSPENDED"
   | "CANCELLED";
 
 export const PAST_DUE_GRACE_PERIOD_DAYS = 7;
+export const PAST_DUE_LOCKED_END_DAY = 14;
+export const RESTRICTED_END_DAY = 21;
+export const READ_ONLY_END_DAY = 35;
+
+export const TRIAL_EXPIRED_WINDOW_DAYS = 7;
+export const TRIAL_RESTRICTED_END_DAY = 14;
+export const TRIAL_READ_ONLY_END_DAY = 28;
+
+export interface SubscriptionLifecycleSummary {
+  stage: EvaluatedSubscriptionState;
+  accessMode: "FULL" | "GRACE" | "READ_ONLY" | "BILLING_EXPORT_ONLY";
+  canReadOperations: boolean;
+  canWriteOperations: boolean;
+  canExportRecords: boolean;
+  canRecoverBilling: boolean;
+  overdueDays: number;
+  nextStage: EvaluatedSubscriptionState | null;
+  daysUntilNextStage: number | null;
+  nextTransitionAt: string | null;
+  summaryMessage: string;
+  recoverySteps: string[];
+}
 
 export class SubscriptionStatusUnavailableError extends Error {
   readonly code = "SUBSCRIPTION_STATUS_UNAVAILABLE";
@@ -100,10 +124,40 @@ export interface BillableRoomBreakdown {
   roomsRemainingInBand: number | null; // null for custom quote / infinity
 }
 
+const MS_PER_DAY = 86_400_000;
+
+function evaluatePaidOverdueDays(end: Date, now: Date): {
+  effectiveStatus: EvaluatedSubscriptionState;
+  isOperational: boolean;
+  isOverdue: boolean;
+  daysRemaining: number;
+} {
+  const overdueMs = now.getTime() - end.getTime();
+  if (overdueMs <= PAST_DUE_GRACE_PERIOD_DAYS * MS_PER_DAY) {
+    return {
+      effectiveStatus: "PAST_DUE",
+      isOperational: true,
+      isOverdue: true,
+      daysRemaining: Math.max(0, Math.ceil((end.getTime() + PAST_DUE_GRACE_PERIOD_DAYS * MS_PER_DAY - now.getTime()) / MS_PER_DAY)),
+    };
+  }
+  if (overdueMs <= PAST_DUE_LOCKED_END_DAY * MS_PER_DAY) {
+    return { effectiveStatus: "PAST_DUE", isOperational: false, isOverdue: true, daysRemaining: 0 };
+  }
+  if (overdueMs <= RESTRICTED_END_DAY * MS_PER_DAY) {
+    return { effectiveStatus: "RESTRICTED", isOperational: false, isOverdue: true, daysRemaining: 0 };
+  }
+  if (overdueMs <= READ_ONLY_END_DAY * MS_PER_DAY) {
+    return { effectiveStatus: "READ_ONLY", isOperational: false, isOverdue: true, daysRemaining: 0 };
+  }
+  return { effectiveStatus: "SUSPENDED", isOperational: false, isOverdue: true, daysRemaining: 0 };
+}
+
 /**
- * Evaluates server-authoritative subscription dates. Past-due accounts retain
- * operational access only until the configured grace deadline; missing or
- * malformed state is an infrastructure/data error, never an implicit ACTIVE.
+ * Evaluates server-authoritative subscription dates across the complete
+ * lifecycle: trial -> active -> past due -> restricted -> read-only -> suspended -> cancelled.
+ * Past-due accounts retain operational access only until the configured grace
+ * deadline; missing or malformed state fails closed.
  */
 export function evaluateSubscriptionStatus(
   sub: {
@@ -118,7 +172,6 @@ export function evaluateSubscriptionStatus(
   isOverdue: boolean;
   daysRemaining: number | null;
 } {
-  const graceMilliseconds = PAST_DUE_GRACE_PERIOD_DAYS * 24 * 60 * 60 * 1000;
   const validDate = (value: Date | null | undefined) =>
     value == null || Number.isFinite(new Date(value).getTime());
   if (!validDate(sub.trialEndsAt) || !validDate(sub.currentPeriodEndsAt)) {
@@ -131,34 +184,57 @@ export function evaluateSubscriptionStatus(
   if (sub.status === SubscriptionStatus.CANCELLED) {
     return { effectiveStatus: "CANCELLED", isOperational: false, isOverdue: false, daysRemaining: null };
   }
+  if (sub.status === SubscriptionStatus.RESTRICTED) {
+    if (sub.currentPeriodEndsAt && now.getTime() - new Date(sub.currentPeriodEndsAt).getTime() > RESTRICT_TO_READ_ONLY_MS()) {
+      const overdueMs = now.getTime() - new Date(sub.currentPeriodEndsAt).getTime();
+      if (overdueMs > READ_ONLY_END_DAY * MS_PER_DAY) {
+        return { effectiveStatus: "SUSPENDED", isOperational: false, isOverdue: true, daysRemaining: 0 };
+      }
+      if (overdueMs > RESTRICTED_END_DAY * MS_PER_DAY) {
+        return { effectiveStatus: "READ_ONLY", isOperational: false, isOverdue: true, daysRemaining: 0 };
+      }
+    }
+    return { effectiveStatus: "RESTRICTED", isOperational: false, isOverdue: true, daysRemaining: 0 };
+  }
+  if (sub.status === SubscriptionStatus.READ_ONLY) {
+    if (sub.currentPeriodEndsAt) {
+      const overdueMs = now.getTime() - new Date(sub.currentPeriodEndsAt).getTime();
+      if (overdueMs > READ_ONLY_END_DAY * MS_PER_DAY) {
+        return { effectiveStatus: "SUSPENDED", isOperational: false, isOverdue: true, daysRemaining: 0 };
+      }
+    }
+    return { effectiveStatus: "READ_ONLY", isOperational: false, isOverdue: true, daysRemaining: 0 };
+  }
   if (sub.status === SubscriptionStatus.TRIALING) {
     if (!sub.trialEndsAt) {
       throw new SubscriptionStatusUnavailableError("Trial expiry is missing.");
     }
     const end = new Date(sub.trialEndsAt);
     if (now > end) {
-      return { effectiveStatus: "TRIAL_EXPIRED", isOperational: false, isOverdue: true, daysRemaining: 0 };
+      const overdueMs = now.getTime() - end.getTime();
+      if (overdueMs <= TRIAL_EXPIRED_WINDOW_DAYS * MS_PER_DAY) {
+        return { effectiveStatus: "TRIAL_EXPIRED", isOperational: false, isOverdue: true, daysRemaining: 0 };
+      }
+      if (overdueMs <= TRIAL_RESTRICTED_END_DAY * MS_PER_DAY) {
+        return { effectiveStatus: "RESTRICTED", isOperational: false, isOverdue: true, daysRemaining: 0 };
+      }
+      if (overdueMs <= TRIAL_READ_ONLY_END_DAY * MS_PER_DAY) {
+        return { effectiveStatus: "READ_ONLY", isOperational: false, isOverdue: true, daysRemaining: 0 };
+      }
+      return { effectiveStatus: "SUSPENDED", isOperational: false, isOverdue: true, daysRemaining: 0 };
     }
     return {
       effectiveStatus: "TRIALING",
       isOperational: true,
       isOverdue: false,
-      daysRemaining: Math.max(0, Math.ceil((end.getTime() - now.getTime()) / 86_400_000)),
+      daysRemaining: Math.max(0, Math.ceil((end.getTime() - now.getTime()) / MS_PER_DAY)),
     };
   }
   if (sub.status === SubscriptionStatus.PAST_DUE) {
     if (!sub.currentPeriodEndsAt) {
       throw new SubscriptionStatusUnavailableError("Past-due subscription period end is missing.");
     }
-    const end = new Date(sub.currentPeriodEndsAt);
-    const graceEnd = new Date(end.getTime() + graceMilliseconds);
-    const inGrace = now <= graceEnd;
-    return {
-      effectiveStatus: "PAST_DUE",
-      isOperational: inGrace,
-      isOverdue: true,
-      daysRemaining: inGrace ? Math.max(0, Math.ceil((graceEnd!.getTime() - now.getTime()) / 86_400_000)) : 0,
-    };
+    return evaluatePaidOverdueDays(new Date(sub.currentPeriodEndsAt), now);
   }
   if (sub.status === SubscriptionStatus.ACTIVE) {
     if (!sub.currentPeriodEndsAt) {
@@ -166,24 +242,184 @@ export function evaluateSubscriptionStatus(
     }
     const end = new Date(sub.currentPeriodEndsAt);
     if (now > end) {
-      const graceEnd = new Date(end.getTime() + graceMilliseconds);
-      const inGrace = now <= graceEnd;
-      return {
-        effectiveStatus: "PAST_DUE",
-        isOperational: inGrace,
-        isOverdue: true,
-        daysRemaining: inGrace ? Math.max(0, Math.ceil((graceEnd.getTime() - now.getTime()) / 86_400_000)) : 0,
-      };
+      return evaluatePaidOverdueDays(end, now);
     }
     return {
       effectiveStatus: "ACTIVE",
       isOperational: true,
       isOverdue: false,
-      daysRemaining: Math.max(0, Math.ceil((end.getTime() - now.getTime()) / 86_400_000)),
+      daysRemaining: Math.max(0, Math.ceil((end.getTime() - now.getTime()) / MS_PER_DAY)),
     };
   }
 
   throw new SubscriptionStatusUnavailableError("Subscription status is unrecognized.");
+}
+
+function RESTRICT_TO_READ_ONLY_MS() {
+  return RESTRICTED_END_DAY * MS_PER_DAY;
+}
+
+export function getSubscriptionLifecycleSummary(
+  sub: {
+    storedStatus: SubscriptionStatus;
+    effectiveStatus: EvaluatedSubscriptionState;
+    isOperational: boolean;
+    trialEndsAt: Date | null;
+    currentPeriodEndsAt: Date | null;
+    suspensionReason: string | null;
+  },
+  now = new Date()
+): SubscriptionLifecycleSummary {
+  const stage = sub.effectiveStatus;
+  const anchorEnd =
+    sub.storedStatus === SubscriptionStatus.TRIALING
+      ? sub.trialEndsAt
+      : sub.currentPeriodEndsAt;
+  const overdueDays =
+    anchorEnd && now > anchorEnd
+      ? Math.max(0, Math.floor((now.getTime() - anchorEnd.getTime()) / MS_PER_DAY))
+      : 0;
+
+  let nextStage: EvaluatedSubscriptionState | null = null;
+  let nextTransitionAt: string | null = null;
+  let daysUntilNextStage: number | null = null;
+
+  if (anchorEnd) {
+    const isTrialTrack = sub.storedStatus === SubscriptionStatus.TRIALING;
+    let targetDayOffset: number | null = null;
+    if (stage === "TRIALING") {
+      nextStage = "TRIAL_EXPIRED";
+      targetDayOffset = 0;
+    } else if (stage === "ACTIVE") {
+      nextStage = "PAST_DUE";
+      targetDayOffset = 0;
+    } else if (stage === "TRIAL_EXPIRED") {
+      nextStage = "RESTRICTED";
+      targetDayOffset = TRIAL_EXPIRED_WINDOW_DAYS;
+    } else if (stage === "PAST_DUE") {
+      nextStage = sub.isOperational ? "PAST_DUE" : "RESTRICTED";
+      targetDayOffset = sub.isOperational ? PAST_DUE_GRACE_PERIOD_DAYS : PAST_DUE_LOCKED_END_DAY;
+    } else if (stage === "RESTRICTED") {
+      nextStage = "READ_ONLY";
+      targetDayOffset = isTrialTrack ? TRIAL_RESTRICTED_END_DAY : RESTRICTED_END_DAY;
+    } else if (stage === "READ_ONLY") {
+      nextStage = "SUSPENDED";
+      targetDayOffset = isTrialTrack ? TRIAL_READ_ONLY_END_DAY : READ_ONLY_END_DAY;
+    }
+
+    if (targetDayOffset !== null) {
+      const targetDate = new Date(anchorEnd.getTime() + targetDayOffset * MS_PER_DAY);
+      if (targetDate > now) {
+        nextTransitionAt = targetDate.toISOString();
+        daysUntilNextStage = Math.max(0, Math.ceil((targetDate.getTime() - now.getTime()) / MS_PER_DAY));
+      } else {
+        nextStage = null;
+      }
+    }
+  }
+
+  const recoverySteps = [
+    "Confirm your exact renewal amount and billing currency with Platform Billing Support.",
+    "Settle via M-Pesa Paybill 400200 or Co-op Bank account 01102662965002 using your Hotel ID or name as the reference.",
+    "Share your transaction reference code with Platform Billing Support for manual verification and immediate reactivation.",
+    "Export a JSON, Excel (.xlsx), or PDF backup of your property records at any time from Billing & Recovery.",
+  ];
+
+  if (stage === "ACTIVE") {
+    return {
+      stage,
+      accessMode: "FULL",
+      canReadOperations: true,
+      canWriteOperations: true,
+      canExportRecords: true,
+      canRecoverBilling: true,
+      overdueDays: 0,
+      nextStage,
+      daysUntilNextStage,
+      nextTransitionAt,
+      summaryMessage: "Your workspace is active with full read and write access across all modules.",
+      recoverySteps,
+    };
+  }
+
+  if (stage === "TRIALING") {
+    return {
+      stage,
+      accessMode: "FULL",
+      canReadOperations: true,
+      canWriteOperations: true,
+      canExportRecords: true,
+      canRecoverBilling: true,
+      overdueDays: 0,
+      nextStage,
+      daysUntilNextStage,
+      nextTransitionAt,
+      summaryMessage: "Your free trial is active with full access. Verify a manual payment before trial expiry to continue uninterrupted.",
+      recoverySteps,
+    };
+  }
+
+  if (stage === "PAST_DUE" && sub.isOperational) {
+    return {
+      stage,
+      accessMode: "GRACE",
+      canReadOperations: true,
+      canWriteOperations: true,
+      canExportRecords: true,
+      canRecoverBilling: true,
+      overdueDays,
+      nextStage,
+      daysUntilNextStage,
+      nextTransitionAt,
+      summaryMessage: "Your billing period has ended and you are in the grace window. Renew manually before the grace period expires to avoid read-only restrictions.",
+      recoverySteps,
+    };
+  }
+
+  if (stage === "TRIAL_EXPIRED" || stage === "PAST_DUE" || stage === "RESTRICTED" || stage === "READ_ONLY") {
+    const label =
+      stage === "TRIAL_EXPIRED"
+        ? "Trial ended — write mutations are disabled"
+        : stage === "PAST_DUE"
+        ? "Grace period ended — write mutations are disabled"
+        : stage === "RESTRICTED"
+        ? "Account restricted — new operational changes are blocked"
+        : "Account in read-only mode — operational records are view-and-export only";
+
+    return {
+      stage,
+      accessMode: "READ_ONLY",
+      canReadOperations: true,
+      canWriteOperations: false,
+      canExportRecords: true,
+      canRecoverBilling: true,
+      overdueDays,
+      nextStage,
+      daysUntilNextStage,
+      nextTransitionAt,
+      summaryMessage: `${label}. You can still view operational data and export full workspace backups while renewing your subscription.`,
+      recoverySteps,
+    };
+  }
+
+  const reasonSuffix = sub.suspensionReason ? ` Reason: ${sub.suspensionReason}.` : "";
+  return {
+    stage,
+    accessMode: "BILLING_EXPORT_ONLY",
+    canReadOperations: false,
+    canWriteOperations: false,
+    canExportRecords: true,
+    canRecoverBilling: true,
+    overdueDays,
+    nextStage: null,
+    daysUntilNextStage: null,
+    nextTransitionAt: null,
+    summaryMessage:
+      stage === "CANCELLED"
+        ? `Your subscription has been cancelled.${reasonSuffix} Operational access is disabled, but owners and admins can still view billing history and export property records.`
+        : `Your workspace is suspended.${reasonSuffix} Operational access is disabled, but owners and admins can still review invoices, export property records, and reactivate via manual payment verification.`,
+    recoverySteps,
+  };
 }
 
 /**
@@ -329,7 +565,12 @@ export async function checkModuleEntitlement(
   const plan = sub.plan;
 
   // 1. Check subscription operational status
-  const readOnlyExpired = access === "read" && (sub.effectiveStatus === "TRIAL_EXPIRED" || sub.effectiveStatus === "PAST_DUE");
+  const readOnlyExpired =
+    access === "read" &&
+    (sub.effectiveStatus === "TRIAL_EXPIRED" ||
+      sub.effectiveStatus === "PAST_DUE" ||
+      sub.effectiveStatus === "RESTRICTED" ||
+      sub.effectiveStatus === "READ_ONLY");
   if (!sub.isOperational && !readOnlyExpired) {
     if (sub.effectiveStatus === "SUSPENDED") {
       return {
@@ -360,6 +601,30 @@ export async function checkModuleEntitlement(
         allowed: false,
         code: "SUBSCRIPTION_PAST_DUE",
         reason: `Subscription payment is overdue. Settle billing to access ${module}.`,
+        module,
+        effectiveStatus: sub.effectiveStatus,
+        planId: plan.id,
+        planName: plan.name,
+      };
+    }
+
+    if (sub.effectiveStatus === "RESTRICTED") {
+      return {
+        allowed: false,
+        code: "SUBSCRIPTION_RESTRICTED",
+        reason: `Subscription is restricted due to overdue billing. Settle billing to modify ${module}.`,
+        module,
+        effectiveStatus: sub.effectiveStatus,
+        planId: plan.id,
+        planName: plan.name,
+      };
+    }
+
+    if (sub.effectiveStatus === "READ_ONLY") {
+      return {
+        allowed: false,
+        code: "SUBSCRIPTION_READ_ONLY",
+        reason: `Subscription is in read-only mode. Settle billing to modify ${module}.`,
         module,
         effectiveStatus: sub.effectiveStatus,
         planId: plan.id,
@@ -401,6 +666,23 @@ export async function checkModuleEntitlement(
   };
 }
 
+function mapNonOperationalCode(effectiveStatus: EvaluatedSubscriptionState): string {
+  switch (effectiveStatus) {
+    case "TRIAL_EXPIRED":
+      return "TRIAL_EXPIRED";
+    case "RESTRICTED":
+      return "SUBSCRIPTION_RESTRICTED";
+    case "READ_ONLY":
+      return "SUBSCRIPTION_READ_ONLY";
+    case "SUSPENDED":
+      return "SUBSCRIPTION_SUSPENDED";
+    case "CANCELLED":
+      return "SUBSCRIPTION_CANCELLED";
+    default:
+      return "SUBSCRIPTION_PAST_DUE";
+  }
+}
+
 /**
  * Checks whether creating additional resources (rooms, staff) would exceed
  * the plan's configured usage limits.
@@ -415,10 +697,6 @@ export async function checkUsageLimit(
   const maxLimit = plan.limits[limitType];
 
   if (!sub.isOperational) {
-    const code = sub.effectiveStatus === "TRIAL_EXPIRED" ? "TRIAL_EXPIRED" :
-      sub.effectiveStatus === "SUSPENDED" ? "SUBSCRIPTION_SUSPENDED" :
-      sub.effectiveStatus === "CANCELLED" ? "SUBSCRIPTION_CANCELLED" :
-      "SUBSCRIPTION_PAST_DUE";
     return {
       allowed: false,
       limitType,
@@ -426,7 +704,7 @@ export async function checkUsageLimit(
       maxLimit,
       planId: plan.id,
       planName: plan.name,
-      code,
+      code: mapNonOperationalCode(sub.effectiveStatus),
       reason: `Subscription is not operational (${sub.effectiveStatus}); ${limitType === "maxRooms" ? "room" : "staff"} changes are blocked.`,
     };
   }
@@ -503,13 +781,9 @@ export async function withUsageLimitLock<T>(
   const plan = sub.plan;
   const maxLimit = plan.limits[limitType];
   if (!sub.isOperational) {
-    const code = sub.effectiveStatus === "TRIAL_EXPIRED" ? "TRIAL_EXPIRED" :
-      sub.effectiveStatus === "SUSPENDED" ? "SUBSCRIPTION_SUSPENDED" :
-      sub.effectiveStatus === "CANCELLED" ? "SUBSCRIPTION_CANCELLED" :
-      "SUBSCRIPTION_PAST_DUE";
     return {
       allowed: false,
-      limit: { allowed: false, limitType, currentCount: 0, maxLimit, planId: plan.id, planName: plan.name, code,
+      limit: { allowed: false, limitType, currentCount: 0, maxLimit, planId: plan.id, planName: plan.name, code: mapNonOperationalCode(sub.effectiveStatus),
         reason: `Subscription is not operational (${sub.effectiveStatus}); ${limitType === "maxRooms" ? "room" : "staff"} changes are blocked.` },
     };
   }

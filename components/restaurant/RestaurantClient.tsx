@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Minus, Plus, Trash2, ShoppingCart, UtensilsCrossed, Settings2, X } from "lucide-react";
 import type { HotelRole } from "@prisma/client";
+import Decimal from "decimal.js";
+import { roundMoneyDecimal } from "@/lib/billing";
 import clsx from "clsx";
 import { hasRole, ROLE_GROUPS } from "@/lib/permissions";
 import { isRequiredMenuCategory } from "@/lib/menu-categories";
@@ -772,7 +774,12 @@ export default function RestaurantClient({
     }
   }
 
-  const subtotal = order.reduce((s, l) => s + l.unitPrice * l.quantity, 0);
+  const subtotal = roundMoneyDecimal(
+    order.reduce(
+      (s, l) => s.plus(new Decimal(String(l.unitPrice)).mul(l.quantity)),
+      new Decimal(0)
+    )
+  ).toNumber();
   const total = subtotal;
 
   function addItem(item: MenuItem) {

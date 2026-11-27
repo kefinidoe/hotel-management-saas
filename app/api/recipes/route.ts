@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import Decimal from "decimal.js";
+import { roundMoneyDecimal } from "@/lib/billing";
 import { prisma } from "@/lib/prisma";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { computeAvailablePortions } from "@/lib/inventory";
@@ -12,9 +14,24 @@ function parseIngredients(value: unknown): IngredientInput[] | null {
     const candidate = raw as { inventoryItemId?: unknown; quantity?: unknown } | null;
     const inventoryItemId =
       typeof candidate?.inventoryItemId === "string" ? candidate.inventoryItemId.trim() : "";
-    const quantity = Number(candidate?.quantity);
-    if (!inventoryItemId || !Number.isFinite(quantity) || quantity <= 0) return null;
-    ingredients.push({ inventoryItemId, quantity });
+    if (
+      !inventoryItemId ||
+      (typeof candidate?.quantity !== "number" && typeof candidate?.quantity !== "string") ||
+      (typeof candidate?.quantity === "number" && !Number.isFinite(candidate.quantity)) ||
+      (typeof candidate?.quantity === "string" && candidate.quantity.trim() === "")
+    ) {
+      return null;
+    }
+    let parsedQty: Decimal;
+    try {
+      parsedQty = new Decimal(
+        typeof candidate.quantity === "string" ? candidate.quantity.trim() : candidate.quantity
+      );
+    } catch {
+      return null;
+    }
+    if (!parsedQty.isFinite() || parsedQty.lte(0)) return null;
+    ingredients.push({ inventoryItemId, quantity: parsedQty.toNumber() });
   }
   return ingredients;
 }
@@ -61,37 +78,45 @@ export async function GET() {
       inventoryItemId: ingredient.inventoryItemId,
       name: ingredient.inventoryItem.name,
       unit: ingredient.inventoryItem.unit,
-      quantityPerBatch: Number(ingredient.quantity),
-      currentStock: Number(ingredient.inventoryItem.currentStock),
-      unitCost: Number(ingredient.inventoryItem.costPerUnit),
+      quantityPerBatch: String(ingredient.quantity),
+      currentStock: String(ingredient.inventoryItem.currentStock),
+      unitCost: String(ingredient.inventoryItem.costPerUnit),
     }));
 
     const { portions, limitingItem } = computeAvailablePortions(ingredients, recipe.portions);
     const costPerBatch = ingredients.reduce(
-      (sum, ingredient) => sum + ingredient.quantityPerBatch * ingredient.unitCost,
-      0
+      (sum, ingredient) =>
+        sum.plus(new Decimal(ingredient.quantityPerBatch).mul(ingredient.unitCost)),
+      new Decimal(0)
     );
-    const costPerPortion = costPerBatch / recipe.portions;
-    const sellingPrice = Number(recipe.menuItem.price);
-    const profit = sellingPrice - costPerPortion;
+    const costPerPortionDecimal = costPerBatch.div(recipe.portions);
+    const sellingPriceDecimal = new Decimal(String(recipe.menuItem.price));
+    const profitDecimal = sellingPriceDecimal.minus(costPerPortionDecimal);
+    const profitMargin = sellingPriceDecimal.gt(0)
+      ? profitDecimal
+          .div(sellingPriceDecimal)
+          .mul(100)
+          .toDecimalPlaces(2, Decimal.ROUND_HALF_CEIL)
+          .toNumber()
+      : 0;
 
     return {
       id: recipe.id,
       menuItemId: recipe.menuItemId,
       name: recipe.menuItem.name,
       category: recipe.menuItem.category.name,
-      sellingPrice,
+      sellingPrice: sellingPriceDecimal.toNumber(),
       portionsPerBatch: recipe.portions,
-      costPerPortion: Math.round(costPerPortion),
-      profit: Math.round(profit),
-      profitMargin: sellingPrice > 0 ? Math.round((profit / sellingPrice) * 100) : 0,
+      costPerPortion: roundMoneyDecimal(costPerPortionDecimal).toNumber(),
+      profit: roundMoneyDecimal(profitDecimal).toNumber(),
+      profitMargin,
       availablePortions: portions,
       limitingItem,
       ingredients: ingredients.map((ingredient) => ({
         inventoryItemId: ingredient.inventoryItemId,
         name: ingredient.name,
         unit: ingredient.unit,
-        quantityPerBatch: ingredient.quantityPerBatch,
+        quantityPerBatch: Number(ingredient.quantityPerBatch),
       })),
     };
   });

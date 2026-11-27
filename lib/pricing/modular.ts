@@ -1,5 +1,6 @@
 /** Server-side modular price construction for opt-in hotels. */
-import { accommodationRequired, parseMoney, roundMoney, stayNights } from "@/lib/billing";
+import Decimal from "decimal.js";
+import { accommodationRequiredExact, parseMoneyDecimal, roundMoneyDecimal, stayNights } from "@/lib/billing";
 import { calculateUniversalNightlyRate, UNIVERSAL_MEAL_PLAN_LABELS, type HotelMealRate, type UniversalMealPlan } from "@/lib/pricing";
 import type { PriceBreakdown } from "@/lib/pricing/types";
 
@@ -28,18 +29,32 @@ export function priceModularStay(input: {
   }
   const nights = stayNights(input.checkIn, input.checkOut);
   if (nights > 3660) throw new Error("The stay is too long to price.");
-  const nightlyRate = calculateUniversalNightlyRate({
-    baseRate: input.roomType.baseRate, extraAdultFee: input.roomType.extraAdultFee,
-    mealPlan: input.mealPlan, adults: input.adults, children: input.children, hotelMealRates: input.mealRates,
-  });
-  const discount = parseMoney(input.discount ?? 0, "Discount", { allowZero: true });
-  const grandTotal = accommodationRequired([nightlyRate], nights, discount);
-  const subtotal = roundMoney(nightlyRate * nights);
-  const roomNightlyRate = roundMoney(parseMoney(input.roomType.baseRate, "Base rate") +
-    (input.adults - 1) * parseMoney(input.roomType.extraAdultFee, "Extra adult fee", { allowZero: true }));
-  const mealNightlyRate = roundMoney(nightlyRate - roomNightlyRate);
-  const roomTotal = roundMoney(roomNightlyRate * nights);
-  const mealsTotal = roundMoney(mealNightlyRate * nights);
+  const nightlyRateDecimal = new Decimal(
+    calculateUniversalNightlyRate({
+      baseRate: input.roomType.baseRate, extraAdultFee: input.roomType.extraAdultFee,
+      mealPlan: input.mealPlan, adults: input.adults, children: input.children, hotelMealRates: input.mealRates,
+    })
+  );
+  const discountDecimal = parseMoneyDecimal(input.discount ?? 0, "Discount", { allowZero: true });
+  const grandTotalDecimal = accommodationRequiredExact([nightlyRateDecimal], nights, discountDecimal);
+  const subtotalDecimal = roundMoneyDecimal(nightlyRateDecimal.mul(nights));
+  const baseRateDecimal = parseMoneyDecimal(input.roomType.baseRate, "Base rate");
+  const extraAdultDecimal = parseMoneyDecimal(input.roomType.extraAdultFee, "Extra adult fee", { allowZero: true });
+  const roomNightlyRateDecimal = roundMoneyDecimal(baseRateDecimal.plus(extraAdultDecimal.mul(input.adults - 1)));
+  const mealNightlyRateDecimal = roundMoneyDecimal(nightlyRateDecimal.minus(roomNightlyRateDecimal));
+  const roomTotalDecimal = roundMoneyDecimal(roomNightlyRateDecimal.mul(nights));
+  const mealsTotalDecimal = roundMoneyDecimal(mealNightlyRateDecimal.mul(nights));
+
+  const nightlyRate = nightlyRateDecimal.toNumber();
+  const discount = discountDecimal.toNumber();
+  const grandTotal = grandTotalDecimal.toNumber();
+  const subtotal = subtotalDecimal.toNumber();
+  const roomNightlyRate = roomNightlyRateDecimal.toNumber();
+  const mealNightlyRate = mealNightlyRateDecimal.toNumber();
+  const roomTotal = roomTotalDecimal.toNumber();
+  const mealsTotal = mealsTotalDecimal.toNumber();
+  const averagePerNight = roundMoneyDecimal(grandTotalDecimal.div(nights)).toNumber();
+
   return {
     ok: true, currency: input.currency, pricingModel: "MODULAR_PRICING", nights,
     roomTypeId: input.roomType.id, roomTypeName: input.roomType.name,
@@ -53,9 +68,9 @@ export function priceModularStay(input: {
     lines: [
       { kind: "ROOM", code: "ROOM", label: input.roomType.name, quantity: nights, unitPrice: roomNightlyRate, amount: roomTotal },
       ...(mealsTotal ? [{ kind: "MEAL_PLAN" as const, code: "MEAL_PLAN", label: UNIVERSAL_MEAL_PLAN_LABELS[input.mealPlan], quantity: nights, unitPrice: mealNightlyRate, amount: mealsTotal }] : []),
-      ...(discount > 0 ? [{ kind: "DISCOUNT" as const, code: "DISCOUNT", label: "Discount", quantity: 1, unitPrice: discount, amount: -discount }] : []),
+      ...(discount > 0 ? [{ kind: "DISCOUNT" as const, code: "DISCOUNT", label: "Discount", quantity: 1, unitPrice: discount, amount: discountDecimal.neg().toNumber() }] : []),
     ],
-    totals: { room: roomTotal, adjustments: 0, meals: mealsTotal, extras: 0, subtotal, discount, tax: 0, grandTotal, averagePerNight: roundMoney(grandTotal / nights) },
+    totals: { room: roomTotal, adjustments: 0, meals: mealsTotal, extras: 0, subtotal, discount, tax: 0, grandTotal, averagePerNight },
     taxInclusive: false,
   };
 }
