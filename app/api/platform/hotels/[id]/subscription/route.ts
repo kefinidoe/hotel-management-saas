@@ -10,13 +10,17 @@ import {
 } from "@/lib/plans";
 import {
   evaluateSubscriptionStatus,
-  getOrBootstrapSubscription,
   getHotelUsageAndSubscription,
 } from "@/lib/entitlements";
 import { PlatformRole, Prisma } from "@prisma/client";
 import { z } from "zod";
 import { manualSubscriptionPaymentSchema } from "@/lib/manual-subscription-payment";
-import { activateManualSubscription, ManualPaymentConflictError, ManualSubscriptionNotFoundError } from "@/lib/activate-manual-subscription";
+import { activateManualSubscription, ManualPaymentConflictError, ManualSubscriptionNotFoundError, ManualActivationForbiddenError } from "@/lib/activate-manual-subscription";
+import { hotelStatusForSubscription } from "@/lib/platform-lifecycle";
+
+class LifecycleChangedError extends Error {}
+class LifecycleForbiddenError extends Error {}
+class LifecycleAlreadySetError extends Error {}
 
 export const dynamic = "force-dynamic";
 
@@ -138,6 +142,7 @@ export async function PATCH(
         return NextResponse.json({ error: "DUPLICATE_PAYMENT_REFERENCE", message: "This payment reference has already been recorded." }, { status: 409 });
       }
       if (error instanceof ManualSubscriptionNotFoundError) return NextResponse.json({ error: "NOT_FOUND", message: error.message }, { status: 404 });
+      if (error instanceof ManualActivationForbiddenError) return NextResponse.json({ error: "FORBIDDEN", message: error.message }, { status: 403 });
       console.error("Failed to activate manual subscription payment:", error);
       return NextResponse.json({ error: "SERVER_ERROR", message: "Failed to record manual payment." }, { status: 500 });
     }
@@ -165,13 +170,12 @@ export async function PATCH(
   }
 
   try {
-    // 2. Ensure hotel and subscription exist
-    const subContext = await getOrBootstrapSubscription(hotelId);
-
-    const currentSub = await prisma.subscription.findUnique({
-      where: { hotelId },
-    });
-    if (!currentSub) {
+    // Existing subscriptions only: never create an unaudited row before a lifecycle transaction.
+    const [currentSub, currentHotel] = await Promise.all([
+      prisma.subscription.findUnique({ where: { hotelId } }),
+      prisma.hotel.findUnique({ where: { id: hotelId }, select: { status: true, currency: true } }),
+    ]);
+    if (!currentSub || !currentHotel) {
       return NextResponse.json(
         { error: "NOT_FOUND", message: "Subscription record not found." },
         { status: 404 }
@@ -221,7 +225,7 @@ export async function PATCH(
         );
       }
 
-      const isUSD = (currentSub.currency || "KES").toUpperCase() === "USD";
+      const isUSD = (currentSub.currency || currentHotel.currency || "KES").toUpperCase() === "USD";
       updateData.planId = targetPlan.id;
       updateData.amount =
         currentSub.billingInterval === BillingInterval.YEARLY
@@ -260,6 +264,9 @@ export async function PATCH(
 
       updateData.trialEndsAt = newTrialEnd;
       updateData.status = SubscriptionStatus.TRIALING;
+      updateData.suspendedAt = null;
+      updateData.suspensionReason = null;
+      updateData.canceledAt = null;
 
       auditAction = "PLATFORM_TRIAL_EXTENDED";
       auditDetails.previousTrialEnd = currentSub.trialEndsAt?.toISOString() || null;
@@ -287,15 +294,9 @@ export async function PATCH(
         );
       }
 
-      // Check current vs new
-      if (currentSub.status === newStatus) {
-        return NextResponse.json(
-          { error: "ALREADY_IN_STATUS", message: `Subscription is already in status '${newStatus}'.` },
-          { status: 400 }
-        );
-      }
-
       updateData.status = newStatus;
+      if (newStatus !== SubscriptionStatus.SUSPENDED) { updateData.suspendedAt = null; updateData.suspensionReason = null; }
+      if (newStatus !== SubscriptionStatus.CANCELLED) updateData.canceledAt = null;
 
       if (newStatus === SubscriptionStatus.SUSPENDED) {
         updateData.suspendedAt = new Date();
@@ -318,8 +319,10 @@ export async function PATCH(
       if (billingInterval && Object.values(BillingInterval).includes(billingInterval as BillingInterval)) {
         updateData.billingInterval = billingInterval;
         const plan = getPlan(currentSub.planId);
-        updateData.amount =
-          billingInterval === BillingInterval.YEARLY ? plan.yearlyPriceKES : plan.monthlyPriceKES;
+        const isUSD = (currentSub.currency || currentHotel.currency || "KES").toUpperCase() === "USD";
+        updateData.amount = billingInterval === BillingInterval.YEARLY
+          ? (isUSD ? plan.yearlyPriceUSD : plan.yearlyPriceKES)
+          : (isUSD ? plan.monthlyPriceUSD : plan.monthlyPriceKES);
         auditDetails.billingInterval = billingInterval;
       }
       auditAction = "PLATFORM_BILLING_INTERVAL_ADJUSTED";
@@ -330,8 +333,31 @@ export async function PATCH(
       );
     }
 
+    // Ensure the resulting status is evaluable before committing any changes.
+    try {
+      evaluateSubscriptionStatus({ status: updateData.status ?? currentSub.status,
+        trialEndsAt: updateData.trialEndsAt ?? currentSub.trialEndsAt,
+        currentPeriodEndsAt: updateData.currentPeriodEndsAt ?? currentSub.currentPeriodEndsAt });
+    } catch {
+      return NextResponse.json({ error: "INVALID_SUBSCRIPTION_DATES", message: "Required subscription dates are missing or invalid." }, { status: 409 });
+    }
+
     // 3. Atomically apply update and write audit log
     const updatedSub = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Hotel" WHERE id = ${hotelId} FOR UPDATE`;
+      const hotel = await tx.hotel.findUnique({ where: { id: hotelId }, select: { status: true, currency: true } });
+      const latest = await tx.subscription.findUnique({ where: { hotelId } });
+      if (!hotel || !latest || hotel.currency !== currentHotel.currency || JSON.stringify(latest) !== JSON.stringify(currentSub)) throw new LifecycleChangedError();
+      if (updateData.status) {
+        const desiredHotelStatus = hotelStatusForSubscription(updateData.status);
+        if (action === "CHANGE_STATUS" && latest.status === updateData.status && hotel.status === desiredHotelStatus) throw new LifecycleAlreadySetError();
+        if ((hotel.status === "CANCELLED" || latest.status === "CANCELLED") && desiredHotelStatus !== "CANCELLED" && admin.platformRole !== PlatformRole.PLATFORM_SUPER_ADMIN) {
+          throw new LifecycleForbiddenError();
+        }
+        await tx.hotel.update({ where: { id: hotelId }, data: { status: desiredHotelStatus } });
+        auditDetails.previousHotelStatus = hotel.status;
+        auditDetails.newHotelStatus = desiredHotelStatus;
+      }
       const updated = await tx.subscription.update({
         where: { hotelId },
         data: updateData,
@@ -378,6 +404,9 @@ export async function PATCH(
       },
     });
   } catch (error) {
+    if (error instanceof LifecycleChangedError) return NextResponse.json({ error: "CONCURRENT_CHANGE", message: "Subscription changed. Refresh and retry." }, { status: 409 });
+    if (error instanceof LifecycleAlreadySetError) return NextResponse.json({ error: "ALREADY_IN_STATUS", message: "Hotel and subscription are already in that status." }, { status: 400 });
+    if (error instanceof LifecycleForbiddenError) return NextResponse.json({ error: "FORBIDDEN", message: "Only Platform Super Administrators can reactivate a cancelled hotel." }, { status: 403 });
     console.error("Failed to update hotel subscription:", error);
     return NextResponse.json(
       { error: "SERVER_ERROR", message: "Failed to update subscription." },

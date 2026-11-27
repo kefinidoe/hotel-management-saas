@@ -139,6 +139,8 @@ export async function GET(req: Request) {
               cancelAtPeriodEnd: sub.cancelAtPeriodEnd,
               billingInterval: sub.billingInterval,
               amount: Number(sub.amount),
+              amountExact: String(sub.amount),
+              currency,
               suspensionReason: sub.suspensionReason,
             }
           : {
@@ -157,6 +159,8 @@ export async function GET(req: Request) {
               cancelAtPeriodEnd: false,
               billingInterval: "MONTHLY",
               amount: 0,
+              amountExact: "0",
+              currency,
               suspensionReason: null,
             },
         usage: {

@@ -194,9 +194,11 @@ let memberships: Map<string, MembershipRecord>;
 let auditLogs: AuditLogRecord[];
 let roomsCount: number = 24;
 let subscriptionStorageUnavailable = false;
+let subscriptionStatuses: Map<string, string>;
 
 function resetDB() {
   subscriptionStorageUnavailable = false;
+  subscriptionStatuses = new Map();
   users = new Map();
   hotels = new Map();
   memberships = new Map();
@@ -317,8 +319,8 @@ function resetDB() {
 }
 
 // Mock Prisma
-vi.doMock("@/lib/prisma", () => ({
-  prisma: {
+vi.doMock("@/lib/prisma", () => {
+  const prisma = {
     user: {
       findUnique: async ({ where }: any) => users.get(where.id) || null,
       findFirst: async ({ where }: any) => {
@@ -433,7 +435,7 @@ vi.doMock("@/lib/prisma", () => ({
           id: `subscription-${hotel.id}`,
           hotelId: hotel.id,
           planId: "BAND_1_10",
-          status: SubscriptionStatus.TRIALING,
+          status: subscriptionStatuses.get(hotel.id) || hotel.status,
           trialStartsAt,
           trialEndsAt,
           currentPeriodStartsAt: trialStartsAt,
@@ -444,6 +446,12 @@ vi.doMock("@/lib/prisma", () => ({
           amount: 0,
           currency: hotel.currency,
         };
+      },
+      update: async ({ where, data }: any) => {
+        const currentHotel = hotels.get(where.hotelId);
+        if (!currentHotel) throw new Error("Subscription not found");
+        subscriptionStatuses.set(where.hotelId, data.status);
+        return { hotelId: where.hotelId, ...data };
       },
     },
     hotelMembership: {
@@ -496,15 +504,23 @@ vi.doMock("@/lib/prisma", () => ({
         return newLog;
       },
     },
-    $transaction: async (promises: any[]) => {
-      const results = [];
-      for (const p of promises) {
-        results.push(await p);
+    $transaction: async (work: any) => {
+      const snapshotHotels = new Map(hotels);
+      const snapshotStatuses = new Map(subscriptionStatuses);
+      const snapshotAudits = [...auditLogs];
+      try {
+        if (Array.isArray(work)) return await Promise.all(work);
+        return await work({ ...prisma, $queryRaw: async () => [] });
+      } catch (error) {
+        hotels = snapshotHotels;
+        subscriptionStatuses = snapshotStatuses;
+        auditLogs = snapshotAudits;
+        throw error;
       }
-      return results;
     },
-  },
-}));
+  };
+  return { prisma };
+});
 
 // Import platform routes after mocks
 const { GET: getOverview } = await import("@/app/api/platform/overview/route");
@@ -683,6 +699,7 @@ describe("Phase 6: Platform Administration & Hotel Lifecycle", () => {
       // Verify hotel status was updated in database
       const hotelInDb = hotels.get("hotel-alpha");
       expect(hotelInDb?.status).toBe(HotelStatus.SUSPENDED);
+      expect(subscriptionStatuses.get("hotel-alpha")).toBe(SubscriptionStatus.SUSPENDED);
 
       // Verify audit log record was created
       expect(auditLogs.length).toBe(1);
@@ -694,6 +711,47 @@ describe("Phase 6: Platform Administration & Hotel Lifecycle", () => {
       expect(log.metadata.newStatus).toBe(HotelStatus.SUSPENDED);
       expect(log.metadata.reason).toBe("Payment failure and terms review");
       expect(log.metadata.platformRole).toBe(PlatformRole.PLATFORM_SUPER_ADMIN);
+    });
+
+    it("repairs a legacy divergent subscription when selecting the current hotel status", async () => {
+      mockSession = { user: { id: "user-super-admin" } };
+      subscriptionStatuses.set("hotel-alpha", "SUSPENDED");
+      const req = new Request("http://localhost/api/platform/hotels/hotel-alpha/status", {
+        method: "PATCH", body: JSON.stringify({ status: "ACTIVE", reason: "Restore verified account" }),
+      });
+      const res = await updateHotelStatus(req, { params: Promise.resolve({ id: "hotel-alpha" }) });
+      expect(res.status).toBe(200);
+      expect(hotels.get("hotel-alpha")?.status).toBe("ACTIVE");
+      expect(subscriptionStatuses.get("hotel-alpha")).toBe("ACTIVE");
+      expect(auditLogs[0].metadata.previousSubscriptionStatus).toBe("SUSPENDED");
+    });
+
+    it("retains PAST_DUE billing when the hotel is set ACTIVE", async () => {
+      mockSession = { user: { id: "user-super-admin" } };
+      subscriptionStatuses.set("hotel-gamma", "PAST_DUE");
+      const req = new Request("http://localhost/api/platform/hotels/hotel-gamma/status", {
+        method: "PATCH", body: JSON.stringify({ status: "ACTIVE", reason: "Enable hotel access" }),
+      });
+      const res = await updateHotelStatus(req, { params: Promise.resolve({ id: "hotel-gamma" }) });
+      expect(res.status).toBe(200);
+      expect(hotels.get("hotel-gamma")?.status).toBe("ACTIVE");
+      expect(subscriptionStatuses.get("hotel-gamma")).toBe("PAST_DUE");
+    });
+
+    it("rolls back both lifecycle states when the audit insert fails", async () => {
+      mockSession = { user: { id: "user-super-admin" } };
+      const { prisma } = await import("@/lib/prisma");
+      const spy = vi.spyOn(prisma.auditLog, "create").mockRejectedValueOnce(new Error("audit denied"));
+      try {
+        const req = new Request("http://localhost/api/platform/hotels/hotel-alpha/status", {
+          method: "PATCH", body: JSON.stringify({ status: "SUSPENDED", reason: "Verified reason", confirmed: true }),
+        });
+        const res = await updateHotelStatus(req, { params: Promise.resolve({ id: "hotel-alpha" }) });
+        expect(res.status).toBe(500);
+        expect(hotels.get("hotel-alpha")?.status).toBe("ACTIVE");
+        expect(subscriptionStatuses.has("hotel-alpha")).toBe(false);
+        expect(auditLogs).toHaveLength(0);
+      } finally { spy.mockRestore(); }
     });
 
     it("rejects suspension if confirmation is not provided", async () => {

@@ -182,6 +182,38 @@ suite("real Postgres HTTP authentication rate limiting", () => {
     }
   }, 30_000);
 
+  it("atomically synchronizes platform lifecycle updates and audits against PostgreSQL", async () => {
+    const account = await newAccount("lifecycle-super-admin");
+    await db.query(`UPDATE "User" SET "platformRole"='PLATFORM_SUPER_ADMIN' WHERE email=$1`, [account.email]);
+    const cookie = await signIn(account);
+    const hotelId = randomUUID(), subId = randomUUID();
+    await db.query(`INSERT INTO "Hotel" (id,name,slug,status,"updatedAt") VALUES ($1,'Fictional lifecycle hotel',$2,'ACTIVE',now())`, [hotelId, `ci-lifecycle-${instanceTag}`]);
+    await db.query(`INSERT INTO "Subscription" (id,"hotelId",status,"trialStartsAt","trialEndsAt","currentPeriodStartsAt","currentPeriodEndsAt","updatedAt") VALUES ($1,$2,'ACTIVE',now(),now()+interval '30 days',now(),now()+interval '30 days',now())`, [subId, hotelId]);
+    const patch = (suffix: string, data: unknown) => fetch(`${bases[0]}/api/platform/hotels/${hotelId}/${suffix}`, {
+      method: "PATCH", headers: { cookie, origin: bases[0], "content-type": "application/json" }, body: JSON.stringify(data),
+    });
+    const states = async () => (await db.query(`SELECT h.status::text AS hotel,s.status::text AS subscription FROM "Hotel" h JOIN "Subscription" s ON s."hotelId"=h.id WHERE h.id=$1`, [hotelId])).rows[0];
+    const hotelRequest = { status: "TRIALING", reason: "Reviewed trial" };
+    await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
+    try { expect((await patch("status", hotelRequest)).status).toBe(500); }
+    finally { await db.query('GRANT INSERT ON "AuditLog" TO hotel_saas_runtime'); }
+    expect(await states()).toMatchObject({ hotel: "ACTIVE", subscription: "ACTIVE" });
+    expect((await patch("status", hotelRequest)).status).toBe(200);
+    expect(await states()).toMatchObject({ hotel: "TRIALING", subscription: "TRIALING" });
+    const suspension = { action: "CHANGE_STATUS", newStatus: "SUSPENDED", reason: "Verified suspension", confirmed: true };
+    await db.query('REVOKE INSERT ON "AuditLog" FROM hotel_saas_runtime');
+    try { expect((await patch("subscription", suspension)).status).toBe(500); }
+    finally { await db.query('GRANT INSERT ON "AuditLog" TO hotel_saas_runtime'); }
+    expect(await states()).toMatchObject({ hotel: "TRIALING", subscription: "TRIALING" });
+    expect((await patch("subscription", suspension)).status).toBe(200);
+    expect(await states()).toMatchObject({ hotel: "SUSPENDED", subscription: "SUSPENDED" });
+    const activation = { action: "ACTIVATE_MANUAL_PAYMENT", referenceCode: `CI-${instanceTag}`, amountPaid: 100, durationDays: 30, reason: "Verified payment" };
+    expect((await patch("subscription", activation)).status).toBe(200);
+    expect(await states()).toMatchObject({ hotel: "ACTIVE", subscription: "ACTIVE" });
+    const audits = await db.query(`SELECT count(*)::int AS count FROM "AuditLog" WHERE "hotelId"=$1 AND action IN ('HOTEL_STATUS_TRIALING','PLATFORM_SUBSCRIPTION_STATUS_CHANGED','PLATFORM_MANUAL_PAYMENT_ACTIVATED')`, [hotelId]);
+    expect(audits.rows[0].count).toBe(3);
+  }, 30_000);
+
   it("runs hotel booking, check-in, payment and audited pricing with the non-owner role", async () => {
     const owner = await signIn(await newAccount("runtime-workflow-owner", true));
     const base = bases[0];

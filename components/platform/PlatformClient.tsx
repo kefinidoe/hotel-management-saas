@@ -21,6 +21,7 @@ import {
   CreditCard,
 } from "lucide-react";
 import type { HotelStatus } from "@prisma/client";
+import { formatPlatformPrice } from "@/lib/platform-currency";
 
 interface HotelSummary {
   id: string;
@@ -223,6 +224,7 @@ export default function PlatformClient() {
       setManagingSubHotel(null);
       loadSubscriptions();
       loadOverview();
+      loadHotels();
       setTimeout(() => setSuccessToast(null), 4000);
     } catch (err: any) {
       setSubError(err.message || "Failed to submit subscription changes.");
@@ -293,6 +295,7 @@ export default function PlatformClient() {
       setLifecycleHotel(null);
       loadHotels();
       loadOverview();
+      loadSubscriptions();
     } catch (err: any) {
       setStatusError(err.message || "Failed to update hotel status");
     } finally {
@@ -969,7 +972,7 @@ export default function PlatformClient() {
                           <div className="flex flex-col gap-0.5">
                             {getPlanBadge(sub.subscription.planId)}
                             <span className="text-[11px] text-text-secondary font-mono mt-0.5">
-                              KES {sub.subscription.amount.toLocaleString()} / {sub.subscription.billingInterval.toLowerCase()}
+                              {formatPlatformPrice(sub.subscription.amountExact, sub.subscription.currency, sub.currency)} / {sub.subscription.billingInterval.toLowerCase()}
                             </span>
                           </div>
                         </td>
@@ -1329,6 +1332,9 @@ export default function PlatformClient() {
                 </h2>
                 <p className="text-xs text-text-secondary mt-0.5 font-mono">
                   Hotel: {managingSubHotel.hotelName} (/{managingSubHotel.hotelSlug})
+                </p>
+                <p className="text-xs text-text-secondary mt-0.5">
+                  Current price: {formatPlatformPrice(managingSubHotel.subscription.amountExact, managingSubHotel.subscription.currency, managingSubHotel.currency)} / {managingSubHotel.subscription.billingInterval.toLowerCase()}
                 </p>
               </div>
               <button

@@ -65,6 +65,7 @@ interface DBState {
 }
 
 let db: DBState;
+let failTransactionalAudit = false;
 
 function resetDB(): DBState {
   const users = new Map<string, any>();
@@ -230,6 +231,7 @@ function resetDB(): DBState {
     currency: "KES",
   });
 
+  for (const sub of subscriptions.values()) sub.updatedAt = new Date("2026-01-01T00:00:00Z");
   return {
     users,
     hotels,
@@ -569,7 +571,10 @@ vi.doMock("@/lib/prisma", () => ({
       if (Array.isArray(fnOrArray)) {
         return Promise.all(fnOrArray);
       }
-      return fnOrArray({
+      const beforeHotels = new Map(db.hotels);
+      const beforeSubscriptions = new Map(db.subscriptions);
+      const beforeAudit = [...db.auditLogs];
+      try { return await fnOrArray({
         $queryRaw: async () => [{ locked: "true" }],
         room: {
           count: async ({ where }: any) => Array.from(db.rooms.values()).filter((room) =>
@@ -581,7 +586,12 @@ vi.doMock("@/lib/prisma", () => ({
             membership.hotelId === where?.hotelId && (!where?.status || membership.status === where.status)
           ).length,
         },
+        hotel: {
+          findUnique: async ({ where }: any) => db.hotels.get(where.id) || null,
+          update: async ({ where, data }: any) => { const h = { ...db.hotels.get(where.id), ...data }; db.hotels.set(where.id, h); return h; },
+        },
         subscription: {
+          findUnique: async ({ where }: any) => db.subscriptions.get(where.hotelId) || null,
           update: async ({ where, data }: any) => {
             const existing = db.subscriptions.get(where.hotelId);
             const updated = { ...existing, ...data };
@@ -591,6 +601,7 @@ vi.doMock("@/lib/prisma", () => ({
         },
         auditLog: {
           create: async ({ data }: any) => {
+            if (failTransactionalAudit) throw new Error("audit denied");
             const id = `audit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
             const log = { id, createdAt: new Date(), ...data };
             db.auditLogs.push(log);
@@ -637,7 +648,7 @@ vi.doMock("@/lib/prisma", () => ({
         recipe: {
           findMany: async () => [],
         },
-      });
+      }); } catch (error) { db.hotels = beforeHotels; db.subscriptions = beforeSubscriptions; db.auditLogs = beforeAudit; throw error; }
     },
   },
 }));
@@ -655,6 +666,7 @@ beforeAll(async () => {
 describe("Phase 7: SaaS Subscription Foundation and Plan Enforcement", () => {
   beforeEach(() => {
     db = resetDB();
+    failTransactionalAudit = false;
     mockCurrentSession = null;
     mockActiveCookie = null;
   });
@@ -837,6 +849,22 @@ describe("Phase 7: SaaS Subscription Foundation and Plan Enforcement", () => {
       expect(res.reason).toContain("Non-payment");
     });
 
+    it("does not let an overdue subscription bypass an expired hotel trial", async () => {
+      db.hotels.set("hotel-b", { ...db.hotels.get("hotel-b"), status: HotelStatus.TRIALING });
+      db.subscriptions.set("hotel-b", { ...db.subscriptions.get("hotel-b"), status: SubscriptionStatus.PAST_DUE,
+        currentPeriodEndsAt: new Date(Date.now() + 86_400_000), trialEndsAt: new Date(Date.now() - 86_400_000) });
+      const result = await checkModuleEntitlement("hotel-b", "FOLIOS", "write");
+      expect(result.allowed).toBe(false);
+      expect(result.effectiveStatus).toBe("TRIAL_EXPIRED");
+    });
+
+    it("does not let an active subscription bypass a suspended hotel", async () => {
+      db.hotels.set("hotel-b", { ...db.hotels.get("hotel-b"), status: HotelStatus.SUSPENDED });
+      const result = await checkModuleEntitlement("hotel-b", "FOLIOS", "write");
+      expect(result.allowed).toBe(false);
+      expect(result.effectiveStatus).toBe("SUSPENDED");
+    });
+
     it("keeps subscription status and billing details readable after a trial expires", async () => {
       mockCurrentSession = { user: { id: "user-a-owner" } };
       mockActiveCookie = "hotel-a";
@@ -852,7 +880,7 @@ describe("Phase 7: SaaS Subscription Foundation and Plan Enforcement", () => {
 
       expect(response.status).toBe(200);
       expect(json.hotel.status).toBe(HotelStatus.SUSPENDED);
-      expect(json.subscription.effectiveStatus).toBe("TRIAL_EXPIRED");
+      expect(json.subscription.effectiveStatus).toBe("SUSPENDED");
       expect(json.subscription.isOperational).toBe(false);
       expect(json.policy.pastDueGracePeriodDays).toBe(7);
     });
@@ -1020,6 +1048,24 @@ describe("Phase 7: SaaS Subscription Foundation and Plan Enforcement", () => {
       expect(lastLog.metadata.previousPlan).toBe("STARTER");
       expect(lastLog.metadata.newPlan).toBe("GROWTH");
       expect(lastLog.metadata.reason).toContain("restaurant POS");
+    });
+
+    it("changes subscription and hotel statuses with the audit in one transaction", async () => {
+      const { PATCH } = await import("@/app/api/platform/hotels/[id]/subscription/route");
+      mockCurrentSession = { user: { id: "super-admin-user" } };
+      const request = () => new Request("http://localhost/api/platform/hotels/hotel-a/subscription", {
+        method: "PATCH", body: JSON.stringify({ action: "CHANGE_STATUS", newStatus: "SUSPENDED", reason: "Verified suspension", confirmed: true }),
+      });
+      failTransactionalAudit = true;
+      expect((await PATCH(request(), { params: Promise.resolve({ id: "hotel-a" }) })).status).toBe(500);
+      expect(db.hotels.get("hotel-a").status).toBe("ACTIVE");
+      expect(db.subscriptions.get("hotel-a").status).toBe("TRIALING");
+      expect(db.auditLogs).toHaveLength(0);
+      failTransactionalAudit = false;
+      expect((await PATCH(request(), { params: Promise.resolve({ id: "hotel-a" }) })).status).toBe(200);
+      expect(db.hotels.get("hotel-a").status).toBe("SUSPENDED");
+      expect(db.subscriptions.get("hotel-a").status).toBe("SUSPENDED");
+      expect(db.auditLogs.at(-1).action).toBe("PLATFORM_SUBSCRIPTION_STATUS_CHANGED");
     });
 
     it("allows extending a trial with valid reason and updates trial expiration", async () => {
@@ -1401,6 +1447,7 @@ describe("Phase 7: SaaS Subscription Foundation and Plan Enforcement", () => {
         createdAt: new Date(),
       });
       db.subscriptions.set("hotel-e", {
+        updatedAt: new Date("2026-01-01T00:00:00Z"),
         id: "sub-e",
         hotelId: "hotel-e",
         planId: "ENTERPRISE",
@@ -1421,6 +1468,8 @@ describe("Phase 7: SaaS Subscription Foundation and Plan Enforcement", () => {
       expect(res.status).toBe(200);
 
       const json = await res.json();
+      expect(json.subscriptions.find((item: any) => item.hotelId === "hotel-e").subscription).toMatchObject({ currency: "USD", amountExact: "3600" });
+      expect(json.subscriptions.find((item: any) => item.hotelId === "hotel-b").subscription).toMatchObject({ currency: "KES", amountExact: "9500" });
 
       // KES MRR should still be exactly 9,500 (Hotel B)
       expect(json.summary.mrrByCurrency.KES).toBe(9500);
