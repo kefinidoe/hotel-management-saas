@@ -188,6 +188,7 @@ function resetDB(): DBState {
 
 vi.doMock("@/lib/prisma", () => ({
   prisma: {
+    hotel: { findUnique: async ({ where }: any) => where.id === "hotel-a" ? { id: "hotel-a", status: "ACTIVE" } : null },
     user: {
       findUnique: async ({ where }: any) => {
         if (where?.id) return db.users.get(where.id) || null;

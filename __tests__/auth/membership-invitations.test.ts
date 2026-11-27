@@ -92,6 +92,7 @@ let prismaMock: any;
 
 function buildPrisma() {
   const client: any = {
+    hotel: { findUnique: async ({ where }: any) => hotels.get(where.id) ?? null },
     user: {
       findFirst: async ({ where }: any) => {
         const wanted = where.email?.equals?.toLowerCase?.() ?? where.email;

@@ -16,7 +16,7 @@ export async function activateManualSubscription(
   now = new Date(),
 ) {
   return prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('subscription-manual-payment'))`;
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('subscription-manual-payment'))::text AS locked`;
     const duplicate = await tx.$queryRaw<Array<{ duplicate: boolean }>>`
       SELECT EXISTS (
         SELECT 1 FROM "AuditLog" WHERE "entity" = 'Subscription'
