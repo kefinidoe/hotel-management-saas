@@ -3,6 +3,8 @@ import { getPlatformAdminFromRoute } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 import { HotelStatus, PlatformRole } from "@prisma/client";
 import { z } from "zod";
+import { subscriptionStatusForHotel } from "@/lib/platform-lifecycle";
+import { evaluateSubscriptionStatus } from "@/lib/entitlements";
 
 export const dynamic = "force-dynamic";
 
@@ -60,72 +62,46 @@ export async function PATCH(
   }
 
   try {
-    const hotel = await prisma.hotel.findUnique({
-      where: { id: idResult.data },
-      select: { id: true, name: true, slug: true, status: true },
+    const outcome = await prisma.$transaction(async (tx) => {
+      // All platform lifecycle writers take the hotel row lock first.
+      await tx.$queryRaw`SELECT id FROM "Hotel" WHERE id = ${idResult.data} FOR UPDATE`;
+      const hotel = await tx.hotel.findUnique({
+        where: { id: idResult.data },
+        select: { id: true, name: true, slug: true, status: true },
+      });
+      if (!hotel) return { error: "NOT_FOUND", message: "Hotel not found", status: 404 } as const;
+      const subscription = await tx.subscription.findUnique({ where: { hotelId: hotel.id } });
+      if (!subscription) return { error: "SUBSCRIPTION_MISSING", message: "A subscription must exist before changing hotel lifecycle status.", status: 409 } as const;
+      const desiredSubStatus = subscriptionStatusForHotel(targetStatus, subscription.status);
+      try { evaluateSubscriptionStatus({ status: desiredSubStatus, trialEndsAt: subscription.trialEndsAt, currentPeriodEndsAt: subscription.currentPeriodEndsAt }); }
+      catch { return { error: "INVALID_SUBSCRIPTION_DATES", message: "Required subscription dates are missing or invalid.", status: 409 } as const; }
+      if (hotel.status === targetStatus && subscription.status === desiredSubStatus) {
+        return { error: "ALREADY_IN_STATUS", message: `Hotel is already in status '${targetStatus}'.`, status: 400 } as const;
+      }
+      if ((hotel.status === HotelStatus.CANCELLED || subscription.status === "CANCELLED") &&
+          targetStatus !== HotelStatus.CANCELLED && admin.platformRole !== PlatformRole.PLATFORM_SUPER_ADMIN) {
+        return { error: "FORBIDDEN", message: "Only Platform Super Administrators can reactivate a cancelled hotel.", status: 403 } as const;
+      }
+      const updatedHotel = await tx.hotel.update({
+        where: { id: hotel.id }, data: { status: targetStatus },
+        select: { id: true, name: true, slug: true, status: true, updatedAt: true },
+      });
+      await tx.subscription.update({ where: { hotelId: hotel.id }, data: {
+        status: desiredSubStatus,
+        ...(desiredSubStatus === "SUSPENDED" ? { suspendedAt: new Date(), suspensionReason: reason } : { suspendedAt: null, suspensionReason: null }),
+        ...(desiredSubStatus === "CANCELLED" ? { canceledAt: new Date() } : { canceledAt: null }),
+      } });
+      const auditLog = await tx.auditLog.create({ data: {
+        hotelId: hotel.id, userId: admin.userId, action: `HOTEL_STATUS_${targetStatus}`,
+        entity: "HOTEL", entityId: hotel.id,
+        metadata: { previousStatus: hotel.status, newStatus: targetStatus,
+          previousSubscriptionStatus: subscription.status, newSubscriptionStatus: desiredSubStatus,
+          reason: reason || "Administrative lifecycle update", platformRole: admin.platformRole },
+      } });
+      return { hotel, updatedHotel, auditLog } as const;
     });
-
-    if (!hotel) {
-      return NextResponse.json(
-        { error: "NOT_FOUND", message: "Hotel not found" },
-        { status: 404 }
-      );
-    }
-
-    if (hotel.status === targetStatus) {
-      return NextResponse.json(
-        {
-          error: "ALREADY_IN_STATUS",
-          message: `Hotel is already in status '${targetStatus}'.`,
-        },
-        { status: 400 }
-      );
-    }
-
-    // Reactivating a CANCELLED hotel requires PLATFORM_SUPER_ADMIN privileges
-    if (
-      hotel.status === HotelStatus.CANCELLED &&
-      targetStatus !== HotelStatus.CANCELLED &&
-      admin.platformRole !== PlatformRole.PLATFORM_SUPER_ADMIN
-    ) {
-      return NextResponse.json(
-        {
-          error: "FORBIDDEN",
-          message: "Only Platform Super Administrators can reactivate a cancelled hotel.",
-        },
-        { status: 403 }
-      );
-    }
-
-    // Execute status transition and create audit log record atomically
-    const [updatedHotel, auditLog] = await prisma.$transaction([
-      prisma.hotel.update({
-        where: { id: hotel.id },
-        data: { status: targetStatus },
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-          status: true,
-          updatedAt: true,
-        },
-      }),
-      prisma.auditLog.create({
-        data: {
-          hotelId: hotel.id,
-          userId: admin.userId,
-          action: `HOTEL_STATUS_${targetStatus}`,
-          entity: "HOTEL",
-          entityId: hotel.id,
-          metadata: {
-            previousStatus: hotel.status,
-            newStatus: targetStatus,
-            reason: reason || "Administrative lifecycle update",
-            platformRole: admin.platformRole,
-          },
-        },
-      }),
-    ]);
+    if ("error" in outcome) return NextResponse.json({ error: outcome.error, message: outcome.message }, { status: outcome.status });
+    const { hotel, updatedHotel, auditLog } = outcome;
 
     return NextResponse.json({
       success: true,

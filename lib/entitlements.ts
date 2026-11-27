@@ -204,18 +204,15 @@ export async function getOrBootstrapSubscription(hotelId: string): Promise<Hotel
     throw new SubscriptionStatusUnavailableError();
   }
 
+  let hotel: any;
+  try {
+    hotel = await prisma.hotel.findUnique({ where: { id: hotelId }, select: { id: true, status: true, createdAt: true, currency: true } });
+  } catch { throw new SubscriptionStatusUnavailableError("Hotel lifecycle status is unavailable."); }
+  if (!hotel) throw new SubscriptionStatusUnavailableError("Hotel not found.");
+
   if (!sub) {
-    let hotel: any;
     let activeRoomsCount: number;
     try {
-      if (typeof (prisma as any).hotel?.findUnique !== "function") {
-        throw new Error("Hotel storage unavailable");
-      }
-      hotel = await (prisma as any).hotel.findUnique({
-        where: { id: hotelId },
-        select: { id: true, status: true, createdAt: true, currency: true },
-      });
-      if (!hotel) throw new SubscriptionStatusUnavailableError("Hotel was not found while initializing its subscription.");
       if (typeof (prisma as any).room?.count !== "function") {
         throw new Error("Room count unavailable");
       }
@@ -277,11 +274,19 @@ export async function getOrBootstrapSubscription(hotelId: string): Promise<Hotel
   if (!sub || sub.hotelId !== hotelId || !knownPlan || !sub.id) {
     throw new SubscriptionStatusUnavailableError("Subscription record is incomplete or invalid.");
   }
-  const evaluation = evaluateSubscriptionStatus({
+  let evaluation = evaluateSubscriptionStatus({
     status: sub.status,
     trialEndsAt: sub.trialEndsAt,
     currentPeriodEndsAt: sub.currentPeriodEndsAt,
   });
+  // During legacy divergence, the more restrictive hotel lifecycle wins; never
+  // let a live subscription bypass a hotel suspension or cancellation.
+  if (hotel.status === HotelStatus.SUSPENDED || hotel.status === HotelStatus.CANCELLED) {
+    evaluation = { effectiveStatus: hotel.status, isOperational: false, isOverdue: false, daysRemaining: null };
+  } else if (hotel.status === HotelStatus.TRIALING && (sub.status === SubscriptionStatus.ACTIVE || sub.status === SubscriptionStatus.PAST_DUE)) {
+    const trial = evaluateSubscriptionStatus({ status: SubscriptionStatus.TRIALING, trialEndsAt: sub.trialEndsAt });
+    if (!trial.isOperational || (sub.status === SubscriptionStatus.ACTIVE && evaluation.isOperational)) evaluation = trial;
+  }
   const trialStartsAt = sub.trialStartsAt ? new Date(sub.trialStartsAt) : null;
   const currentPeriodStartsAt = sub.currentPeriodStartsAt ? new Date(sub.currentPeriodStartsAt) : null;
   if (!trialStartsAt || !currentPeriodStartsAt || !Number.isFinite(trialStartsAt.getTime()) || !Number.isFinite(currentPeriodStartsAt.getTime())) {

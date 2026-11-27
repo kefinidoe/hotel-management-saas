@@ -4,6 +4,7 @@ import { calculateManualPaymentPeriod, type ManualSubscriptionPayment } from "@/
 
 export class ManualPaymentConflictError extends Error {}
 export class ManualSubscriptionNotFoundError extends Error {}
+export class ManualActivationForbiddenError extends Error {}
 
 /** All manual activations share an advisory lock. The companion unique index is
  * also required to protect against other database writers. Never treat entry of
@@ -15,7 +16,7 @@ export async function activateManualSubscription(
   now = new Date(),
 ) {
   return prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('subscription-manual-payment'))`;
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('subscription-manual-payment'))::text AS locked`;
     const duplicate = await tx.$queryRaw<Array<{ duplicate: boolean }>>`
       SELECT EXISTS (
         SELECT 1 FROM "AuditLog" WHERE "entity" = 'Subscription'
@@ -31,9 +32,14 @@ export async function activateManualSubscription(
     `;
     if (duplicate[0]?.duplicate !== false) throw new ManualPaymentConflictError("Payment reference has already been used, or could not be verified.");
 
+    await tx.$queryRaw`SELECT id FROM "Hotel" WHERE id = ${hotelId} FOR UPDATE`;
+    const hotel = await tx.hotel.findUnique({ where: { id: hotelId }, select: { status: true } });
     await tx.$queryRaw`SELECT "id" FROM "Subscription" WHERE "hotelId" = ${hotelId} FOR UPDATE`;
     const current = await tx.subscription.findUnique({ where: { hotelId } });
-    if (!current) throw new ManualSubscriptionNotFoundError("Subscription not found.");
+    if (!hotel || !current) throw new ManualSubscriptionNotFoundError("Subscription not found.");
+    if ((hotel.status === "CANCELLED" || current.status === "CANCELLED") && admin.platformRole !== "PLATFORM_SUPER_ADMIN") {
+      throw new ManualActivationForbiddenError("Only Platform Super Administrators can reactivate a cancelled hotel.");
+    }
     const metadata = current.metadata;
     if (metadata !== null && (typeof metadata !== "object" || Array.isArray(metadata))) throw new Error("Invalid subscription metadata.");
     const data = (metadata ?? {}) as Prisma.JsonObject;
@@ -44,8 +50,9 @@ export async function activateManualSubscription(
       durationDays: payment.durationDays, reason: payment.reason, adminUserId: admin.userId,
       adminRole: admin.platformRole, recordedAt: now.toISOString(),
       periodStartsAt: period.currentPeriodStartsAt.toISOString(), periodEndsAt: period.currentPeriodEndsAt.toISOString(),
-      method: "MANUAL_COOP_MPESA",
+      method: "MANUAL_COOP_MPESA", previousHotelStatus: hotel.status, previousSubscriptionStatus: current.status,
     };
+    await tx.hotel.update({ where: { id: hotelId }, data: { status: "ACTIVE" } });
     const updated = await tx.subscription.update({
       where: { hotelId },
       data: {

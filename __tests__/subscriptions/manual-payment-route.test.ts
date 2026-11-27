@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 
 const state = vi.hoisted(() => ({
-  admin: vi.fn(), transaction: vi.fn(), query: vi.fn(), find: vi.fn(), update: vi.fn(), audit: vi.fn(),
+  admin: vi.fn(), transaction: vi.fn(), query: vi.fn(), find: vi.fn(), update: vi.fn(), audit: vi.fn(), hotelFind: vi.fn(), hotelUpdate: vi.fn(),
 }));
 vi.mock("@/lib/authz", () => ({ getPlatformAdminFromRoute: state.admin }));
 vi.mock("@/lib/prisma", () => ({ prisma: { $transaction: state.transaction } }));
@@ -20,13 +20,16 @@ beforeEach(() => {
   state.find.mockResolvedValue({ id: "sub-a", hotelId: "hotel-a", status: "ACTIVE", currency: "KES", currentPeriodStartsAt: new Date("2026-01-01Z"), currentPeriodEndsAt: new Date("2099-01-01Z"), metadata: { payments: [] } });
   state.update.mockImplementation(async ({ data }) => ({ id: "sub-a", hotelId: "hotel-a", ...data }));
   state.audit.mockResolvedValue({ id: "audit-1" });
-  state.transaction.mockImplementation(async (callback) => callback({ $queryRaw: state.query, subscription: { findUnique: state.find, update: state.update }, auditLog: { create: state.audit } }));
+  state.hotelFind.mockResolvedValue({ status: "ACTIVE" });
+  state.hotelUpdate.mockResolvedValue({ status: "ACTIVE" });
+  state.transaction.mockImplementation(async (callback) => callback({ $queryRaw: state.query, hotel: { findUnique: state.hotelFind, update: state.hotelUpdate }, subscription: { findUnique: state.find, update: state.update }, auditLog: { create: state.audit } }));
 });
 
 describe("manual payment subscription action", () => {
   it("normalizes the reference, extends a prepaid period and records audit data", async () => {
     const response = await PATCH(request(input), params);
     expect(response.status).toBe(200);
+    expect(state.hotelUpdate).toHaveBeenCalledWith({ where: { id: "hotel-a" }, data: { status: "ACTIVE" } });
     expect(state.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
       status: "ACTIVE", suspendedAt: null, suspensionReason: null,
       currentPeriodStartsAt: new Date("2026-01-01Z"), currentPeriodEndsAt: new Date("2099-01-31Z"),
@@ -47,6 +50,15 @@ describe("manual payment subscription action", () => {
     expect(response.status).toBe(400);
     expect((await response.json()).issues.length).toBeGreaterThan(0);
     expect(state.transaction).not.toHaveBeenCalled();
+  });
+  it("prevents non-super-admin reactivation of a cancelled hotel", async () => {
+    state.admin.mockResolvedValue({ userId: "support", platformRole: "PLATFORM_SUPPORT" });
+    state.hotelFind.mockResolvedValue({ status: "CANCELLED" });
+    const response = await PATCH(request(input), params);
+    expect(response.status).toBe(403);
+    expect(state.hotelUpdate).not.toHaveBeenCalled();
+    expect(state.update).not.toHaveBeenCalled();
+    expect(state.audit).not.toHaveBeenCalled();
   });
   it("does not call the transaction for an unauthorized actor", async () => {
     state.admin.mockResolvedValue(NextResponse.json({ error: "FORBIDDEN" }, { status: 403 }));
