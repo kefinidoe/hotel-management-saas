@@ -1,8 +1,21 @@
 import { NextResponse } from "next/server";
 import { getBillingTenantFromRoute, requireRole } from "@/lib/authz";
+import { prisma } from "@/lib/prisma";
 import { ROLE_GROUPS } from "@/lib/permissions";
-import { getHotelUsageAndSubscription, SubscriptionStatusUnavailableError, PAST_DUE_GRACE_PERIOD_DAYS } from "@/lib/entitlements";
-import { ORDERED_ROOM_BANDS, PRICING_CONFIG, calculateBandPricing, normaliseBillingCurrency, BillingInterval } from "@/lib/plans";
+import {
+  getHotelUsageAndSubscription,
+  getSubscriptionLifecycleSummary,
+  SubscriptionStatusUnavailableError,
+  PAST_DUE_GRACE_PERIOD_DAYS,
+} from "@/lib/entitlements";
+import {
+  ORDERED_ROOM_BANDS,
+  PRICING_CONFIG,
+  calculateBandPricing,
+  normaliseBillingCurrency,
+  BillingInterval,
+} from "@/lib/plans";
+import { getBillingHistoryForHotel } from "@/lib/subscription-invoices";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +45,24 @@ export async function GET() {
       roomCount: details.breakdown.billableActiveRooms,
       billingInterval: BillingInterval.YEARLY,
       currency: billingCurrency,
+    });
+
+    const rawSub =
+      typeof (prisma as any).subscription?.findUnique === "function"
+        ? await prisma.subscription.findUnique({
+            where: { hotelId: tenant.hotelId },
+            select: { metadata: true },
+          })
+        : null;
+
+    const lifecycle = getSubscriptionLifecycleSummary(details.subscription);
+    const billingHistory = await getBillingHistoryForHotel(tenant.hotelId, {
+      id: details.subscription.id,
+      planId: details.subscription.planId,
+      planName: details.subscription.plan.name,
+      billingInterval: details.subscription.billingInterval,
+      currency: billingCurrency,
+      metadata: rawSub?.metadata ?? null,
     });
 
     return NextResponse.json({
@@ -64,6 +95,9 @@ export async function GET() {
         modules: details.subscription.plan.modules,
         limits: details.subscription.plan.limits,
       },
+      lifecycle,
+      billingHistory,
+      invoices: billingHistory,
       billableBreakdown: {
         totalConfiguredRooms: details.breakdown.totalConfiguredRooms,
         billableActiveRooms: details.breakdown.billableActiveRooms,

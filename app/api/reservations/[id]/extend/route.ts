@@ -4,7 +4,8 @@ import { reservationExtensionSchema } from "@/lib/reservation-extension-validati
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
-import { folioTotalsExact, roundMoney, stayNights } from "@/lib/billing";
+import Decimal from "decimal.js";
+import { folioTotalsExact, roundMoneyDecimal, stayNights } from "@/lib/billing";
 import { prisma } from "@/lib/prisma";
 import { formatDisplayDate } from "@/lib/dates";
 import { AuditPersistenceError, recordAudit } from "@/lib/audit";
@@ -194,25 +195,33 @@ export async function POST(
           amount: number;
         }> = [];
 
-        let additionalCharge = 0;
+        let additionalChargeDecimal = new Decimal(0);
         for (const reservationRoom of reservation.rooms) {
-          const unitPrice = Number(reservationRoom.rate);
-          if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+          let unitPriceDecimal: Decimal;
+          try {
+            unitPriceDecimal = new Decimal(String(reservationRoom.rate));
+          } catch {
             throw new ExtensionError(
               `The agreed rate for room ${reservationRoom.room.number} is invalid.`
             );
           }
-          const lineTotal = roundMoney(unitPrice * additionalNights);
-          additionalCharge = roundMoney(additionalCharge + lineTotal);
+          if (!unitPriceDecimal.isFinite() || unitPriceDecimal.isNegative()) {
+            throw new ExtensionError(
+              `The agreed rate for room ${reservationRoom.room.number} is invalid.`
+            );
+          }
+          const lineTotalDecimal = roundMoneyDecimal(unitPriceDecimal.mul(additionalNights));
+          additionalChargeDecimal = roundMoneyDecimal(additionalChargeDecimal.plus(lineTotalDecimal));
           rooms.push({
             roomId: reservationRoom.roomId,
             number: reservationRoom.room.number,
             roomTypeId: reservationRoom.room.roomTypeId,
-            nightlyRate: unitPrice,
+            nightlyRate: unitPriceDecimal.toNumber(),
             nights: additionalNights,
-            amount: lineTotal,
+            amount: lineTotalDecimal.toNumber(),
           });
         }
+        const additionalCharge = additionalChargeDecimal.toNumber();
 
         // Every charge line is created inside this transaction; if anything
         // below fails they vanish with it.
@@ -286,7 +295,7 @@ export async function POST(
           folio.items.map((item) => String(item.total)),
           folio.payments.map((payment) => String(payment.amount))
         );
-        const required = currentTotals.required.plus(String(additionalCharge));
+        const required = currentTotals.required.plus(additionalChargeDecimal);
 
         return {
           extensionId: extension.id,

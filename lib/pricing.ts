@@ -1,7 +1,8 @@
 /** Pure building block for the opt-in universal pricing model.
  * Existing hotel pricing remains authoritative until this model is integrated.
  */
-import { parseMoney } from "@/lib/billing";
+import Decimal from "decimal.js";
+import { parseMoneyDecimal, roundMoneyDecimal } from "@/lib/billing";
 
 export const UNIVERSAL_MEAL_PLANS = [
   "ROOM_ONLY", "BED_BREAKFAST", "HALF_BOARD", "FULL_BOARD", "ALL_INCLUSIVE",
@@ -42,15 +43,17 @@ export function calculateUniversalNightlyRate(input: {
   const meal = matches[0];
   if (meal && !meal.isActive) throw new Error("Meal plan is inactive.");
   if (input.overrideTariffRate != null) {
-    return parseMoney(input.overrideTariffRate, "Tariff rate");
+    return parseMoneyDecimal(input.overrideTariffRate, "Tariff rate").toNumber();
   }
-  // Work in integer cents to avoid floating-point drift and reject overflow.
-  const cents = (amount: number | string, label: string, allowZero = true) =>
-    Math.round(parseMoney(amount, label, { allowZero }) * 100);
-  const total = cents(input.baseRate, "Base rate", false) +
-    (input.adults - 1) * cents(input.extraAdultFee, "Extra adult fee") +
-    input.adults * cents(meal?.adultSurcharge ?? 0, "Adult meal surcharge") +
-    input.children * cents(meal?.childSurcharge ?? 0, "Child meal surcharge");
-  if (!Number.isSafeInteger(total)) throw new Error("Nightly rate is too large.");
-  return parseMoney(total / 100, "Nightly rate");
+  const baseRate = parseMoneyDecimal(input.baseRate, "Base rate");
+  const extraAdultFee = parseMoneyDecimal(input.extraAdultFee, "Extra adult fee", { allowZero: true });
+  const adultSurcharge = parseMoneyDecimal(meal?.adultSurcharge ?? 0, "Adult meal surcharge", { allowZero: true });
+  const childSurcharge = parseMoneyDecimal(meal?.childSurcharge ?? 0, "Child meal surcharge", { allowZero: true });
+
+  const total = baseRate
+    .plus(extraAdultFee.mul(input.adults - 1))
+    .plus(adultSurcharge.mul(input.adults))
+    .plus(childSurcharge.mul(input.children));
+
+  return parseMoneyDecimal(roundMoneyDecimal(total), "Nightly rate").toNumber();
 }

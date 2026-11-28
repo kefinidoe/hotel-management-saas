@@ -29,8 +29,24 @@ export async function getTenantFromRoute(access: "read" | "write" = "write"): Pr
     const tenant = await getTenantContext();
     const { getOrBootstrapSubscription } = await import("@/lib/entitlements");
     const sub = await getOrBootstrapSubscription(tenant.hotelId);
-    if (!sub.isOperational && (access === "write" || (sub.effectiveStatus !== "TRIAL_EXPIRED" && sub.effectiveStatus !== "PAST_DUE"))) {
-      const code = sub.effectiveStatus === "SUSPENDED" ? "SUBSCRIPTION_SUSPENDED" : sub.effectiveStatus === "PAST_DUE" ? "SUBSCRIPTION_PAST_DUE" : sub.effectiveStatus === "TRIAL_EXPIRED" ? "TRIAL_EXPIRED" : "SUBSCRIPTION_CANCELLED";
+    const readOnlyAllowed =
+      sub.effectiveStatus === "TRIAL_EXPIRED" ||
+      sub.effectiveStatus === "PAST_DUE" ||
+      sub.effectiveStatus === "RESTRICTED" ||
+      sub.effectiveStatus === "READ_ONLY";
+    if (!sub.isOperational && (access === "write" || !readOnlyAllowed)) {
+      const code =
+        sub.effectiveStatus === "SUSPENDED"
+          ? "SUBSCRIPTION_SUSPENDED"
+          : sub.effectiveStatus === "PAST_DUE"
+          ? "SUBSCRIPTION_PAST_DUE"
+          : sub.effectiveStatus === "RESTRICTED"
+          ? "SUBSCRIPTION_RESTRICTED"
+          : sub.effectiveStatus === "READ_ONLY"
+          ? "SUBSCRIPTION_READ_ONLY"
+          : sub.effectiveStatus === "TRIAL_EXPIRED"
+          ? "TRIAL_EXPIRED"
+          : "SUBSCRIPTION_CANCELLED";
       return NextResponse.json({ error: code, message: "Subscription access is restricted. Please visit billing." }, { status: 403 });
     }
     return tenant;
@@ -112,10 +128,11 @@ export {
   getOrBootstrapSubscription,
   evaluateSubscriptionStatus,
   getHotelUsageAndSubscription,
+  getSubscriptionLifecycleSummary,
 } from "@/lib/entitlements";
 export { getPlan, getAllPlans, isPlanAvailableForNewSub, SUBSCRIPTION_PLANS } from "@/lib/plans";
 export type { SaaSModule, SubscriptionPlan } from "@/lib/plans";
-export type { EvaluatedSubscriptionState, HotelSubscriptionContext } from "@/lib/entitlements";
+export type { EvaluatedSubscriptionState, HotelSubscriptionContext, SubscriptionLifecycleSummary } from "@/lib/entitlements";
 
 export async function requireModule(
   hotelId: string,

@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { BarChart3, FileSpreadsheet, FileText, RefreshCw } from "lucide-react";
+import Decimal from "decimal.js";
+import { roundMoneyDecimal } from "@/lib/billing";
 import {
   formatQty,
   STOCK_STATUS_BADGE_CLASS,
@@ -434,7 +436,13 @@ function StockCostGraph({
         <div key={item.name}>
           <div className="flex items-center justify-between gap-3 text-xs mb-1">
             <span className="text-text-secondary truncate">{item.name}</span>
-            <span className="font-medium shrink-0">{formatMoney(item.salesUsage + item.wastage)}</span>
+            <span className="font-medium shrink-0">
+              {formatMoney(
+                roundMoneyDecimal(
+                  new Decimal(String(item.salesUsage)).plus(String(item.wastage))
+                ).toNumber()
+              )}
+            </span>
           </div>
           <div className="h-3 rounded-full bg-[#F0EFEA] overflow-hidden flex">
             <div
@@ -523,13 +531,16 @@ export default function ReportsClient() {
 
   const stockValueByCategory = useMemo(() => {
     if (!data) return [];
-    const totals = new Map<string, number>();
+    const totals = new Map<string, Decimal>();
     for (const item of data.inventory.items) {
       if (!item.isActive) continue;
-      totals.set(item.category, (totals.get(item.category) ?? 0) + item.currentValue);
+      totals.set(
+        item.category,
+        (totals.get(item.category) ?? new Decimal(0)).plus(String(item.currentValue))
+      );
     }
     return [...totals.entries()]
-      .map(([category, value]) => ({ category, value }))
+      .map(([category, value]) => ({ category, value: roundMoneyDecimal(value).toNumber() }))
       .filter((item) => item.value > 0)
       .sort((a, b) => b.value - a.value);
   }, [data]);
@@ -538,7 +549,12 @@ export default function ReportsClient() {
     if (!data) return [];
     return data.inventory.items
       .filter((item) => item.usageCost > 0 || item.wastageCost > 0)
-      .sort((a, b) => b.usageCost + b.wastageCost - (a.usageCost + a.wastageCost))
+      .sort((a, b) =>
+        new Decimal(String(b.usageCost))
+          .plus(String(b.wastageCost))
+          .minus(new Decimal(String(a.usageCost)).plus(String(a.wastageCost)))
+          .toNumber()
+      )
       .slice(0, 10)
       .map((item) => ({
         name: item.name,

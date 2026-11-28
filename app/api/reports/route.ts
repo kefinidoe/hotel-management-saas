@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import Decimal from "decimal.js";
 import { prisma } from "@/lib/prisma";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
-import { accommodationRequired, folioTotalsExact, roundMoney, stayNights } from "@/lib/billing";
+import { accommodationRequiredExact, folioTotalsExact, roundMoneyDecimal, stayNights } from "@/lib/billing";
 import { getStockStatus } from "@/lib/inventory";
 import {
   getReportRange,
@@ -178,87 +178,89 @@ export async function GET(req: Request) {
   // Financial activity recorded inside the selected date range.
   const billed = folioItems.map((item) => ({
     type: item.type,
-    total: roundMoney(Number(item._sum.total ?? 0)),
+    total: roundMoneyDecimal(String(item._sum.total ?? 0)).toNumber(),
   }));
-  const billedTotal = roundMoney(billed.reduce((sum, item) => sum + item.total, 0));
+  const billedTotal = roundMoneyDecimal(
+    folioItems.reduce((sum, item) => sum.plus(String(item._sum.total ?? 0)), new Decimal(0))
+  ).toNumber();
 
-  const collectedByMethod = new Map<string, number>();
+  const collectedByMethod = new Map<string, Decimal>();
+  let collectedTotalDecimal = new Decimal(0);
   for (const payment of payments) {
     const method = payment.paymentMethod.name;
+    const amount = new Decimal(String(payment.amount));
     collectedByMethod.set(
       method,
-      (collectedByMethod.get(method) ?? 0) + Number(payment.amount)
+      (collectedByMethod.get(method) ?? new Decimal(0)).plus(amount)
     );
+    collectedTotalDecimal = collectedTotalDecimal.plus(amount);
   }
   const collected = [...collectedByMethod.entries()]
-    .map(([method, total]) => ({ method, total: roundMoney(total) }))
+    .map(([method, total]) => ({ method, total: roundMoneyDecimal(total).toNumber() }))
     .sort((a, b) => b.total - a.total);
-  const collectedTotal = roundMoney(
-    payments.reduce((sum, payment) => sum + Number(payment.amount), 0)
-  );
+  const collectedTotal = roundMoneyDecimal(collectedTotalDecimal).toNumber();
 
-  const expensesByCategory = new Map<string, number>();
+  const expensesByCategory = new Map<string, Decimal>();
+  let expensesTotalDecimal = new Decimal(0);
   for (const expense of expenses) {
+    const amount = new Decimal(String(expense.amount));
     expensesByCategory.set(
       expense.category,
-      (expensesByCategory.get(expense.category) ?? 0) + Number(expense.amount)
+      (expensesByCategory.get(expense.category) ?? new Decimal(0)).plus(amount)
     );
+    expensesTotalDecimal = expensesTotalDecimal.plus(amount);
   }
   const expensesBreakdown = [...expensesByCategory.entries()]
-    .map(([category, total]) => ({ category, total: roundMoney(total) }))
+    .map(([category, total]) => ({ category, total: roundMoneyDecimal(total).toNumber() }))
     .sort((a, b) => b.total - a.total);
-  const expensesTotal = roundMoney(
-    expenses.reduce((sum, expense) => sum + Number(expense.amount), 0)
-  );
+  const expensesTotal = roundMoneyDecimal(expensesTotalDecimal).toNumber();
 
   // Booking history is selected by stay overlap, but each row shows the
   // complete financial history of that booking, not just charges posted in
   // the selected date range.
   const bookingHistory = reservations.map((reservation) => {
-    const chargeTotals = new Map<string, number>();
-    let amountPaid = 0;
+    const chargeTotals = new Map<string, Decimal>();
+    let amountPaid = new Decimal(0);
 
     for (const folio of reservation.folios) {
       for (const item of folio.items) {
         chargeTotals.set(
           item.type,
-          (chargeTotals.get(item.type) ?? 0) + Number(item.total)
+          (chargeTotals.get(item.type) ?? new Decimal(0)).plus(String(item.total))
         );
       }
-      amountPaid += folio.payments.reduce(
-        (sum, payment) => sum + Number(payment.amount),
-        0
-      );
+      for (const payment of folio.payments) {
+        amountPaid = amountPaid.plus(String(payment.amount));
+      }
     }
 
-    const roomCharges = chargeTotals.get("ROOM_CHARGE") ?? 0;
-    const discounts = chargeTotals.get("DISCOUNT") ?? 0;
-    const accommodationSpent = roomCharges + discounts;
-    const restaurantSpent = chargeTotals.get("RESTAURANT") ?? 0;
-    const otherSpent =
-      (chargeTotals.get("LAUNDRY") ?? 0) +
-      (chargeTotals.get("OTHER_SERVICE") ?? 0) +
-      (chargeTotals.get("TAX") ?? 0);
+    const roomCharges = chargeTotals.get("ROOM_CHARGE") ?? new Decimal(0);
+    const discounts = chargeTotals.get("DISCOUNT") ?? new Decimal(0);
+    const accommodationSpent = roomCharges.plus(discounts);
+    const restaurantSpent = chargeTotals.get("RESTAURANT") ?? new Decimal(0);
+    const otherSpent = (chargeTotals.get("LAUNDRY") ?? new Decimal(0))
+      .plus(chargeTotals.get("OTHER_SERVICE") ?? new Decimal(0))
+      .plus(chargeTotals.get("TAX") ?? new Decimal(0));
     const totalBilled = [...chargeTotals.values()].reduce(
-      (sum, total) => sum + total,
-      0
+      (sum, total) => sum.plus(total),
+      new Decimal(0)
     );
 
-    let rawAccommodation = 0;
+    let rawAccommodation = new Decimal(0);
     try {
-      rawAccommodation = accommodationRequired(
-        reservation.rooms.map((room) => Number(room.rate)),
+      rawAccommodation = accommodationRequiredExact(
+        reservation.rooms.map((room) => String(room.rate)),
         stayNights(reservation.checkInDate, reservation.checkOutDate),
-        Number(reservation.discount ?? 0)
+        String(reservation.discount ?? 0)
       );
     } catch {
       // Preserve the history row even if old data is incomplete.
-      rawAccommodation = 0;
+      rawAccommodation = new Decimal(0);
     }
 
     const isCancelled = reservation.status === "CANCELLED";
-    const bookedAccommodation = isCancelled ? 0 : rawAccommodation;
-    const cancelledAccommodation = isCancelled ? rawAccommodation : 0;
+    const bookedAccommodation = isCancelled ? new Decimal(0) : rawAccommodation;
+    const cancelledAccommodation = isCancelled ? rawAccommodation : new Decimal(0);
 
     return {
       id: reservation.id,
@@ -272,21 +274,28 @@ export async function GET(req: Request) {
       adults: reservation.adults,
       children: reservation.children,
       rooms: reservation.rooms.map((room) => {
-        const matched = allTariffs.find((t) => Number(t.baseRate) === Number(room.rate));
+        const matched = allTariffs.find((t) =>
+          new Decimal(String(t.baseRate)).eq(String(room.rate))
+        );
         return {
           number: room.room.number,
           roomType: matched ? matched.name : room.room.roomType.name,
           nightlyRate: Number(room.rate),
         };
       }),
-      bookedAccommodation: roundMoney(bookedAccommodation),
-      cancelledAccommodation: roundMoney(cancelledAccommodation),
-      accommodationSpent: roundMoney(accommodationSpent),
-      restaurantSpent: roundMoney(restaurantSpent),
-      otherSpent: roundMoney(otherSpent),
-      totalBilled: roundMoney(totalBilled),
-      amountPaid: roundMoney(amountPaid),
-      balance: folioTotalsExact(reservation.folios.flatMap(f => f.items.map(i => String(i.total))), reservation.folios.flatMap(f => f.payments.map(p => String(p.amount)))).balance.toNumber(),
+      bookedAccommodation: roundMoneyDecimal(bookedAccommodation).toNumber(),
+      cancelledAccommodation: roundMoneyDecimal(cancelledAccommodation).toNumber(),
+      accommodationSpent: roundMoneyDecimal(accommodationSpent).toNumber(),
+      restaurantSpent: roundMoneyDecimal(restaurantSpent).toNumber(),
+      otherSpent: roundMoneyDecimal(otherSpent).toNumber(),
+      totalBilled: roundMoneyDecimal(totalBilled).toNumber(),
+      amountPaid: roundMoneyDecimal(amountPaid).toNumber(),
+      balance: roundMoneyDecimal(
+        folioTotalsExact(
+          reservation.folios.flatMap((f) => f.items.map((i) => String(i.total))),
+          reservation.folios.flatMap((f) => f.payments.map((p) => String(p.amount)))
+        ).balance
+      ).toNumber(),
       folioCount: reservation.folios.length,
       foliosClosed:
         reservation.folios.length > 0 &&
@@ -303,20 +312,36 @@ export async function GET(req: Request) {
   const bookingSummary = {
     totalBookings: bookingHistory.length,
     statusCounts: bookingStatusCounts,
-    bookedAccommodation: roundMoney(
-      bookingHistory.reduce((sum, booking) => sum + booking.bookedAccommodation, 0)
-    ),
-    cancelledAccommodation: roundMoney(
-      bookingHistory.reduce((sum, booking) => sum + booking.cancelledAccommodation, 0)
-    ),
-    totalBilled: roundMoney(
-      bookingHistory.reduce((sum, booking) => sum + booking.totalBilled, 0)
-    ),
-    amountPaid: roundMoney(
-      bookingHistory.reduce((sum, booking) => sum + booking.amountPaid, 0)
-    ),
-    balanceDue: bookingHistory.reduce((sum, booking) => sum.plus(Decimal.max(0, String(booking.balance))), new Decimal(0)).toNumber(),
-    creditBalance: bookingHistory.reduce((sum, booking) => sum.plus(Decimal.max(0, new Decimal(String(booking.balance)).negated())), new Decimal(0)).toNumber(),
+    bookedAccommodation: roundMoneyDecimal(
+      bookingHistory.reduce(
+        (sum, booking) => sum.plus(String(booking.bookedAccommodation)),
+        new Decimal(0)
+      )
+    ).toNumber(),
+    cancelledAccommodation: roundMoneyDecimal(
+      bookingHistory.reduce(
+        (sum, booking) => sum.plus(String(booking.cancelledAccommodation)),
+        new Decimal(0)
+      )
+    ).toNumber(),
+    totalBilled: roundMoneyDecimal(
+      bookingHistory.reduce((sum, booking) => sum.plus(String(booking.totalBilled)), new Decimal(0))
+    ).toNumber(),
+    amountPaid: roundMoneyDecimal(
+      bookingHistory.reduce((sum, booking) => sum.plus(String(booking.amountPaid)), new Decimal(0))
+    ).toNumber(),
+    balanceDue: roundMoneyDecimal(
+      bookingHistory.reduce(
+        (sum, booking) => sum.plus(Decimal.max(0, String(booking.balance))),
+        new Decimal(0)
+      )
+    ).toNumber(),
+    creditBalance: roundMoneyDecimal(
+      bookingHistory.reduce(
+        (sum, booking) => sum.plus(Decimal.max(0, new Decimal(String(booking.balance)).negated())),
+        new Decimal(0)
+      )
+    ).toNumber(),
   };
 
   // A restaurant folio item is created only after a POS transaction succeeds.
@@ -338,73 +363,77 @@ export async function GET(req: Request) {
     folioClosed: item.folio.isClosed,
   }));
 
-  const restaurantByDay = new Map<string, number>();
+  const restaurantByDay = new Map<string, Decimal>();
   const restaurantByItem = new Map<
     string,
-    { itemName: string; quantity: number; revenue: number }
+    { itemName: string; quantity: number; revenue: Decimal }
   >();
-  let payNowRevenue = 0;
-  let roomChargeRevenue = 0;
+  let payNowRevenue = new Decimal(0);
+  let roomChargeRevenue = new Decimal(0);
+  let restaurantRevenueDecimal = new Decimal(0);
 
-  for (const sale of restaurantSales) {
-    const day = reportDateKey(new Date(sale.createdAt));
-    restaurantByDay.set(day, (restaurantByDay.get(day) ?? 0) + sale.total);
+  for (const item of restaurantItems) {
+    const itemName = restaurantItemName(item.description);
+    const channel = item.folio.reservationId ? "ROOM_CHARGE" : "PAY_NOW";
+    const lineTotal = new Decimal(String(item.total));
+    const day = reportDateKey(item.createdAt);
+    restaurantByDay.set(day, (restaurantByDay.get(day) ?? new Decimal(0)).plus(lineTotal));
 
-    const current = restaurantByItem.get(sale.itemName) ?? {
-      itemName: sale.itemName,
+    const current = restaurantByItem.get(itemName) ?? {
+      itemName,
       quantity: 0,
-      revenue: 0,
+      revenue: new Decimal(0),
     };
-    current.quantity += sale.quantity;
-    current.revenue += sale.total;
-    restaurantByItem.set(sale.itemName, current);
+    current.quantity += item.quantity;
+    current.revenue = current.revenue.plus(lineTotal);
+    restaurantByItem.set(itemName, current);
 
-    if (sale.channel === "PAY_NOW") payNowRevenue += sale.total;
-    else roomChargeRevenue += sale.total;
+    restaurantRevenueDecimal = restaurantRevenueDecimal.plus(lineTotal);
+    if (channel === "PAY_NOW") payNowRevenue = payNowRevenue.plus(lineTotal);
+    else roomChargeRevenue = roomChargeRevenue.plus(lineTotal);
   }
 
-  const restaurantRevenue = roundMoney(
-    restaurantSales.reduce((sum, sale) => sum + sale.total, 0)
-  );
   const restaurant = {
     summary: {
-      revenue: restaurantRevenue,
+      revenue: roundMoneyDecimal(restaurantRevenueDecimal).toNumber(),
       itemsSold: restaurantSales.reduce((sum, sale) => sum + sale.quantity, 0),
       saleLines: restaurantSales.length,
-      payNowRevenue: roundMoney(payNowRevenue),
-      roomChargeRevenue: roundMoney(roomChargeRevenue),
+      payNowRevenue: roundMoneyDecimal(payNowRevenue).toNumber(),
+      roomChargeRevenue: roundMoneyDecimal(roomChargeRevenue).toNumber(),
     },
     revenueByDay: [...restaurantByDay.entries()]
-      .map(([date, revenue]) => ({ date, revenue: roundMoney(revenue) }))
+      .map(([date, revenue]) => ({ date, revenue: roundMoneyDecimal(revenue).toNumber() }))
       .sort((a, b) => a.date.localeCompare(b.date)),
     topItems: [...restaurantByItem.values()]
-      .map((item) => ({ ...item, revenue: roundMoney(item.revenue) }))
+      .map((item) => ({ ...item, revenue: roundMoneyDecimal(item.revenue).toNumber() }))
       .sort((a, b) => b.revenue - a.revenue),
     sales: restaurantSales,
   };
 
   const stock = inventoryItems.map((item) => {
-    let usedInSales = 0;
-    let wastage = 0;
-    let adjustmentAdded = 0;
-    let adjustmentRemoved = 0;
+    let usedInSales = new Decimal(0);
+    let wastage = new Decimal(0);
+    let adjustmentAdded = new Decimal(0);
+    let adjustmentRemoved = new Decimal(0);
 
     for (const movement of item.stockMovements) {
-      const quantity = Number(movement.quantity);
-      if (movement.type === "MEAL_SALE" && quantity < 0) {
-        usedInSales += Math.abs(quantity);
-      } else if (movement.type === "WASTAGE" && quantity < 0) {
-        wastage += Math.abs(quantity);
-      } else if (movement.type === "ADJUSTMENT" && quantity >= 0) {
-        adjustmentAdded += quantity;
+      const quantity = new Decimal(String(movement.quantity));
+      if (movement.type === "MEAL_SALE" && quantity.lt(0)) {
+        usedInSales = usedInSales.plus(quantity.abs());
+      } else if (movement.type === "WASTAGE" && quantity.lt(0)) {
+        wastage = wastage.plus(quantity.abs());
+      } else if (movement.type === "ADJUSTMENT" && quantity.gte(0)) {
+        adjustmentAdded = adjustmentAdded.plus(quantity);
       } else if (movement.type === "ADJUSTMENT") {
-        adjustmentRemoved += Math.abs(quantity);
+        adjustmentRemoved = adjustmentRemoved.plus(quantity.abs());
       }
     }
 
-    const currentStock = Number(item.currentStock);
+    const currentStockDecimal = new Decimal(String(item.currentStock));
+    const costPerUnitDecimal = new Decimal(String(item.costPerUnit));
+    const currentStock = currentStockDecimal.toNumber();
     const reorderLevel = Number(item.reorderLevel);
-    const costPerUnit = Number(item.costPerUnit);
+    const costPerUnit = costPerUnitDecimal.toNumber();
 
     return {
       id: item.id,
@@ -415,15 +444,15 @@ export async function GET(req: Request) {
       isActive: item.isActive,
       currentStock,
       reorderLevel,
-      status: getStockStatus(currentStock, reorderLevel),
-      usedInSales: roundMoney(usedInSales),
-      wastage: roundMoney(wastage),
-      adjustmentAdded: roundMoney(adjustmentAdded),
-      adjustmentRemoved: roundMoney(adjustmentRemoved),
+      status: getStockStatus(String(item.currentStock), String(item.reorderLevel)),
+      usedInSales: roundMoneyDecimal(usedInSales).toNumber(),
+      wastage: roundMoneyDecimal(wastage).toNumber(),
+      adjustmentAdded: roundMoneyDecimal(adjustmentAdded).toNumber(),
+      adjustmentRemoved: roundMoneyDecimal(adjustmentRemoved).toNumber(),
       costPerUnit,
-      currentValue: roundMoney(currentStock * costPerUnit),
-      usageCost: roundMoney(usedInSales * costPerUnit),
-      wastageCost: roundMoney(wastage * costPerUnit),
+      currentValue: roundMoneyDecimal(currentStockDecimal.mul(costPerUnitDecimal)).toNumber(),
+      usageCost: roundMoneyDecimal(usedInSales.mul(costPerUnitDecimal)).toNumber(),
+      wastageCost: roundMoneyDecimal(wastage.mul(costPerUnitDecimal)).toNumber(),
     };
   });
 
@@ -436,17 +465,17 @@ export async function GET(req: Request) {
       outOfStockItems: stock.filter(
         (item) => item.isActive && item.status === "OUT_OF_STOCK"
       ).length,
-      currentStockValue: roundMoney(
+      currentStockValue: roundMoneyDecimal(
         stock
           .filter((item) => item.isActive)
-          .reduce((sum, item) => sum + item.currentValue, 0)
-      ),
-      usageCost: roundMoney(
-        stock.reduce((sum, item) => sum + item.usageCost, 0)
-      ),
-      wastageCost: roundMoney(
-        stock.reduce((sum, item) => sum + item.wastageCost, 0)
-      ),
+          .reduce((sum, item) => sum.plus(String(item.currentValue)), new Decimal(0))
+      ).toNumber(),
+      usageCost: roundMoneyDecimal(
+        stock.reduce((sum, item) => sum.plus(String(item.usageCost)), new Decimal(0))
+      ).toNumber(),
+      wastageCost: roundMoneyDecimal(
+        stock.reduce((sum, item) => sum.plus(String(item.wastageCost)), new Decimal(0))
+      ).toNumber(),
     },
     items: stock,
   };
@@ -466,7 +495,7 @@ export async function GET(req: Request) {
     collectedTotal,
     expensesBreakdown,
     expensesTotal,
-    netCashFlow: roundMoney(collectedTotal - expensesTotal),
+    netCashFlow: roundMoneyDecimal(collectedTotalDecimal.minus(expensesTotalDecimal)).toNumber(),
     bookingSummary,
     bookingHistory,
     restaurant,

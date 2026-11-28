@@ -92,11 +92,25 @@ export default function PlatformClient() {
 
   // Manage Subscription Modal state
   const [managingSubHotel, setManagingSubHotel] = useState<any | null>(null);
-  const [subAction, setSubAction] = useState<"CHANGE_PLAN" | "EXTEND_TRIAL" | "CHANGE_STATUS" | "ADJUST_BILLING">("CHANGE_PLAN");
-  const [targetPlanId, setTargetPlanId] = useState("GROWTH");
+  const [subAction, setSubAction] = useState<
+    | "CHANGE_PLAN"
+    | "EXTEND_TRIAL"
+    | "CHANGE_STATUS"
+    | "ADJUST_BILLING"
+    | "ACTIVATE_MANUAL_PAYMENT"
+    | "ISSUE_INVOICE"
+  >("CHANGE_PLAN");
+  const [targetPlanId, setTargetPlanId] = useState("BAND_1_10");
   const [extendDays, setExtendDays] = useState(14);
   const [targetSubStatus, setTargetSubStatus] = useState("ACTIVE");
   const [targetBillingInterval, setTargetBillingInterval] = useState("MONTHLY");
+  const [manualRefCode, setManualRefCode] = useState("");
+  const [manualAmountPaid, setManualAmountPaid] = useState("");
+  const [manualDurationDays, setManualDurationDays] = useState(30);
+  const [invoiceAmount, setInvoiceAmount] = useState("");
+  const [invoiceDueDays, setInvoiceDueDays] = useState(7);
+  const [hotelInvoices, setHotelInvoices] = useState<any[]>([]);
+  const [loadingHotelInvoices, setLoadingHotelInvoices] = useState(false);
   const [subReason, setSubReason] = useState("");
   const [subConfirmed, setSubConfirmed] = useState(false);
   const [submittingSub, setSubmittingSub] = useState(false);
@@ -190,6 +204,52 @@ export default function PlatformClient() {
     }
   }, [tab, loadSubscriptions]);
 
+  const loadHotelSubscriptionDetails = useCallback(async (hotelId: string) => {
+    try {
+      setLoadingHotelInvoices(true);
+      const res = await fetch(`/api/platform/hotels/${hotelId}/subscription`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setHotelInvoices(Array.isArray(data.invoices) ? data.invoices : []);
+    } catch {
+      setHotelInvoices([]);
+    } finally {
+      setLoadingHotelInvoices(false);
+    }
+  }, []);
+
+  const handleVoidInvoice = async (invoiceId: string, invoiceNumber: string) => {
+    if (!managingSubHotel) return;
+    const reasonText =
+      subReason.trim().length >= 5
+        ? subReason.trim()
+        : `Administrative void of invoice ${invoiceNumber}`;
+    try {
+      setSubmittingSub(true);
+      setSubError(null);
+      const res = await fetch(`/api/platform/hotels/${managingSubHotel.hotelId}/subscription`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "MARK_INVOICE_VOID",
+          invoiceId,
+          reason: reasonText,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || data.error || "Failed to void invoice");
+      }
+      setSuccessToast(`Invoice ${invoiceNumber} voided for ${managingSubHotel.hotelName}.`);
+      await loadHotelSubscriptionDetails(managingSubHotel.hotelId);
+      setTimeout(() => setSuccessToast(null), 4000);
+    } catch (err: any) {
+      setSubError(err.message || "Failed to void invoice.");
+    } finally {
+      setSubmittingSub(false);
+    }
+  };
+
   // Handle subscription update submit
   const handleUpdateSubscription = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -201,13 +261,33 @@ export default function PlatformClient() {
       const payload: any = {
         action: subAction,
         reason: subReason.trim(),
-        confirmed: subConfirmed,
       };
 
       if (subAction === "CHANGE_PLAN") payload.planId = targetPlanId;
       else if (subAction === "EXTEND_TRIAL") payload.extendDays = extendDays;
-      else if (subAction === "CHANGE_STATUS") payload.newStatus = targetSubStatus;
-      else if (subAction === "ADJUST_BILLING") payload.billingInterval = targetBillingInterval;
+      else if (subAction === "CHANGE_STATUS") {
+        payload.newStatus = targetSubStatus;
+        payload.confirmed = subConfirmed;
+      } else if (subAction === "ADJUST_BILLING") {
+        payload.billingInterval = targetBillingInterval;
+      } else if (subAction === "ACTIVATE_MANUAL_PAYMENT") {
+        const parsedAmount = Number(manualAmountPaid);
+        if (!manualRefCode.trim() || !Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+          throw new Error("Enter a valid payment reference code and positive amount paid.");
+        }
+        payload.referenceCode = manualRefCode.trim();
+        payload.amountPaid = parsedAmount;
+        payload.durationDays = Number(manualDurationDays) || 30;
+      } else if (subAction === "ISSUE_INVOICE") {
+        if (invoiceAmount.trim()) {
+          const parsedInvoiceAmount = Number(invoiceAmount);
+          if (!Number.isFinite(parsedInvoiceAmount) || parsedInvoiceAmount < 0) {
+            throw new Error("Invoice amount must be zero or positive.");
+          }
+          payload.amount = parsedInvoiceAmount;
+        }
+        payload.dueDays = Number(invoiceDueDays) || 7;
+      }
 
       const res = await fetch(`/api/platform/hotels/${managingSubHotel.hotelId}/subscription`, {
         method: "PATCH",
@@ -220,7 +300,13 @@ export default function PlatformClient() {
         throw new Error(data.message || data.error || "Failed to update subscription");
       }
 
-      setSuccessToast(`Subscription updated successfully for ${managingSubHotel.hotelName}.`);
+      setSuccessToast(
+        subAction === "ACTIVATE_MANUAL_PAYMENT"
+          ? `Manual payment recorded (${data.invoiceNumber || "receipt created"}) for ${managingSubHotel.hotelName}.`
+          : subAction === "ISSUE_INVOICE"
+          ? `Invoice ${data.invoice?.invoiceNumber || ""} issued for ${managingSubHotel.hotelName}.`
+          : `Subscription updated successfully for ${managingSubHotel.hotelName}.`
+      );
       setManagingSubHotel(null);
       loadSubscriptions();
       loadOverview();
@@ -340,29 +426,85 @@ export default function PlatformClient() {
 
   const getPlanBadge = (planId: string) => {
     switch (planId?.toUpperCase()) {
+      case "BAND_1_10":
+        return (
+          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-800 border border-slate-200">
+            1–10 Rooms
+          </span>
+        );
+      case "BAND_11_25":
+        return (
+          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-sky-100 text-sky-800 border border-sky-200">
+            11–25 Rooms
+          </span>
+        );
+      case "BAND_26_50":
+        return (
+          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-100 text-indigo-800 border border-indigo-200">
+            26–50 Rooms
+          </span>
+        );
+      case "BAND_51_100":
+        return (
+          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-violet-100 text-violet-800 border border-violet-200">
+            51–100 Rooms
+          </span>
+        );
+      case "BAND_101_200":
+        return (
+          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-fuchsia-100 text-fuchsia-800 border border-fuchsia-200">
+            101–200 Rooms
+          </span>
+        );
+      case "BAND_201_PLUS":
       case "ENTERPRISE":
         return (
           <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-purple-100 text-purple-800 border border-purple-200">
-            Enterprise
+            {planId?.toUpperCase() === "BAND_201_PLUS" ? "201+ Enterprise" : "Enterprise"}
           </span>
         );
       case "GROWTH":
         return (
           <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-100 text-indigo-800 border border-indigo-200">
-            Growth
+            Growth (Legacy)
+          </span>
+        );
+      case "LEGACY_BASIC":
+        return (
+          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-stone-100 text-stone-800 border border-stone-200">
+            Legacy Basic
           </span>
         );
       case "STARTER":
+        return (
+          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-800 border border-slate-200">
+            Starter (Legacy)
+          </span>
+        );
       default:
         return (
           <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-800 border border-slate-200">
-            Starter
+            {planId || "Unassigned"}
           </span>
         );
     }
   };
 
   const getSubStatusBadge = (effectiveStatus: string, isOverdue: boolean) => {
+    if (effectiveStatus === "RESTRICTED") {
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-orange-100 text-orange-800 border border-orange-200">
+          <AlertTriangle size={12} /> Restricted
+        </span>
+      );
+    }
+    if (effectiveStatus === "READ_ONLY") {
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-900 border border-amber-300">
+          <AlertTriangle size={12} /> Read-Only
+        </span>
+      );
+    }
     if (isOverdue || effectiveStatus === "PAST_DUE" || effectiveStatus === "TRIAL_EXPIRED") {
       return (
         <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-rose-100 text-rose-800 border border-rose-200">
@@ -850,12 +992,12 @@ export default function PlatformClient() {
 
             <div className="bg-surface border border-amber-200 rounded-card p-4 shadow-sm bg-amber-50/20">
               <span className="text-xs font-medium text-amber-800 uppercase tracking-wider">
-                Expiring Soon
+                Restricted / Read-Only
               </span>
               <p className="text-2xl font-bold text-amber-700 mt-1">
-                {subSummary ? subSummary.expiringSoonCount : "..."}
+                {subSummary ? (subSummary.restrictedCount ?? 0) + (subSummary.readOnlyCount ?? 0) : "..."}
               </p>
-              <span className="text-[11px] text-amber-600">&le; 7 days left</span>
+              <span className="text-[11px] text-amber-600">Escalated overdue</span>
             </div>
 
             <div className="bg-surface border border-rose-200 rounded-card p-4 shadow-sm bg-rose-50/20">
@@ -879,6 +1021,38 @@ export default function PlatformClient() {
             </div>
           </div>
 
+          {subSummary && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-surface border border-border rounded-card p-4 shadow-sm">
+                <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">
+                  Normalized Paid MRR
+                </span>
+                <p className="text-sm font-mono font-bold text-text-primary mt-1">
+                  KES {(subSummary.mrrByCurrency?.KES ?? 0).toLocaleString()} &bull; USD ${(subSummary.mrrByCurrency?.USD ?? 0).toLocaleString()}
+                </p>
+                <span className="text-[11px] text-text-muted">Paid active tenants only (multi-currency discrete)</span>
+              </div>
+              <div className="bg-surface border border-border rounded-card p-4 shadow-sm">
+                <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">
+                  Paid ARR Run-Rate
+                </span>
+                <p className="text-sm font-mono font-bold text-text-primary mt-1">
+                  KES {(subSummary.arrByCurrency?.KES ?? 0).toLocaleString()} &bull; USD ${(subSummary.arrByCurrency?.USD ?? 0).toLocaleString()}
+                </p>
+                <span className="text-[11px] text-text-muted">Normalized annualized billing run-rate</span>
+              </div>
+              <div className="bg-surface border border-rose-200 rounded-card p-4 shadow-sm bg-rose-50/10">
+                <span className="text-xs font-semibold text-rose-800 uppercase tracking-wider">
+                  MRR At Risk (Past Due / Restricted)
+                </span>
+                <p className="text-sm font-mono font-bold text-rose-700 mt-1">
+                  KES {(subSummary.pastDueAtRiskByCurrency?.KES ?? 0).toLocaleString()} &bull; USD ${(subSummary.pastDueAtRiskByCurrency?.USD ?? 0).toLocaleString()}
+                </p>
+                <span className="text-[11px] text-rose-600">Expiring soon: {subSummary.expiringSoonCount ?? 0} trial(s)</span>
+              </div>
+            </div>
+          )}
+
           {/* Search & Filters */}
           <div className="bg-surface border border-border rounded-card p-4 shadow-sm flex flex-col sm:flex-row gap-3 items-center justify-between">
             <div className="flex-1 w-full sm:w-auto relative">
@@ -892,7 +1066,7 @@ export default function PlatformClient() {
               />
             </div>
 
-            <div className="flex items-center gap-2 w-full sm:w-auto">
+            <div className="flex items-center gap-2 w-full sm:w-auto flex-wrap">
               <div className="flex items-center gap-1.5 text-xs text-text-secondary">
                 <Filter size={14} />
                 <span>Status:</span>
@@ -907,6 +1081,8 @@ export default function PlatformClient() {
                 <option value="ACTIVE">Active</option>
                 <option value="PAST_DUE">Past Due</option>
                 <option value="TRIAL_EXPIRED">Trial Expired</option>
+                <option value="RESTRICTED">Restricted</option>
+                <option value="READ_ONLY">Read-Only</option>
                 <option value="SUSPENDED">Suspended</option>
                 <option value="CANCELLED">Cancelled</option>
               </select>
@@ -916,10 +1092,16 @@ export default function PlatformClient() {
                 onChange={(e) => setSubPlanFilter(e.target.value)}
                 className="text-xs rounded-control border border-border px-2.5 py-2 bg-surface text-text-primary focus:outline-none focus:ring-1 focus:ring-primary-500"
               >
-                <option value="ALL">All Plans</option>
-                <option value="STARTER">Starter Tier</option>
-                <option value="GROWTH">Growth Tier</option>
-                <option value="ENTERPRISE">Enterprise Tier</option>
+                <option value="ALL">All Room Bands &amp; Tiers</option>
+                <option value="BAND_1_10">Band 1: 1–10 Rooms</option>
+                <option value="BAND_11_25">Band 2: 11–25 Rooms</option>
+                <option value="BAND_26_50">Band 3: 26–50 Rooms</option>
+                <option value="BAND_51_100">Band 4: 51–100 Rooms</option>
+                <option value="BAND_101_200">Band 5: 101–200 Rooms</option>
+                <option value="BAND_201_PLUS">Band 6: 201+ Rooms</option>
+                <option value="STARTER">Starter (Legacy)</option>
+                <option value="GROWTH">Growth (Legacy)</option>
+                <option value="ENTERPRISE">Enterprise (Legacy)</option>
               </select>
 
               <button
@@ -1030,11 +1212,19 @@ export default function PlatformClient() {
                             onClick={() => {
                               setManagingSubHotel(sub);
                               setSubAction("CHANGE_PLAN");
-                              setTargetPlanId(sub.subscription.planId || "GROWTH");
+                              setTargetPlanId(sub.subscription.planId || "BAND_1_10");
                               setTargetSubStatus(sub.subscription.storedStatus || "ACTIVE");
+                              setTargetBillingInterval(sub.subscription.billingInterval || "MONTHLY");
+                              setManualRefCode("");
+                              setManualAmountPaid(sub.subscription.amount ? String(sub.subscription.amount) : "");
+                              setManualDurationDays(sub.subscription.billingInterval === "YEARLY" ? 365 : 30);
+                              setInvoiceAmount(sub.subscription.amount ? String(sub.subscription.amount) : "");
+                              setInvoiceDueDays(7);
+                              setHotelInvoices([]);
                               setSubReason("");
                               setSubConfirmed(false);
                               setSubError(null);
+                              loadHotelSubscriptionDetails(sub.hotelId);
                             }}
                             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-control border border-primary-300 text-primary-700 hover:bg-primary-50 transition-colors"
                           >
@@ -1324,14 +1514,14 @@ export default function PlatformClient() {
       {/* MANAGE SUBSCRIPTION MODAL */}
       {managingSubHotel && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-surface border border-border rounded-card max-w-lg w-full p-6 shadow-xl space-y-5 animate-fadeIn">
+          <div className="bg-surface border border-border rounded-card max-w-2xl w-full p-6 shadow-xl space-y-5 max-h-[90vh] overflow-y-auto animate-fadeIn">
             <div className="flex items-start justify-between border-b border-border pb-3">
               <div>
                 <h2 className="text-lg font-bold text-text-primary flex items-center gap-2">
-                  <CreditCard size={18} /> Manage Plan & Subscription
+                  <CreditCard size={18} /> Manage Plan, Billing &amp; Invoices
                 </h2>
                 <p className="text-xs text-text-secondary mt-0.5 font-mono">
-                  Hotel: {managingSubHotel.hotelName} (/{managingSubHotel.hotelSlug})
+                  Hotel: {managingSubHotel.hotelName} (/{managingSubHotel.hotelSlug}) &bull; Currency: {managingSubHotel.subscription.currency || managingSubHotel.currency || "KES"}
                 </p>
                 <p className="text-xs text-text-secondary mt-0.5">
                   Current price: {formatPlatformPrice(managingSubHotel.subscription.amountExact, managingSubHotel.subscription.currency, managingSubHotel.currency)} / {managingSubHotel.subscription.billingInterval.toLowerCase()}
@@ -1363,8 +1553,10 @@ export default function PlatformClient() {
                   className="w-full text-xs rounded-control border border-border p-2.5 bg-surface text-text-primary focus:outline-none focus:ring-1 focus:ring-primary-500 font-medium"
                 >
                   <option value="CHANGE_PLAN">Change Room Band (1–10, 11–25, 26–50, 51–100, 101–200, 201+)</option>
+                  <option value="ACTIVATE_MANUAL_PAYMENT">Verify &amp; Record Manual Payment (M-Pesa / Co-op Bank)</option>
+                  <option value="ISSUE_INVOICE">Issue Manual Subscription Invoice</option>
                   <option value="EXTEND_TRIAL">Extend Trial Period (+7, +14, +30 days)</option>
-                  <option value="CHANGE_STATUS">Override Subscription Status (Active, Suspended...)</option>
+                  <option value="CHANGE_STATUS">Override Subscription Status (Active, Restricted, Read-Only, Suspended...)</option>
                   <option value="ADJUST_BILLING">Adjust Billing Interval (Monthly / Yearly)</option>
                 </select>
               </div>
@@ -1399,6 +1591,84 @@ export default function PlatformClient() {
                 </div>
               )}
 
+              {subAction === "ACTIVATE_MANUAL_PAYMENT" && (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-text-primary mb-1">
+                      Payment Reference Code
+                    </label>
+                    <input
+                      type="text"
+                      value={manualRefCode}
+                      onChange={(e) => setManualRefCode(e.target.value)}
+                      placeholder="e.g. SJK89L2M1P"
+                      className="w-full text-xs rounded-control border border-border p-2.5 bg-surface font-mono uppercase"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-text-primary mb-1">
+                      Amount Paid ({managingSubHotel.subscription.currency || "KES"})
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      value={manualAmountPaid}
+                      onChange={(e) => setManualAmountPaid(e.target.value)}
+                      className="w-full text-xs rounded-control border border-border p-2.5 bg-surface font-mono"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-text-primary mb-1">
+                      Extension Duration (Days)
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={3650}
+                      value={manualDurationDays}
+                      onChange={(e) => setManualDurationDays(Number(e.target.value))}
+                      className="w-full text-xs rounded-control border border-border p-2.5 bg-surface font-mono"
+                      required
+                    />
+                  </div>
+                </div>
+              )}
+
+              {subAction === "ISSUE_INVOICE" && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-text-primary mb-1">
+                      Invoice Amount ({managingSubHotel.subscription.currency || "KES"})
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={invoiceAmount}
+                      onChange={(e) => setInvoiceAmount(e.target.value)}
+                      placeholder="Leave empty to use saved rate"
+                      className="w-full text-xs rounded-control border border-border p-2.5 bg-surface font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-text-primary mb-1">
+                      Due Window (Days)
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={365}
+                      value={invoiceDueDays}
+                      onChange={(e) => setInvoiceDueDays(Number(e.target.value))}
+                      className="w-full text-xs rounded-control border border-border p-2.5 bg-surface font-mono"
+                    />
+                  </div>
+                </div>
+              )}
+
               {subAction === "EXTEND_TRIAL" && (
                 <div>
                   <label className="block text-xs font-semibold text-text-primary mb-1">
@@ -1430,11 +1700,13 @@ export default function PlatformClient() {
                     onChange={(e) => setTargetSubStatus(e.target.value)}
                     className="w-full text-xs rounded-control border border-border p-2.5 bg-surface text-text-primary focus:outline-none focus:ring-1 focus:ring-primary-500 font-medium"
                   >
-                    <option value="ACTIVE">ACTIVE (Paid & operational)</option>
+                    <option value="ACTIVE">ACTIVE (Paid &amp; operational)</option>
                     <option value="TRIALING">TRIALING (In active evaluation)</option>
                     <option value="PAST_DUE">PAST_DUE (Overdue grace period)</option>
-                    <option value="SUSPENDED">SUSPENDED (Billing lock)</option>
-                    <option value="CANCELLED">CANCELLED (Terminated)</option>
+                    <option value="RESTRICTED">RESTRICTED (Writes blocked, reads/export open)</option>
+                    <option value="READ_ONLY">READ_ONLY (View &amp; export only)</option>
+                    <option value="SUSPENDED">SUSPENDED (Billing lock; export open)</option>
+                    <option value="CANCELLED">CANCELLED (Terminated; export open)</option>
                   </select>
                 </div>
               )}
@@ -1463,8 +1735,8 @@ export default function PlatformClient() {
                 <textarea
                   value={subReason}
                   onChange={(e) => setSubReason(e.target.value)}
-                  placeholder="e.g. Granted trial extension per customer success request, upgraded to Growth tier, offline invoice payment confirmed..."
-                  rows={3}
+                  placeholder="e.g. Verified M-Pesa Paybill deposit, issued renewal invoice, updated lifecycle tier..."
+                  rows={2}
                   className="w-full text-xs rounded-control border border-border p-2.5 focus:outline-none focus:ring-1 focus:ring-primary-500 bg-bg/50"
                   required
                 />
@@ -1473,21 +1745,22 @@ export default function PlatformClient() {
                 </span>
               </div>
 
-              {(targetSubStatus === "SUSPENDED" || targetSubStatus === "CANCELLED") && (
-                <div className="flex items-start gap-2 pt-1">
-                  <input
-                    type="checkbox"
-                    id="subConfirmCheckbox"
-                    checked={subConfirmed}
-                    onChange={(e) => setSubConfirmed(e.target.checked)}
-                    className="mt-0.5 rounded border-border text-primary-600 focus:ring-primary-500"
-                    required
-                  />
-                  <label htmlFor="subConfirmCheckbox" className="text-xs text-text-primary font-medium">
-                    I explicitly confirm setting this subscription to {targetSubStatus}.
-                  </label>
-                </div>
-              )}
+              {subAction === "CHANGE_STATUS" &&
+                (targetSubStatus === "SUSPENDED" || targetSubStatus === "CANCELLED") && (
+                  <div className="flex items-start gap-2 pt-1">
+                    <input
+                      type="checkbox"
+                      id="subConfirmCheckbox"
+                      checked={subConfirmed}
+                      onChange={(e) => setSubConfirmed(e.target.checked)}
+                      className="mt-0.5 rounded border-border text-primary-600 focus:ring-primary-500"
+                      required
+                    />
+                    <label htmlFor="subConfirmCheckbox" className="text-xs text-text-primary font-medium">
+                      I explicitly confirm setting this subscription to {targetSubStatus}.
+                    </label>
+                  </div>
+                )}
 
               <div className="flex items-center justify-end gap-3 pt-3 border-t border-border">
                 <button
@@ -1506,6 +1779,45 @@ export default function PlatformClient() {
                 </button>
               </div>
             </form>
+
+            {/* Recent Invoices & Receipts inside modal */}
+            <div className="pt-3 border-t border-border space-y-2">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-text-secondary flex items-center gap-1.5">
+                  <FileText size={14} /> Recent Invoices &amp; Receipts
+                </h3>
+                {loadingHotelInvoices && <span className="text-[11px] text-text-muted">Loading...</span>}
+              </div>
+              {hotelInvoices.length === 0 ? (
+                <p className="text-xs text-text-muted">No recorded invoices yet.</p>
+              ) : (
+                <div className="divide-y divide-border border border-border rounded-control max-h-44 overflow-y-auto text-xs">
+                  {hotelInvoices.map((inv: any) => (
+                    <div key={inv.id} className="p-2.5 flex items-center justify-between gap-2">
+                      <div>
+                        <span className="font-mono font-semibold text-text-primary">{inv.invoiceNumber}</span>
+                        <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-bold bg-bg border border-border">
+                          {inv.status}
+                        </span>
+                        <span className="block text-[11px] text-text-secondary">
+                          {inv.currency} {Number(inv.amount).toLocaleString()} &bull; {inv.paymentReference || "Unpaid"}
+                        </span>
+                      </div>
+                      {inv.source === "INVOICE" && (inv.status === "ISSUED" || inv.status === "PAST_DUE") && (
+                        <button
+                          type="button"
+                          onClick={() => handleVoidInvoice(inv.id, inv.invoiceNumber)}
+                          disabled={submittingSub}
+                          className="px-2 py-1 text-[11px] rounded border border-red-200 text-red-700 hover:bg-red-50 font-semibold"
+                        >
+                          Void
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}

@@ -1,15 +1,27 @@
 // Centralized SaaS Subscription Room Bands and Pricing Configuration
 // Single source of truth for room bands, configurable pricing schedules, and core platform entitlements.
+import Decimal from "decimal.js";
 
 export const SubscriptionStatus = {
   TRIALING: "TRIALING",
   ACTIVE: "ACTIVE",
   PAST_DUE: "PAST_DUE",
+  RESTRICTED: "RESTRICTED",
+  READ_ONLY: "READ_ONLY",
   SUSPENDED: "SUSPENDED",
   CANCELLED: "CANCELLED",
 } as const;
 
 export type SubscriptionStatus = (typeof SubscriptionStatus)[keyof typeof SubscriptionStatus];
+
+export const SubscriptionInvoiceStatus = {
+  ISSUED: "ISSUED",
+  PAID: "PAID",
+  PAST_DUE: "PAST_DUE",
+  VOID: "VOID",
+} as const;
+
+export type SubscriptionInvoiceStatus = (typeof SubscriptionInvoiceStatus)[keyof typeof SubscriptionInvoiceStatus];
 
 export const BillingInterval = {
   MONTHLY: "MONTHLY",
@@ -383,10 +395,11 @@ export function calculateBandPricing(params: {
   let savings = 0;
 
   if (billingInterval === BillingInterval.YEARLY) {
-    const fullYearCost = baseMonthlyPrice * 12;
+    const fullYearCost = new Decimal(baseMonthlyPrice).mul(12);
     calculatedPrice = isUSD ? band.yearlyPriceUSD : band.yearlyPriceKES;
-    monthlyEquivalent = Math.round((calculatedPrice / 12) * 100) / 100;
-    savings = fullYearCost - calculatedPrice;
+    const yearlyDecimal = new Decimal(calculatedPrice);
+    monthlyEquivalent = yearlyDecimal.div(12).toDecimalPlaces(2, Decimal.ROUND_HALF_UP).toNumber();
+    savings = fullYearCost.minus(yearlyDecimal).toDecimalPlaces(2, Decimal.ROUND_HALF_UP).toNumber();
   }
 
   return {

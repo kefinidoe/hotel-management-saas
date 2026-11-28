@@ -3,7 +3,8 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getTenantFromRoute, requireModule, requireRole, ROLE_GROUPS } from "@/lib/authz";
 import { AuditPersistenceError, recordAudit } from "@/lib/audit";
-import { roundMoney } from "@/lib/billing";
+import Decimal from "decimal.js";
+import { roundMoneyDecimal } from "@/lib/billing";
 import { loadPricingConfig } from "@/lib/pricing/config";
 import { pricingUnavailableResponse } from "@/lib/pricing/http";
 import { priceStay } from "@/lib/pricing/engine";
@@ -202,7 +203,18 @@ export async function POST(
           config.mealPlans.find((plan) => plan.name === current?.mealPlanName)?.id ||
           null;
 
-        const discount = Number(body.discount ?? reservation.discount ?? 0);
+        const rawDiscount = body.discount ?? reservation.discount ?? 0;
+        let discount: number | undefined;
+        if (rawDiscount !== null && rawDiscount !== undefined && rawDiscount !== "") {
+          try {
+            const parsedDiscount = new Decimal(String(rawDiscount).trim());
+            if (parsedDiscount.isFinite() && parsedDiscount.gt(0)) {
+              discount = parsedDiscount.toNumber();
+            }
+          } catch {
+            discount = undefined;
+          }
+        }
         const discountPercent =
           body.discountPercent === undefined || body.discountPercent === null || body.discountPercent === ""
             ? undefined
@@ -220,7 +232,7 @@ export async function POST(
             ? (body.childAges as unknown[]).map((age) => Number(age)).filter((age) => Number.isFinite(age))
             : undefined,
           extraBeds: Number(body.extraBeds ?? 0),
-          discount: Number.isFinite(discount) && discount > 0 ? discount : undefined,
+          discount,
           discountPercent,
         });
 
@@ -228,13 +240,17 @@ export async function POST(
           throw new RepriceError(priced.message, 400, priced.code);
         }
 
-        const nightlyRate = roundMoney((priced.totals.room + priced.totals.adjustments) / priced.nights);
+        const nightlyRate = roundMoneyDecimal(
+          new Decimal(String(priced.totals.room))
+            .plus(String(priced.totals.adjustments))
+            .div(priced.nights)
+        ).toNumber();
 
         // The previous version is the one read under the lock, so two managers
         // cannot both append version 2 and the unique (reservationId, version)
         // constraint is a second line of defence for direct writers.
         const version = nextPriceVersion(current);
-        const previousTotal = current ? Number(current.grandTotal) : null;
+        const previousTotal = current ? new Decimal(String(current.grandTotal)).toNumber() : null;
 
         await tx.reservationRoom.update({
           where: { id: reservation.rooms[0].id },

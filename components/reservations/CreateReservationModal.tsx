@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { X } from "lucide-react";
+import Decimal from "decimal.js";
+import { roundMoneyDecimal } from "@/lib/billing";
 import { ApiRequestError, apiErrorMessage, requestJson } from "@/lib/client-api";
 import { addDays, isoDay } from "@/lib/dates";
 import type { RoomStatus } from "@prisma/client";
@@ -362,8 +364,18 @@ export default function CreateReservationModal({
     }
   }
   const displayedRate = quotedRate ?? (custom ? customEstimate?.nightlyRate ?? null : modular ? modularEstimate : fallbackRate);
-  const estimateTotal = modular && modularEstimate !== null && nights
-    ? modularEstimate * nights - (canApplyDiscount ? Number(discount || 0) : 0) : null;
+  let estimateTotal: number | null = null;
+  if (modular && modularEstimate !== null && nights) {
+    try {
+      const discountVal =
+        canApplyDiscount && discount.trim() ? new Decimal(discount.trim()) : new Decimal(0);
+      estimateTotal = roundMoneyDecimal(
+        new Decimal(String(modularEstimate)).mul(nights).minus(discountVal)
+      ).toNumber();
+    } catch {
+      estimateTotal = Number.NaN;
+    }
+  }
 
   // Everything the button depends on, phrased so the person can act on it.
   const problems: string[] = [];

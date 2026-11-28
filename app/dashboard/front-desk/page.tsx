@@ -1,3 +1,4 @@
+import Decimal from "decimal.js";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import FrontDeskClient from "@/components/frontdesk/FrontDeskClient";
@@ -5,9 +6,9 @@ import { requirePageRole } from "@/lib/page-auth";
 import { ROLE_GROUPS } from "@/lib/permissions";
 import { isBookableToday } from "@/lib/room-status";
 import {
-  accommodationRequired,
-  folioTotals,
-  roundMoney,
+  accommodationRequiredExact,
+  folioTotalsExact,
+  roundMoneyDecimal,
   stayNights,
 } from "@/lib/billing";
 
@@ -55,22 +56,32 @@ function endOfToday() {
 function serializeReservation(reservation: FrontDeskReservation) {
   const openFolio = reservation.folios.find((folio) => !folio.isClosed);
   const snapshot = reservation.priceSnapshots?.[0];
-  const totals = openFolio
-    ? folioTotals(
+  const nights = stayNights(reservation.checkInDate, reservation.checkOutDate);
+  const exactTotals = openFolio
+    ? folioTotalsExact(
         openFolio.items.map((item) => String(item.total)),
         openFolio.payments.map((payment) => String(payment.amount))
       )
     : (() => {
-        const required = snapshot ? Number(snapshot.grandTotal) : accommodationRequired(
-          reservation.rooms.map((room) => Number(room.rate)),
-          stayNights(reservation.checkInDate, reservation.checkOutDate),
-          Number(reservation.discount ?? 0)
-        );
-        return { required, paid: 0, balance: required };
+        const required = snapshot
+          ? new Decimal(String(snapshot.grandTotal))
+          : accommodationRequiredExact(
+              reservation.rooms.map((room) => String(room.rate)),
+              nights,
+              String(reservation.discount ?? 0)
+            );
+        return { required, paid: new Decimal(0), balance: required };
       })();
+  const totals = {
+    required: exactTotals.required.toNumber(),
+    paid: exactTotals.paid.toNumber(),
+    balance: exactTotals.balance.toNumber(),
+  };
 
   const rawLines = snapshot?.breakdown && typeof snapshot.breakdown === "object" && !Array.isArray(snapshot.breakdown)
     ? snapshot.breakdown.lines : null;
+  const reservationDiscount = new Decimal(String(reservation.discount ?? 0));
+  const snapshotDiscount = new Decimal(String(snapshot?.discountTotal ?? 0));
   const pricingLines = openFolio
     ? openFolio.items.map((item) => ({ label: item.description, amount: Number(item.total) }))
     : Array.isArray(rawLines)
@@ -80,17 +91,17 @@ function serializeReservation(reservation: FrontDeskReservation) {
             return [{ label: line.label, amount: line.amount }];
           }),
           // Older custom/modular snapshots stored discountTotal but omitted its line.
-          ...(Number(snapshot?.discountTotal ?? 0) > 0 && !rawLines.some((line) =>
+          ...(snapshotDiscount.gt(0) && !rawLines.some((line) =>
             line && typeof line === "object" && !Array.isArray(line) && line.kind === "DISCOUNT"
-          ) ? [{ label: "Discount", amount: -Number(snapshot!.discountTotal) }] : []),
+          ) ? [{ label: "Discount", amount: snapshotDiscount.neg().toNumber() }] : []),
         ]
       : !snapshot
         ? [
             ...reservation.rooms.map((room) => ({
-              label: `Room ${room.room.number} — ${stayNights(reservation.checkInDate, reservation.checkOutDate)} night(s)`,
-              amount: roundMoney(Number(room.rate) * stayNights(reservation.checkInDate, reservation.checkOutDate)),
+              label: `Room ${room.room.number} — ${nights} night(s)`,
+              amount: roundMoneyDecimal(new Decimal(String(room.rate)).mul(nights)).toNumber(),
             })),
-            ...(Number(reservation.discount ?? 0) > 0 ? [{ label: "Discount", amount: -Number(reservation.discount) }] : []),
+            ...(reservationDiscount.gt(0) ? [{ label: "Discount", amount: reservationDiscount.neg().toNumber() }] : []),
           ]
         : [];
 
@@ -108,9 +119,9 @@ function serializeReservation(reservation: FrontDeskReservation) {
     requiredAmount: totals.required,
     paidAmount: totals.paid,
     balance: totals.balance,
-    nightlyRateTotal: roundMoney(
-      reservation.rooms.reduce((sum, room) => sum + Number(room.rate), 0)
-    ),
+    nightlyRateTotal: roundMoneyDecimal(
+      reservation.rooms.reduce((sum, room) => sum.plus(String(room.rate)), new Decimal(0))
+    ).toNumber(),
   };
 }
 

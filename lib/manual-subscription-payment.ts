@@ -1,11 +1,12 @@
 import { z } from "zod";
+import { hasMaxDecimalPlaces } from "@/lib/billing";
 
 /** Validates administrator-entered evidence; this does not verify a bank transfer. */
 export const manualSubscriptionPaymentSchema = z.strictObject({
   action: z.literal("ACTIVATE_MANUAL_PAYMENT"),
   referenceCode: z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9-]+$/, "Use letters, numbers, or hyphens for the payment reference.").transform((value) => value.toUpperCase()),
   amountPaid: z.number().finite().positive().max(99_999_999.99).refine(
-    (value) => Math.abs(value * 100 - Math.round(value * 100)) < 0.000001,
+    (value) => hasMaxDecimalPlaces(value, 2),
     "Amount must have at most two decimal places."
   ),
   durationDays: z.number().int().positive().max(365000).default(30),

@@ -3,12 +3,13 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { getTenantFromRoute, requireRole, ROLE_GROUPS, requireModule } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
+import Decimal from "decimal.js";
+import { roundMoneyDecimal } from "@/lib/billing";
 import {
-  cartTotal,
+  cartTotalExact,
   computeChargeToRoomFingerprint,
   readCartRequest,
   resolveCartLines,
-  round2,
 } from "@/lib/restaurant";
 import { deductRecipeStock } from "@/lib/recipe-stock";
 import { syncLowStockAlerts } from "@/lib/notifications";
@@ -78,8 +79,14 @@ function asChargeToRoomResult(
     typeof order.folio.guest?.fullName !== "string"
   ) return null;
 
-  const total = Number(order.total);
-  if (!Number.isFinite(total)) return null;
+  let totalDecimal: Decimal;
+  try {
+    totalDecimal = new Decimal(String(order.total));
+  } catch {
+    return null;
+  }
+  if (!totalDecimal.isFinite()) return null;
+  const total = totalDecimal.toNumber();
 
   return {
     operation: "CHARGE_TO_ROOM",
@@ -256,13 +263,13 @@ export async function POST(req: Request) {
           if (folio.isClosed) throw new Error("That folio is already closed — take payment for this order instead.");
 
           const lines = await resolveCartLines(tx, requestedItems, hotelId);
-          const total = cartTotal(lines);
+          const total = cartTotalExact(lines);
           const order = await tx.order.create({
             data: {
               hotelId,
               status: "OPEN",
               folioId: folio.id,
-              total,
+              total: total.toFixed(2),
               idempotencyOperation: "CHARGE_TO_ROOM",
               idempotencyKey,
               requestFingerprint,
@@ -270,6 +277,9 @@ export async function POST(req: Request) {
           });
 
           for (const line of lines) {
+            const lineTotal = roundMoneyDecimal(
+              new Decimal(String(line.unitPrice)).mul(line.quantity)
+            ).toFixed(2);
             await tx.orderItem.create({
               data: {
                 orderId: order.id,
@@ -278,7 +288,7 @@ export async function POST(req: Request) {
                 name: line.name,
                 unitPrice: line.unitPrice,
                 quantity: line.quantity,
-                total: round2(line.quantity * line.unitPrice),
+                total: lineTotal,
               },
             });
             await tx.folioItem.create({
@@ -289,7 +299,7 @@ export async function POST(req: Request) {
                 quantity: line.quantity,
                 unitPrice: line.unitPrice,
                 taxRate: 0,
-                total: round2(line.quantity * line.unitPrice),
+                total: lineTotal,
               },
             });
           }
@@ -303,7 +313,7 @@ export async function POST(req: Request) {
             orderId: order.id,
             folioId: folio.id,
             guestName: folio.guest.fullName,
-            total,
+            total: total.toNumber(),
           };
         } catch (error) {
           // Throwing from the interactive transaction callback forces rollback;

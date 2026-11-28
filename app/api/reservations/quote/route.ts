@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import Decimal from "decimal.js";
 import { prisma } from "@/lib/prisma";
 import { getTenantFromRoute, requireModule, requireRole, ROLE_GROUPS } from "@/lib/authz";
 import { hasRole } from "@/lib/permissions";
@@ -53,7 +54,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Choose valid check-in and check-out dates." }, { status: 400 });
   }
 
-  const discount = Number(body.discount ?? 0);
+  let discount = 0;
+  if (body.discount !== undefined && body.discount !== null && body.discount !== "") {
+    try {
+      const parsedDiscount = new Decimal(String(body.discount).trim());
+      if (parsedDiscount.isFinite() && parsedDiscount.gt(0)) {
+        discount = parsedDiscount.toNumber();
+      }
+    } catch {
+      discount = Number.NaN;
+    }
+  }
   const discountPercent =
     body.discountPercent === undefined || body.discountPercent === null || body.discountPercent === ""
       ? undefined

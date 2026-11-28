@@ -1,4 +1,5 @@
-import { roundMoney } from "@/lib/billing";
+import Decimal from "decimal.js";
+import { roundMoneyDecimal } from "@/lib/billing";
 import type {
   HotelPricingConfig,
   NightPrice,
@@ -59,14 +60,14 @@ function adjustmentApplies(adjustment: RateAdjustmentConfig, date: Date, roomTyp
   return adjustment.daysOfWeek.includes(dayKey(date));
 }
 
-function applyAdjustment(rate: number, adjustment: RateAdjustmentConfig): number {
+function applyAdjustment(rate: Decimal, adjustment: RateAdjustmentConfig): Decimal {
   switch (adjustment.adjustmentType) {
     case "PERCENT":
-      return roundMoney(rate * (1 + adjustment.amount / 100));
+      return roundMoneyDecimal(rate.mul(new Decimal(1).plus(new Decimal(adjustment.amount).div(100))));
     case "FIXED_PER_NIGHT":
-      return roundMoney(rate + adjustment.amount);
+      return roundMoneyDecimal(rate.plus(adjustment.amount));
     case "SET_RATE":
-      return roundMoney(adjustment.amount);
+      return roundMoneyDecimal(adjustment.amount);
     default:
       return rate;
   }
@@ -166,10 +167,11 @@ export function priceStay(config: HotelPricingConfig, request: PriceRequest): Pr
   }
 
   // --- per-night room pricing with seasonal / weekend adjustments ----------
+  const baseNightlyRate = new Decimal(nightlyRate);
   const perNight: NightPrice[] = [];
-  const adjustmentLines = new Map<string, { quantity: number; amount: number }>();
-  let roomTotal = 0;
-  let adjustmentsTotal = 0;
+  const adjustmentLines = new Map<string, { quantity: number; amount: Decimal }>();
+  let roomTotal = new Decimal(0);
+  let adjustmentsTotal = new Decimal(0);
 
   const activeAdjustments = config.adjustments
     .filter((adjustment) => adjustment.isActive)
@@ -180,28 +182,28 @@ export function priceStay(config: HotelPricingConfig, request: PriceRequest): Pr
 
   for (let index = 0; index < nights; index += 1) {
     const date = new Date(request.checkIn.getTime() + index * DAY_MS);
-    let rate = nightlyRate;
+    let rate = baseNightlyRate;
     const applied: string[] = [];
     for (const adjustment of activeAdjustments) {
       if (!adjustmentApplies(adjustment, date, roomType.id)) continue;
       const next = applyAdjustment(rate, adjustment);
-      const delta = roundMoney(next - rate);
-      if (delta !== 0) {
-        const existing = adjustmentLines.get(adjustment.id) ?? { quantity: 0, amount: 0 };
+      const delta = roundMoneyDecimal(next.minus(rate));
+      if (!delta.isZero()) {
+        const existing = adjustmentLines.get(adjustment.id) ?? { quantity: 0, amount: new Decimal(0) };
         adjustmentLines.set(adjustment.id, {
           quantity: existing.quantity + 1,
-          amount: roundMoney(existing.amount + delta),
+          amount: roundMoneyDecimal(existing.amount.plus(delta)),
         });
       }
       rate = next;
       applied.push(adjustment.name);
     }
-    roomTotal = roundMoney(roomTotal + nightlyRate);
-    adjustmentsTotal = roundMoney(adjustmentsTotal + (rate - nightlyRate));
+    roomTotal = roundMoneyDecimal(roomTotal.plus(baseNightlyRate));
+    adjustmentsTotal = roundMoneyDecimal(adjustmentsTotal.plus(rate.minus(baseNightlyRate)));
     perNight.push({
       date: utcDay(date),
       baseRate: nightlyRate,
-      rate: roundMoney(rate),
+      rate: roundMoneyDecimal(rate).toNumber(),
       adjustments: applied,
     });
   }
@@ -213,7 +215,7 @@ export function priceStay(config: HotelPricingConfig, request: PriceRequest): Pr
       label: `${roomType.name}${occupancy ? ` — ${occupancy.name}` : ""} × ${nights} night${nights === 1 ? "" : "s"}`,
       quantity: nights,
       unitPrice: nightlyRate,
-      amount: roomTotal,
+      amount: roomTotal.toNumber(),
     },
   ];
 
@@ -225,13 +227,13 @@ export function priceStay(config: HotelPricingConfig, request: PriceRequest): Pr
       code: `ADJUSTMENT:${adjustment.id}`,
       label: `${adjustment.name} (${entry.quantity} night${entry.quantity === 1 ? "" : "s"})`,
       quantity: entry.quantity,
-      unitPrice: roundMoney(entry.amount / entry.quantity),
-      amount: entry.amount,
+      unitPrice: roundMoneyDecimal(entry.amount.div(entry.quantity)).toNumber(),
+      amount: entry.amount.toNumber(),
     });
   }
 
   // --- meal plan ----------------------------------------------------------
-  let mealsTotal = 0;
+  let mealsTotal = new Decimal(0);
   let mealPlanName: string | null = null;
   let mealPlanBasis = null as (typeof config.mealPlans)[number]["pricingBasis"] | null;
 
@@ -261,24 +263,25 @@ export function priceStay(config: HotelPricingConfig, request: PriceRequest): Pr
     }
 
     const persons = adults + children;
+    const mealCharge = new Decimal(mealPlan.charge);
     switch (mealPlan.pricingBasis) {
       case "PER_PERSON_PER_NIGHT":
-        mealsTotal = roundMoney(mealPlan.charge * persons * nights);
+        mealsTotal = roundMoneyDecimal(mealCharge.mul(persons).mul(nights));
         break;
       case "PER_ROOM_PER_NIGHT":
-        mealsTotal = roundMoney(mealPlan.charge * nights);
+        mealsTotal = roundMoneyDecimal(mealCharge.mul(nights));
         break;
       case "PER_PERSON_PER_STAY":
-        mealsTotal = roundMoney(mealPlan.charge * persons);
+        mealsTotal = roundMoneyDecimal(mealCharge.mul(persons));
         break;
       case "PER_ROOM_PER_STAY":
-        mealsTotal = roundMoney(mealPlan.charge);
+        mealsTotal = roundMoneyDecimal(mealCharge);
         break;
     }
     mealPlanName = mealPlan.name;
     mealPlanBasis = mealPlan.pricingBasis;
 
-    if (mealsTotal !== 0) {
+    if (!mealsTotal.isZero()) {
       const quantity =
         mealPlan.pricingBasis === "PER_PERSON_PER_NIGHT"
           ? persons * nights
@@ -293,13 +296,13 @@ export function priceStay(config: HotelPricingConfig, request: PriceRequest): Pr
         label: `${mealPlan.name}`,
         quantity,
         unitPrice: mealPlan.charge,
-        amount: mealsTotal,
+        amount: mealsTotal.toNumber(),
       });
     }
   }
 
   // --- extras: extra beds and children ------------------------------------
-  let extrasTotal = 0;
+  let extrasTotal = new Decimal(0);
 
   if (extraBeds > 0) {
     if (!settings.useExtraBeds) {
@@ -317,15 +320,15 @@ export function priceStay(config: HotelPricingConfig, request: PriceRequest): Pr
         `${rule.name} allows at most ${rule.maxPerRoom} extra bed(s) per room.`
       );
     }
-    const amount = roundMoney(rule.nightlyRate * extraBeds * nights);
-    extrasTotal = roundMoney(extrasTotal + amount);
+    const amount = roundMoneyDecimal(new Decimal(rule.nightlyRate).mul(extraBeds).mul(nights));
+    extrasTotal = roundMoneyDecimal(extrasTotal.plus(amount));
     lines.push({
       kind: "EXTRA_BED",
       code: "EXTRA_BED",
       label: `${rule.name} × ${extraBeds} × ${nights} night${nights === 1 ? "" : "s"}`,
       quantity: extraBeds * nights,
       unitPrice: rule.nightlyRate,
-      amount,
+      amount: amount.toNumber(),
     });
   }
 
@@ -364,90 +367,99 @@ export function priceStay(config: HotelPricingConfig, request: PriceRequest): Pr
       }
       const amount =
         rule.chargeType === "PERCENT_OF_ADULT"
-          ? roundMoney(nightlyRate * (rule.amount / 100) * nights)
-          : roundMoney(rule.amount * nights);
-      if (amount === 0) continue;
-      extrasTotal = roundMoney(extrasTotal + amount);
+          ? roundMoneyDecimal(baseNightlyRate.mul(new Decimal(rule.amount).div(100)).mul(nights))
+          : roundMoneyDecimal(new Decimal(rule.amount).mul(nights));
+      if (amount.isZero()) continue;
+      extrasTotal = roundMoneyDecimal(extrasTotal.plus(amount));
       lines.push({
         kind: "CHILD",
         code: `CHILD:${rule.id}`,
         label: `${rule.name} (age ${age}) × ${nights} night${nights === 1 ? "" : "s"}`,
         quantity: nights,
-        unitPrice: rule.chargeType === "PERCENT_OF_ADULT" ? roundMoney(amount / nights) : rule.amount,
-        amount,
+        unitPrice:
+          rule.chargeType === "PERCENT_OF_ADULT"
+            ? roundMoneyDecimal(amount.div(nights)).toNumber()
+            : rule.amount,
+        amount: amount.toNumber(),
       });
     }
   }
 
   // --- discount -----------------------------------------------------------
-  const subtotalBeforeDiscount = roundMoney(roomTotal + adjustmentsTotal + mealsTotal + extrasTotal);
-  let discountTotal = 0;
+  const subtotalBeforeDiscount = roundMoneyDecimal(
+    roomTotal.plus(adjustmentsTotal).plus(mealsTotal).plus(extrasTotal)
+  );
+  let discountTotal = new Decimal(0);
   if (request.discount !== undefined && request.discount !== null && request.discount !== 0) {
     if (!Number.isFinite(request.discount) || request.discount < 0) {
       return fail("INVALID_DISCOUNT", "The discount must be a positive amount.");
     }
-    discountTotal = roundMoney(request.discount);
+    discountTotal = roundMoneyDecimal(request.discount);
   } else {
     const percent = parseDiscountPercent(request.discountPercent);
     if (request.discountPercent !== undefined && request.discountPercent !== null && percent === null) {
       return fail("INVALID_DISCOUNT", "A percentage discount must be between 0 and 100.");
     }
-    if (percent) discountTotal = roundMoney(subtotalBeforeDiscount * (percent / 100));
+    if (percent) {
+      discountTotal = roundMoneyDecimal(subtotalBeforeDiscount.mul(new Decimal(percent).div(100)));
+    }
   }
-  if (discountTotal > subtotalBeforeDiscount) {
+  if (discountTotal.gt(subtotalBeforeDiscount)) {
     return fail("INVALID_DISCOUNT", "The discount cannot exceed the reservation charges.");
   }
-  if (discountTotal > 0) {
+  if (discountTotal.gt(0)) {
     lines.push({
       kind: "DISCOUNT",
       code: "DISCOUNT",
       label: "Discount",
       quantity: 1,
-      unitPrice: discountTotal,
-      amount: -discountTotal,
+      unitPrice: discountTotal.toNumber(),
+      amount: discountTotal.neg().toNumber(),
     });
   }
 
-  const netBeforeTax = roundMoney(subtotalBeforeDiscount - discountTotal);
+  const netBeforeTax = roundMoneyDecimal(subtotalBeforeDiscount.minus(discountTotal));
 
   // --- taxes and service charges -----------------------------------------
   // `taxReported` is what the guest can see on the bill (inclusive or not);
   // `taxAdded` is what the price does not yet contain.
-  let taxReported = 0;
-  let taxAdded = 0;
+  let taxReported = new Decimal(0);
+  let taxAdded = new Decimal(0);
   if (settings.useTaxes) {
     const taxes = config.taxes
       .filter((rule) => rule.isActive)
       .sort((left, right) => left.sortOrder - right.sortOrder);
+    const roomTaxBase = roundMoneyDecimal(roomTotal.plus(adjustmentsTotal));
     for (const rule of taxes) {
       const amount = taxAmount(rule, {
-        room: roundMoney(roomTotal + adjustmentsTotal),
+        room: roomTaxBase,
         meals: mealsTotal,
         net: netBeforeTax,
         nights,
         persons: adults + children,
       });
-      if (amount === 0) continue;
-      taxReported = roundMoney(taxReported + amount);
-      if (!rule.isInclusive) taxAdded = roundMoney(taxAdded + amount);
+      if (amount.isZero()) continue;
+      taxReported = roundMoneyDecimal(taxReported.plus(amount));
+      if (!rule.isInclusive) taxAdded = roundMoneyDecimal(taxAdded.plus(amount));
+      const amountNumber = amount.toNumber();
       lines.push({
         kind: "TAX",
         code: `TAX:${rule.id}`,
         label: `${rule.name}${rule.isInclusive ? " (included)" : ""}`,
         quantity: 1,
-        unitPrice: amount,
-        amount,
+        unitPrice: amountNumber,
+        amount: amountNumber,
       });
     }
   }
 
-  const grandTotal = roundMoney(netBeforeTax + taxAdded);
+  const grandTotal = roundMoneyDecimal(netBeforeTax.plus(taxAdded));
 
   // An inclusive-price hotel reports the tax portion without adding it again;
   // the line is present for transparency and the total already contains it.
-  const effectiveNightlyRate = roundMoney(
-    perNight.reduce((sum, night) => sum + night.rate, 0) / nights
-  );
+  const effectiveNightlyRate = roundMoneyDecimal(
+    perNight.reduce((sum, night) => sum.plus(night.rate), new Decimal(0)).div(nights)
+  ).toNumber();
 
   return {
     ok: true,
@@ -461,7 +473,7 @@ export function priceStay(config: HotelPricingConfig, request: PriceRequest): Pr
     mealPlanId: request.mealPlanId ?? null,
     mealPlanName,
     mealPlanBasis,
-    nightlyRate: roundMoney(nightlyRate),
+    nightlyRate: roundMoneyDecimal(baseNightlyRate).toNumber(),
     effectiveNightlyRate,
     adults,
     children,
@@ -469,15 +481,15 @@ export function priceStay(config: HotelPricingConfig, request: PriceRequest): Pr
     perNight,
     lines,
     totals: {
-      room: roomTotal,
-      adjustments: adjustmentsTotal,
-      meals: mealsTotal,
-      extras: extrasTotal,
-      subtotal: subtotalBeforeDiscount,
-      discount: discountTotal,
-      tax: taxReported,
-      grandTotal,
-      averagePerNight: roundMoney(grandTotal / nights),
+      room: roomTotal.toNumber(),
+      adjustments: adjustmentsTotal.toNumber(),
+      meals: mealsTotal.toNumber(),
+      extras: extrasTotal.toNumber(),
+      subtotal: subtotalBeforeDiscount.toNumber(),
+      discount: discountTotal.toNumber(),
+      tax: taxReported.toNumber(),
+      grandTotal: grandTotal.toNumber(),
+      averagePerNight: roundMoneyDecimal(grandTotal.div(nights)).toNumber(),
     },
     taxInclusive: settings.pricesIncludeTax,
   };
@@ -485,13 +497,13 @@ export function priceStay(config: HotelPricingConfig, request: PriceRequest): Pr
 
 function taxAmount(
   rule: TaxRuleConfig,
-  base: { room: number; meals: number; net: number; nights: number; persons: number }
-): number {
+  base: { room: Decimal; meals: Decimal; net: Decimal; nights: number; persons: number }
+): Decimal {
   const taxableBase =
     rule.appliesTo === "ROOM" ? base.room : rule.appliesTo === "MEALS" ? base.meals : base.net;
 
   if (rule.basis === "PERCENT") {
-    return roundMoney(taxableBase * (rule.amount / 100));
+    return roundMoneyDecimal(taxableBase.mul(new Decimal(rule.amount).div(100)));
   }
 
   const multiplier =
@@ -503,5 +515,5 @@ function taxAmount(
 
   // A fixed charge applies to the scope it names: a per-stay service charge is
   // charged once, not once per room or per tax line.
-  return roundMoney(rule.amount * multiplier);
+  return roundMoneyDecimal(new Decimal(rule.amount).mul(multiplier));
 }
